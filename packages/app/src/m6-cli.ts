@@ -1,41 +1,36 @@
-// M3 交互 CLI（人工验收入口，创作规划 §6.2 / §7-M3）：npc subagent 叙事循环 + StoryRuntime 编排器。
+// M6 交互 CLI（人工验收入口，创作规划 §10.1 三模式 + §8 决策记录「输入渠道校验判定」）：模式切换 + 输入校验叙事循环。
 //
-// 与 m2-cli 的关系：启动参数/命令/LineQueue/fork 重建全同，唯一差异是 createStoryRuntime 传入
-// `npc: { enabled: true }`（§6.2 在场预演 + 离线推演）并每轮打印 npc 阶段报告。
-// 目的：验收 §6.2 契约——在场 NPC 预演产物注入主叙事（隐藏批注），离线 NPC ≥5 轮未推演触发
-// 批量推演，delta 交 data 转写落库（npc 层永不直接写库），sys 簿记键随 data 成功推进。
+// 与 m5-cli 的关系：命令/LineQueue/fork 重建全同，差异是内核级模式连通——
+//   新故事经 createStory 传 mode（仅创建时有效）；runtime 模式解析（option → story.meta.json → creation）；
+//   `/mode` 查看/切换模式（catch 非法切换错）；`/plot` 创造模式专属（剧情大纲指令）；
+//   用户输入以 `/! ` 开头 → 去前缀 + force:true（输入渠道校验强制提交，留痕 warning）；
+//   catch InputRejectedError → 打印 reason/suggestion（叙事不产生）；`--resume` 从 meta 恢复 mode。
+// 目的：验收 §10.1 契约——三模式预设/切换规则/adventure 锁定/fork 继承模式；§8 输入渠道校验
+//   （生存/冒险拒非 user 输入、`/!` 强制提交、创造不校验、/plot 指令）。
+//
 // 接线（app 层只消费 core API）：
-//   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createStoryRuntime（§10.2 API 面 + npc 阶段）
-//     ├── 主叙事 AgentSession（零 DB 工具，before_agent_start 每轮注入 DB 摘要 + 预演批注）
-//     ├── npc 阶段（场景规划 → 在场预演 ×N 并行 + 离线批量推演 → 主叙事前完成）
-//     └── runDataStage（data subagent：submit_changeset 单输出工具 + 重试/补齐/事件流）
-//   eventLog = pipeline-events.jsonl（故事目录内）；settings = ~/.tavernpi/settings.json（§6.6）。
+//   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createStoryRuntime（§10.2 API 面 + mode + story/npc/stylize/data）
+// 全部 subagent 阶段默认全开——creation 下 story 开任意组合合法、survival 仅 stylize 可关、adventure 全开，
+//   全开组合在三种模式下均合法（build-time 校验不报错）。
 //
-// 关键决策（与 m2-cli 一致，详见 core pipeline/runtime.ts 文件头）：
-// - 快照绑定本轮 leaf（最终 assistant entry），与 turn_log 同一 id；
-// - data 成功才拍快照（§6.1：拍摄前提 = 落库成功），失败轮记 data_status.failed、下轮补齐；
-// - npc 阶段零消耗：不在场/未触发不调用 subagent；单 NPC 预演失败丢弃、离线批失败降级为 []。
-// - fork 流程：createBranchedSession → forkStoryDb → dispose 旧运行态 → 新故事目录重建
-//   StoryRuntime（settings/prompts/eventLog/npc 配置重新传入，新目录新 eventLog 文件）。
-//
-// 坑（同 m2-cli）：
-// - session.prompt 必须 await 完（isStreaming=false）才能 navigateTree（spike/05 实证）。
-// - 退出不删故事目录——人工验收要可重复进入（--resume 会话文件）。
-// - 恢复（restore）用新 StoryDb 实例替换旧连接；任何长期持有 storyDb 的闭包都会读到已关闭连接。
+// 坑（同 m4/m5-cli）：session.prompt 必须 await 完才能 navigateTree；退出不删故事目录。
 
-import { dirname, join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { Interface } from "node:readline";
 import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
-	buildFallbackSceneCard,
 	buildAncestorChain,
+	computeNextTurnSeq,
 	createPipelineEventLog,
+	createStory,
 	createStoryRuntime,
 	defaultGlobalPromptsDir,
 	defaultStoriesRoot,
 	forkStoryDb,
+	inheritStoryMeta,
 	loadSettings,
 	openSnapshotsDb,
 	openStoryDb,
@@ -43,25 +38,29 @@ import {
 	storyDbPath as coreStoryDbPath,
 	type PromptLayerDirs,
 	type SnapshotRestoreResult,
+	type StoryMetaFile,
+	type StoryMode,
 	type StoryRuntime,
 	type StoryState,
-	type SubagentResult,
-	type SubagentRunOptions,
-	type SubagentUsage,
+	type StylizeRuntimeOptions,
 	type TavernSettings,
 	type TurnResult,
 } from "@tavernpi/core";
+import { InputRejectedError } from "@tavernpi/core";
 
 // ---------------------------------------------------------------------------
-// 常量
+// 常量与参数
 // ---------------------------------------------------------------------------
 
 const repoRoot = resolve(import.meta.dirname, "../../..");
+const MODE_SET: readonly StoryMode[] = ["creation", "survival", "adventure"];
 
 interface CliArgs {
 	root?: string;
-	sessionDir?: string;
 	resume?: string;
+	pack: string[];
+	mode?: StoryMode;
+	style?: string;
 }
 
 interface CliCtx {
@@ -70,27 +69,26 @@ interface CliCtx {
 	settings: TavernSettings;
 	modelRuntime: ModelRuntime;
 	prompts: PromptLayerDirs;
+	/** 文风（--style；stylize 阶段全开，styleHint 供其使用）。 */
+	style?: string;
 }
 
-// ---------------------------------------------------------------------------
-// 文本/转录工具（沿 m2-cli）
-// ---------------------------------------------------------------------------
-
-const ZERO_USAGE: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, costTotal: 0 };
-
-/** 场景分析桩（§10.1 模式校验连带修复）：M3 只测 npc，但 creation 下 story 可关前提 = npc/stylize 均关。
- *  开 story 时用确定性桩替代场景分析 LLM（buildFallbackSceneCard），story_review 放行。 */
-function storyStubExecutor(storyState: StoryState): (opts: SubagentRunOptions) => Promise<SubagentResult<unknown>> {
-	return async (opts: SubagentRunOptions): Promise<SubagentResult<unknown>> => {
-		if (opts.role === "story_scene") {
-			return { output: buildFallbackSceneCard(storyState.storyDb), usage: ZERO_USAGE, durationMs: 1 };
-		}
-		if (opts.role === "story_review") {
-			return { output: { findings: [] }, usage: ZERO_USAGE, durationMs: 1 };
-		}
-		throw new Error(`m3-cli 场景桩不处理 story_oversee（m3 不触发）`);
+/** 全开 combo：story/npc 必开，stylize 全开（adventure 须全开；creation/survival 全开也合法）。 */
+function runtimeExtras(ctx: CliCtx): {
+	npc: { enabled: boolean };
+	story: { enabled: boolean };
+	stylize?: StylizeRuntimeOptions;
+} {
+	return {
+		npc: { enabled: true },
+		story: { enabled: true },
+		stylize: { enabled: true, ...(ctx.style ? { styleHint: ctx.style } : {}) },
 	};
 }
+
+// ---------------------------------------------------------------------------
+// 文本/转录工具（沿 m5-cli）
+// ---------------------------------------------------------------------------
 
 function messageText(message: { role: string; content?: unknown }): string {
 	if (Array.isArray(message.content)) {
@@ -125,8 +123,16 @@ function truncate(text: string, max: number): string {
 	return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+function readStoryMeta(storyDir: string): StoryMetaFile | undefined {
+	try {
+		return JSON.parse(readFileSync(join(storyDir, "story.meta.json"), "utf8")) as StoryMetaFile;
+	} catch {
+		return undefined;
+	}
+}
+
 // ---------------------------------------------------------------------------
-// CLI 命令
+// CLI 命令（沿 m5-cli，增 /mode /plot）
 // ---------------------------------------------------------------------------
 
 function printTree(sessionManager: SessionManager): void {
@@ -140,7 +146,7 @@ function printTree(sessionManager: SessionManager): void {
 	}
 }
 
-function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: StoryRuntime): void {
+function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: ReturnType<typeof createStoryRuntime> extends Promise<infer T> ? T : never): void {
 	const clock = runtime.storyState.storyDb.reader.getClock();
 	const events = runtime.storyState.storyDb.reader.listEvents();
 	if (result === undefined) {
@@ -155,7 +161,7 @@ function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: 
 	console.log(`> 当前 clock: ${clock?.current_time ?? "(未初始化)"}，events: ${events.length} 行`);
 }
 
-function printStatus(runtime: StoryRuntime): void {
+function printStatus(runtime: ReturnType<typeof createStoryRuntime> extends Promise<infer T> ? T : never): void {
 	const { sessionManager, storyState } = runtime;
 	const clock = storyState.storyDb.reader.getClock();
 	const events = storyState.storyDb.reader.listEvents();
@@ -167,6 +173,7 @@ function printStatus(runtime: StoryRuntime): void {
 	console.log(`sessionFile: ${sessionManager.getSessionFile()}`);
 	console.log(`leafId: ${sessionManager.getLeafId()}`);
 	console.log(`storyDir: ${storyState.storyDir}`);
+	console.log(`mode: ${runtime.mode}`);
 	console.log(`clock: ${clock ? `${clock.current_time}（${clock.calendar}/${clock.granularity}）` : "(未初始化)"}`);
 	console.log(
 		`events: ${events.length} 行 | turn_log: ${turns.length} 行 | snapshots: ${snaps.length} 份 | data_status: ${dataStatus.length} 行`,
@@ -177,17 +184,20 @@ function printHelp(): void {
 	console.log(
 		[
 			"可用命令：",
-			"  /tree              列出当前 branch 的消息条目（序号 + role + 摘要 + entry id 前 8 位）",
-			"  /tree <序号|entryId>  跳转到目标条目（user 目标 → 重做该轮，恢复其前一轮末状态；assistant 目标 → 该轮末状态），钩子自动恢复 DB",
-			"  /fork <序号|entryId>  从目标条目分叉新故事（user 目标 = 其前分叉重问）",
-			"  /status             打印 sessionId / leafId / clock / 行数（含 data_status）",
-			"  /help               本帮助",
-			"  空行                退出（不删故事目录，可 --resume 续写）",
+			"  /tree              列出当前 branch 的消息条目",
+			"  /tree <序号|entryId>  跳转到目标条目（钩子自动恢复 DB）",
+			"  /fork <序号|entryId>  从目标条目分叉新故事（fork 产物继承 mode，adventure 继承锁定）",
+			"  /status            打印 sessionId / mode / clock / 行数",
+			"  /mode              查看当前内核级模式（creation/survival/adventure）",
+			"  /mode <模式>         切换模式（catch 非法切换错；adventure 锁定不可切）",
+			"  /plot <文本>         创造模式专属：写入剧情大纲指令（生存/冒险报错）",
+			"  /help              本帮助",
+			"  空行               退出（不删故事目录，可 --resume 续写）",
 			"",
-			"data subagent（§6.1）：每轮叙事后自动抽取落库；失败会重试并在下轮补齐，不阻塞叙事。",
-			"npc subagent（§6.2）：每轮开场前并行预演在场 NPC（意图/情绪/行动/台词，隐藏批注注入主叙事）+",
-			"  离线批量推演（距上次推演 ≥5 轮的 NPC），delta 交 data 转写落库；npc 层不直接写库。",
-			"事件流留痕见故事目录 pipeline-events.jsonl。",
+			"模式（§10.1）：--mode creation|survival|adventure 仅创建时生效；--resume 从 story.meta.json 恢复。",
+			"输入校验（§8）：生存/冒险拒非 user 角色输入（命令 NPC/指定剧情结局）→ 打印 reason/suggestion，",
+			"  可用 /! 前缀强制提交（留痕 warning）；创造模式不校验。",
+			"story/npc/stylize/data 阶段全开（all-on 在三种模式下均满足预设）。",
 		].join("\n"),
 	);
 }
@@ -200,29 +210,35 @@ function printTurn(report: TurnResult): void {
 		const onstageIds = report.npc.onstageNpcIds;
 		const offIds = report.npc.offscreenTriggeredIds;
 		console.log(
-			`--- npc 阶段（§6.2） ---\n在场预演: ${onstageIds.length} 个（${onstageIds.length > 0 ? onstageIds.join(", ") : "无"}）| 离线推演: ${offIds.length} 个（${offIds.length > 0 ? `${offIds.join(", ")} → ${report.npc.offscreenDeltas.length} deltas` : "无"}）`,
+			`--- npc 阶段（§6.2） ---\n在场预演: ${onstageIds.length} 个（${onstageIds.length > 0 ? onstageIds.join(", ") : "无"}）| 离线推演: ${offIds.length} 个`,
+		);
+	}
+	if (report.story) {
+		const s = report.story;
+		console.log(
+			`--- story 阶段（§6.3） ---\n场景卡: ${s.sceneFallback ? "fallback" : "ok"} | 硬冲突: ${s.hardConflicts.length} | 报疑: ${s.suspicions.length} | 重写: ${s.revisions} 次${s.releasedWithWarnings ? " | 超限放行" : ""}`,
+		);
+	}
+	if (report.stylize) {
+		console.log(
+			`--- stylize（§6.4） ---\n${report.stylize.applied ? "✓ 已润色" : "✗ 回退原文"}${report.stylize.drift ? `，drift: ${report.stylize.drift.join("; ")}` : ""}`,
 		);
 	}
 	console.log("--- data 落库（§6.1） ---");
 	if (report.data.ok) {
 		const a = report.data.applied;
 		console.log(
-			`✓ 成功（attempts=${report.data.attempts}，耗时 ${report.data.durationMs}ms）events=${a.events} new_locations=${a.newLocations} new_npcs=${a.newNpcs} npc_updates=${a.npcUpdates} moves=${a.locationMoves} world_state=${a.worldState} phase_start=${a.phaseStarted} phase_end=${a.phaseEnded} time_advance=${a.timeAdvanced ? "是" : "否"}`,
+			`✓ 成功（attempts=${report.data.attempts}）events=${a.events} new_npcs=${a.newNpcs} time_advance=${a.timeAdvanced ? "是" : "否"}${report.data.dropped ? `，strictDrop 剔除 ${report.data.dropped.length} 项` : ""}`,
 		);
 	} else {
 		console.log(`✗ 失败（attempts=${report.data.attempts}）: ${truncate(report.data.error, 300)}`);
-		console.log(`  本轮快照跳过，下轮将补齐（§6.1）`);
 	}
 	console.log(`--- 快照: ${report.snapshotTaken ? "已拍" : "跳过"} ---`);
-	if (report.consecutiveDataFailures > 0) {
-		console.log(`--- data 连续失败 ${report.consecutiveDataFailures} 轮，未落库内容将在下轮自动尝试补齐 ---`);
-	}
 }
 
 async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise<StoryRuntime> {
 	const { session, sessionManager, storyState } = runtime;
 	const target = resolveTreeTarget(sessionManager, arg);
-	// fork 截断点（SDK 语义）：user 目标 → 其 parentId（在目标输入前分叉重问）；assistant 目标 → 自身（clone 语义）。
 	const truncateId = target.message.role === "user" ? (target.parentId ?? target.id) : target.id;
 	const chain = buildAncestorChain(sessionManager.getEntries(), target.id);
 	const oldSessionId = sessionManager.getSessionId();
@@ -238,12 +254,14 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 		`> forkStoryDb → 新故事目录 ${newStoryDir}（events=${forkResult.storyDb.reader.listEvents().length}，snapshots=${forkResult.snapshotsDb.listSnapshots().length} 份）`,
 	);
 
-	// 旧运行态收尾：dispose 旧 AgentSession + 关闭旧故事两库（新故事目录由 forkStoryDb 新建）。
 	session.dispose();
 	oldStoryState.storyDb.close();
 	oldStoryState.snapshotsDb.close();
 
-	const newStoryState: StoryState = {
+	// fork 产物继承元数据（§10.1）：复制 story.meta.json——模式与锁定（adventure）随 mode 继承。
+	inheritStoryMeta(oldStoryState.storyDir, newStoryDir);
+
+	const newStoryState = {
 		storyDir: newStoryDir,
 		storyDb: forkResult.storyDb,
 		snapshotsDb: forkResult.snapshotsDb,
@@ -257,8 +275,7 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 		prompts: ctx.prompts,
 		eventLog: createPipelineEventLog(join(newStoryDir, "pipeline-events.jsonl")),
 		onWarning: (m) => console.warn(`[warn] ${m}`),
-		npc: { enabled: true },
-		story: { enabled: true, executor: storyStubExecutor(newStoryState) },
+		...runtimeExtras(ctx),
 	});
 	console.log(`> 已切换故事: ${oldSessionId} → ${newSessionId}`);
 	return newRuntime;
@@ -294,6 +311,37 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 		case "status":
 			printStatus(runtime);
 			return undefined;
+		case "mode": {
+			if (arg === "") {
+				console.log(`> 当前模式: ${runtime.mode}`);
+				return undefined;
+			}
+			if (!MODE_SET.includes(arg as StoryMode)) {
+				console.log(`> 非法模式: ${arg}（可选: ${MODE_SET.join(" / ")}）`);
+				return undefined;
+			}
+			try {
+				runtime.setMode(arg as StoryMode);
+				console.log(`> 已切换到 ${arg}（story.meta.json 已持久化）`);
+			} catch (err) {
+				console.log(`> 切换失败: ${err instanceof Error ? err.message : String(err)}`);
+			}
+			return undefined;
+		}
+		case "plot": {
+			if (arg === "") {
+				console.log("用法: /plot <剧情大纲>");
+				return undefined;
+			}
+			if (runtime.mode !== "creation") {
+				console.log(`该模式不可用：/plot 仅创造模式合法（剧情大纲指令；生存/冒险拒绝非 user 角色输入）。`);
+				return undefined;
+			}
+			const turnSeq = computeNextTurnSeq(runtime.storyState.storyDb);
+			const directive = runtime.storyState.storyDb.writer.insertDirective({ turnSeq, content: arg });
+			console.log(`> 已写入剧情指令 #${directive.id}: ${arg}`);
+			return undefined;
+		}
 		case "help":
 			printHelp();
 			return undefined;
@@ -304,7 +352,7 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 }
 
 // ---------------------------------------------------------------------------
-// 行队列（沿 m2-cli）
+// 行队列（沿 m5-cli）
 // ---------------------------------------------------------------------------
 
 class LineQueue {
@@ -340,24 +388,26 @@ class LineQueue {
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv: readonly string[]): CliArgs {
-	const args: CliArgs = {};
+	const args: CliArgs = { pack: [] };
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
 		if (a === "--root") {
 			i++;
-			const v = argv[i];
-			if (v === undefined) throw new Error("--root 缺少值");
-			args.root = v;
-		} else if (a === "--session-dir") {
-			i++;
-			const v = argv[i];
-			if (v === undefined) throw new Error("--session-dir 缺少值");
-			args.sessionDir = v;
+			args.root = argv[i];
 		} else if (a === "--resume") {
 			i++;
+			args.resume = argv[i];
+		} else if (a === "--pack") {
+			i++;
+			args.pack.push(argv[i]!);
+		} else if (a === "--mode") {
+			i++;
 			const v = argv[i];
-			if (v === undefined) throw new Error("--resume 缺少值");
-			args.resume = v;
+			if (!MODE_SET.includes(v as StoryMode)) throw new Error(`--mode 只允许 ${MODE_SET.join(" / ")}`);
+			args.mode = v as StoryMode;
+		} else if (a === "--style") {
+			i++;
+			args.style = argv[i];
 		} else {
 			throw new Error(`未知参数: ${a}`);
 		}
@@ -368,41 +418,66 @@ function parseArgs(argv: readonly string[]): CliArgs {
 export async function main(argv: readonly string[]): Promise<void> {
 	const args = parseArgs(argv);
 	const storiesRoot = args.root ?? defaultStoriesRoot();
-	const sessionDir = args.sessionDir ?? join(storiesRoot, "sessions");
 	const cwd = repoRoot;
 
 	let sessionManager: SessionManager;
+	let storyState: StoryState;
+	let packDirs = args.pack.map((d) => resolve(d));
+
 	if (args.resume !== undefined) {
+		// 续写：session 文件恢复；mode 从 story.meta.json 恢复（runtime 解析）；subagent 开关全开满足各模式预设。
 		sessionManager = SessionManager.open(args.resume);
+		const sessionId = sessionManager.getSessionId();
+		const dbPath = coreStoryDbPath(storiesRoot, sessionId);
+		storyState = {
+			storyDir: join(storiesRoot, sessionId),
+			storyDb: openStoryDb(dbPath),
+			snapshotsDb: openSnapshotsDb(snapshotsDbPath(dbPath)),
+		};
+		const meta = readStoryMeta(storyState.storyDir);
+		if (meta?.mode !== undefined) {
+			console.log(`> 恢复模式: ${meta.mode}（来自 story.meta.json）`);
+		}
+		if (packDirs.length === 0 && meta !== undefined) {
+			packDirs = meta.packs.map((p) => p.dir);
+		}
 	} else {
-		sessionManager = SessionManager.create(cwd, sessionDir);
+		// 新故事：--mode 仅在创建时有效（createStory 写入 meta；adventure 创建时锁定）。
+		const created = await createStory({ storiesRoot, packDirs, cwd, ...(args.mode !== undefined ? { mode: args.mode } : {}) });
+		sessionManager = created.sessionManager;
+		storyState = created.storyState;
+		if (created.packs.length > 0) {
+			const clock = storyState.storyDb.reader.getClock();
+			console.log(`> clock 初值: ${clock?.current_time}（${clock?.calendar}/${clock?.granularity}）`);
+		}
 	}
 	const sessionId = sessionManager.getSessionId();
-	const dbPath = coreStoryDbPath(storiesRoot, sessionId);
-	const storyState: StoryState = {
-		storyDir: dirname(dbPath),
-		storyDb: openStoryDb(dbPath),
-		snapshotsDb: openSnapshotsDb(snapshotsDbPath(dbPath)),
-	};
 
-	// 模型配置（§6.6）与提示词分层（§6.5）：全局层默认启用，包/故事层由后续卡包系统注入。
 	const { settings, warnings: settingsWarnings } = loadSettings();
-	const prompts: PromptLayerDirs = { globalDir: defaultGlobalPromptsDir() };
-	// ModelRuntime 共享实例（并行纪律：多 subagent session 共享凭证/模型，技术路线 §3.2）。
+	const prompts: PromptLayerDirs = {
+		globalDir: defaultGlobalPromptsDir(),
+		...(packDirs.length > 0 ? { packDir: packDirs[0] } : {}),
+	};
 	const modelRuntime = await ModelRuntime.create();
 	const eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"));
 
 	console.log(`> sessionId: ${sessionId}`);
-	console.log(`> session file: ${sessionManager.getSessionFile()}`);
 	console.log(`> storyDir: ${storyState.storyDir}`);
 	for (const w of settingsWarnings) console.warn(`[warn] ${w}`);
 
 	const rl = createInterface({ input: process.stdin, output: process.stdout });
 	const queue = new LineQueue(rl);
 
-	const ctx: CliCtx = { storiesRoot, cwd, settings, modelRuntime, prompts };
+	const ctx: CliCtx = {
+		storiesRoot,
+		cwd,
+		settings,
+		modelRuntime,
+		prompts,
+		...(args.style !== undefined ? { style: args.style } : {}),
+	};
 
-	let runtime = await createStoryRuntime({
+	let runtime: StoryRuntime = await createStoryRuntime({
 		cwd,
 		sessionManager,
 		storyState,
@@ -411,24 +486,44 @@ export async function main(argv: readonly string[]): Promise<void> {
 		prompts,
 		eventLog,
 		onWarning: (m) => console.warn(`[warn] ${m}`),
-		npc: { enabled: true },
-		story: { enabled: true, executor: storyStubExecutor(storyState) },
+		...runtimeExtras(ctx),
 	});
 	console.log(
 		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具，§6.0）`,
 	);
+	if (runtime.mode !== "creation") {
+		const modeInfo = runtime.mode === "adventure" ? "（锁定不可切换）" : "（story/输入校验生效）";
+		console.log(`> 当前模式: ${runtime.mode}${modeInfo}`);
+	}
 
 	console.log("\n输入行动/对话开始叙事；斜杠命令见 /help；空行退出。");
 	try {
 		for (;;) {
 			const line = (await queue.nextLine("> ")).trim();
 			if (line === "") break;
+			// /! 前缀：输入渠道校验强制提交（去前缀 + force:true）
+			if (line.startsWith("/! ")) {
+				const forcedInput = line.slice(2).trim();
+				const report = await runtime.runTurn(forcedInput, { force: true });
+				printTurn(report);
+				continue;
+			}
 			if (line.startsWith("/")) {
 				const next = await runCommand(line, runtime, ctx);
 				if (next !== undefined) runtime = next;
 			} else {
-				const report = await runtime.runTurn(line);
-				printTurn(report);
+				try {
+					const report = await runtime.runTurn(line);
+					printTurn(report);
+				} catch (err) {
+					if (err instanceof InputRejectedError) {
+						console.log(`> 输入被拒绝（§8 输入渠道校验）：${err.reason}`);
+						console.log(`> 建议改写：${err.suggestion}`);
+						console.log(`> 如确需原样提交，以 /! 开头强制提交（将留痕 warning）。`);
+					} else {
+						throw err;
+					}
+				}
 			}
 		}
 	} finally {
@@ -437,7 +532,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 		runtime.storyState.storyDb.close();
 		runtime.storyState.snapshotsDb.close();
 		console.log(
-			`> 故事目录保留（未删）: ${runtime.storyState.storyDir}\n> 可续写: node packages/app/src/m3-cli.ts --resume ${runtime.sessionManager.getSessionFile()}`,
+			`> 故事目录保留（未删）: ${runtime.storyState.storyDir}\n> 可续写: node packages/app/src/m6-cli.ts --resume ${runtime.sessionManager.getSessionFile()}`,
 		);
 	}
 }

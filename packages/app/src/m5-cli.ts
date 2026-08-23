@@ -28,6 +28,7 @@ import {
 	defaultGlobalPromptsDir,
 	defaultStoriesRoot,
 	forkStoryDb,
+	inheritStoryMeta,
 	loadSettings,
 	openSnapshotsDb,
 	openStoryDb,
@@ -284,12 +285,8 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 	oldStoryState.storyDb.close();
 	oldStoryState.snapshotsDb.close();
 
-	// fork 产物继承卡包绑定：复制 story.meta.json 到新故事目录（包路径不变）。
-	const meta = readStoryMeta(oldStoryState.storyDir);
-	if (meta !== undefined) {
-		const { writeFileSync } = await import("node:fs");
-		writeFileSync(join(newStoryDir, "story.meta.json"), `${JSON.stringify(meta, null, 2)}\n`);
-	}
+	// fork 产物继承元数据（§10.1）：复制 story.meta.json 到新故事目录——模式与锁定（adventure）随 mode 继承。
+	inheritStoryMeta(oldStoryState.storyDir, newStoryDir);
 	// fork 重建 cache（注入热更按当前磁盘包内容）。
 	if (ctx.packDirs.length > 0) ctx.packs = { cache: new PackCache(ctx.packDirs), pinned: () => ctx.pinned };
 

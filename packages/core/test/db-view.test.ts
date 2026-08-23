@@ -1,0 +1,334 @@
+// 冒险模式 DB 视图过滤查询层（创作规划 §10.1）单测。全部确定性，无 LLM。
+// 覆盖：锚定三方并集 / 无关被滤 / relations 两侧校验 / 退化与 warning / world_state sys_ 隐藏 /
+//       世界公开面全量透传 / 越集 getNpc 返回 undefined / filter="none" 全透传 / card_ref 可见性判定。
+
+import assert from "node:assert/strict";
+import { join } from "node:path";
+import { test } from "node:test";
+import { cleanupTempDir, makeTempDir } from "./helpers.ts";
+import { openStoryDb, type StoryDb } from "../src/db/story-db.ts";
+import { PLAYER_LOCATION_KEY } from "../src/db/types.ts";
+import {
+	buildNpcCardRefIndex,
+	createDbView,
+	isNpcCardVisible,
+	PLAYER_NPC_ID_KEY,
+	resolveRelatedNpcSet,
+} from "../src/db/view.ts";
+import type { LocationRow, NpcRow } from "../src/db/types.ts";
+
+/** 锚定场景：玩家 + 关系对端 + 同地点三方并集，含一个无关 NPC（不同地点且无关系）。 */
+function setupAnchorStory(dir: string): { story: StoryDb; city: LocationRow; yard: LocationRow } & Record<
+	"player" | "ally" | "local" | "stranger",
+	NpcRow
+> {
+	const story = openStoryDb(join(dir, "story.db"));
+	const city = story.writer.insertLocation({ name: "王城" });
+	const yard = story.writer.insertLocation({ name: "庭院", parentId: city.id });
+
+	// 玩家位于庭院
+	story.writer.moveSubject({ turnSeq: 1, subject: "player", toLocationId: yard.id });
+
+	// NPC：玩家锚定、盟友（关系）、本地人（同地点）、无关者（不同地点且无关系）
+	const player = story.writer.insertNpc({ name: "玩家", cardRef: "pack:a" });
+	const ally = story.writer.insertNpc({ name: "盟友", cardRef: "pack:b" });
+	const local = story.writer.insertNpc({ name: "本地人", cardRef: "pack:c" });
+	const stranger = story.writer.insertNpc({ name: "无关者", cardRef: "pack:d" });
+
+	story.writer.upsertWorldState({ key: PLAYER_NPC_ID_KEY, value: String(player.id), turnSeq: 1 });
+
+	// 移动 NPC 到地点：盟友/无关者到王城；本地人到庭院
+	story.writer.moveSubject({ turnSeq: 2, subject: `npc:${ally.id}`, toLocationId: city.id });
+	story.writer.moveSubject({ turnSeq: 3, subject: `npc:${local.id}`, toLocationId: yard.id });
+	story.writer.moveSubject({ turnSeq: 4, subject: `npc:${stranger.id}`, toLocationId: city.id });
+
+	// 关系：R1 玩家-盟友（两侧在集合）；R2 盟友-无关者（一侧无关）；R3 本地人-玩家（两侧在集合）
+	story.writer.insertNpcRelation({ npcA: player.id, npcB: ally.id, disposition: 50, turnSeq: 1 });
+	story.writer.insertNpcRelation({ npcA: ally.id, npcB: stranger.id, disposition: -10, turnSeq: 1 });
+	story.writer.insertNpcRelation({ npcA: local.id, npcB: player.id, disposition: 20, turnSeq: 1 });
+
+	// 盟友的 traits/memories，验证 composite 随 NPC 可见性整体过滤
+	story.writer.insertNpcTrait({ npcId: ally.id, trait: "谨慎", weight: 0.8, turnSeq: 1 });
+	story.writer.insertNpcMemory({ npcId: ally.id, turnSeq: 1, kind: "fact", content: "曾与玩家结盟", salience: 5 });
+
+	return { story, city, yard, player, ally, local, stranger };
+}
+
+test("锚定场景：player_npc_id + 关系对端 + 同地点三方并集；无关 NPC 被滤", () => {
+	const dir = makeTempDir();
+	try {
+		const { story, player, ally, local, stranger } = setupAnchorStory(dir);
+		const view = createDbView(story.reader, "user-related");
+		const set = view.relatedSet;
+
+		// 集合成员 = 玩家 ∪ 关系对端(盟友) ∪ 同地点(本地人)；无关者被滤
+		assert.equal(set.playerNpcId, player.id);
+		assert.equal(set.degraded, false);
+		assert.deepEqual([...set.npcIds].sort((a, b) => a - b), [player.id, ally.id, local.id].sort((a, b) => a - b));
+
+		// listNpcs 只返回集合内
+		const visibleIds = view.listNpcs().map((n) => n.id).sort((a, b) => a - b);
+		assert.deepEqual(visibleIds, [player.id, ally.id, local.id].sort((a, b) => a - b));
+
+		// 越集 id：getNpc 返回 undefined
+		assert.equal(view.getNpc(stranger.id), undefined);
+
+		// 可见 NPC composite：traits/memories 随可见性整体给出
+		const allyComp = view.getNpc(ally.id);
+		assert.notEqual(allyComp, undefined);
+		assert.equal(allyComp?.npc?.name, "盟友");
+		assert.equal(allyComp?.traits.length, 1);
+		assert.equal(allyComp?.memories.length, 1);
+
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("relations 两侧都在集合才可见：一侧无关即滤", () => {
+	const dir = makeTempDir();
+	try {
+		const { story, player, ally, local, stranger } = setupAnchorStory(dir);
+		const view = createDbView(story.reader, "user-related");
+
+		const allyComp = view.getNpc(ally.id);
+		// R1(玩家-盟友)、R3(本地人-玩家) 两侧都在集合 → 保留；R2(盟友-无关者) 一侧无关 → 滤
+		assert.deepEqual(
+			allyComp!.relations.filter((r) => !(r.npc_a === stranger.id || r.npc_b === stranger.id)).length,
+			1,
+			"盟友的可见关系不应包含与无关者的关系",
+		);
+		const allyRelationSides = new Set<number>();
+		for (const r of allyComp!.relations) {
+			allyRelationSides.add(r.npc_a);
+			allyRelationSides.add(r.npc_b);
+		}
+		assert.ok(!allyRelationSides.has(stranger.id), "盟友的可见关系对端不允许含无关者");
+
+		// 玩家复合：R1 + R3 可见（均含玩家且两侧在集合）
+		const playerComp = view.getNpc(player.id);
+		assert.equal(playerComp?.relations.length, 2);
+
+		// 本地人复合：R3 可见
+		const localComp = view.getNpc(local.id);
+		assert.equal(localComp?.relations.length, 1);
+		assert.equal(localComp?.relations[0]?.npc_a, local.id);
+		assert.equal(localComp?.relations[0]?.npc_b, player.id);
+
+		// 无关者的复合不可得（越集）
+		assert.equal(view.getNpc(stranger.id), undefined);
+
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("退化：无 player_npc_id → 集合仅同地点 NPC", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openStoryDb(join(dir, "story.db"));
+		const city = story.writer.insertLocation({ name: "王城" });
+		const yard = story.writer.insertLocation({ name: "庭院" });
+
+		// 玩家定位到庭院（world_state player_location），但未设 player_npc_id
+		story.writer.moveSubject({ turnSeq: 1, subject: "player", toLocationId: yard.id });
+		const yardNpc = story.writer.insertNpc({ name: "同院者" });
+		const cityNpc = story.writer.insertNpc({ name: "城中者" });
+		story.writer.moveSubject({ turnSeq: 2, subject: `npc:${yardNpc.id}`, toLocationId: yard.id });
+		story.writer.moveSubject({ turnSeq: 3, subject: `npc:${cityNpc.id}`, toLocationId: city.id });
+
+		const set = resolveRelatedNpcSet(story.reader);
+		assert.equal(set.playerNpcId, null);
+		assert.equal(set.degraded, true);
+		assert.equal(set.warning, undefined, "正常未设不应有 warning");
+		assert.deepEqual([...set.npcIds], [yardNpc.id], "仅同地点 NPC");
+
+		const view = createDbView(story.reader, "user-related");
+		assert.deepEqual(view.listNpcs().map((n) => n.id), [yardNpc.id]);
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("player_npc_id 指向不存在行 → degraded + warning，按未设置处理", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openStoryDb(join(dir, "story.db"));
+		const yard = story.writer.insertLocation({ name: "庭院" });
+		story.writer.moveSubject({ turnSeq: 1, subject: "player", toLocationId: yard.id });
+		const yardNpc = story.writer.insertNpc({ name: "同院者" });
+		story.writer.moveSubject({ turnSeq: 2, subject: `npc:${yardNpc.id}`, toLocationId: yard.id });
+
+		// 锚定到不存在的 npcs 行
+		story.writer.upsertWorldState({ key: PLAYER_NPC_ID_KEY, value: "999", turnSeq: 1 });
+
+		const set = resolveRelatedNpcSet(story.reader);
+		assert.equal(set.playerNpcId, null);
+		assert.equal(set.degraded, true);
+		assert.equal(typeof set.warning, "string");
+		assert.ok(set.warning!.includes("999"), "warning 应提及不存在的 id");
+		assert.deepEqual([...set.npcIds], [yardNpc.id], "退化为仅同地点 NPC");
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("parseNpcAnchorValue：/^\\d+$/ 严格匹配——合法十进制接受；1e2/0x10/abc/空串→非法→degraded", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openStoryDb(join(dir, "story.db"));
+		const yard = story.writer.insertLocation({ name: "庭院" });
+		story.writer.moveSubject({ turnSeq: 1, subject: "player", toLocationId: yard.id });
+		const yardNpc = story.writer.insertNpc({ name: "同院者" });
+		story.writer.moveSubject({ turnSeq: 2, subject: `npc:${yardNpc.id}`, toLocationId: yard.id });
+		const setup = (value: string) => {
+			story.writer.upsertWorldState({ key: PLAYER_NPC_ID_KEY, value, turnSeq: 3 });
+			return resolveRelatedNpcSet(story.reader);
+		};
+		// 合法非负十进制字符串 → 正常锚定
+		const ok = setup(String(yardNpc.id));
+		assert.equal(ok.playerNpcId, yardNpc.id);
+		assert.equal(ok.degraded, false);
+		assert.equal(ok.warning, undefined);
+		// "1e2"（Number() 宽容解析为 100）→ 被 /^\d+$/ 严格拦截 → 非法值 → degraded
+		const sci = setup("1e2");
+		assert.equal(sci.playerNpcId, null);
+		assert.equal(sci.degraded, true);
+		assert.ok(sci.warning!.includes("非法"), "warning 提及非法值");
+		assert.ok(!sci.warning!.includes("指向不存在"), "不再走误导性「指向不存在行」warning");
+		// "0x10"（Number() 宽容解析为 16）→ 拒绝
+		const hex = setup("0x10");
+		assert.equal(hex.playerNpcId, null);
+		assert.equal(hex.degraded, true);
+		assert.ok(hex.warning!.includes("非法"));
+		// 空串 → 按未设置处理（degraded，不附误导性 warning）
+		const empty = setup("");
+		assert.equal(empty.playerNpcId, null);
+		assert.equal(empty.degraded, true);
+		assert.equal(empty.warning, undefined, "空串按未设置处理，无 warning");
+		// 负号 / 前导空格 / 非数字 → 一律拒绝
+		assert.equal(setup("-1").playerNpcId, null);
+		assert.equal(setup(" 12").playerNpcId, null);
+		assert.equal(setup("abc").playerNpcId, null);
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("world_state：sys_ 键在 user-related 下隐藏、none 下可见；player_location 两模式都可见", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openStoryDb(join(dir, "story.db"));
+		const yard = story.writer.insertLocation({ name: "庭院" });
+		story.writer.moveSubject({ turnSeq: 1, subject: "player", toLocationId: yard.id });
+		story.writer.upsertWorldState({ key: "sys_npc_offscreen_last_turn:3", value: "1", turnSeq: 1 });
+		story.writer.upsertWorldState({ key: "weather", value: "rain", turnSeq: 1 });
+
+		const keys = (rows: Array<{ key: string }>) => rows.map((r) => r.key);
+		const userRelatedKeys = keys(createDbView(story.reader, "user-related").listWorldState());
+		const noneKeys = keys(createDbView(story.reader, "none").listWorldState());
+
+		// user-related：sys_ 隐藏，player_location 与普通约定键可见
+		assert.ok(!userRelatedKeys.some((k) => k.startsWith("sys_")), "user-related 应隐藏 sys_ 键");
+		assert.ok(userRelatedKeys.includes(PLAYER_LOCATION_KEY), "user-related 应保留 player_location");
+		assert.ok(userRelatedKeys.includes("weather"), "user-related 应保留普通约定键");
+
+		// none：sys_ 键可见
+		assert.ok(noneKeys.includes("sys_npc_offscreen_last_turn:3"), "none 模式下 sys_ 键应可见");
+		assert.ok(noneKeys.includes(PLAYER_LOCATION_KEY), "none 模式下应保留 player_location");
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("世界公开面（events/locations/phases/time_log/clock/turn_log/directives/location_log）user-related 下全量透传", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openStoryDb(join(dir, "story.db"));
+		const city = story.writer.insertLocation({ name: "王城" });
+		const yard = story.writer.insertLocation({ name: "庭院" });
+		story.writer.moveSubject({ turnSeq: 1, subject: "player", toLocationId: city.id });
+		story.writer.advanceClock({ turnSeq: 2, toTime: "0000-01-02", spanNote: "次日" });
+		story.writer.insertEvent({ turnSeq: 3, summary: "城门洞开", locationId: city.id });
+		story.writer.insertPhase({ name: "第一幕", startedTurn: 1 });
+		story.writer.recordTurnLog({ turnSeq: 4, sessionEntryId: "s1", userInput: "hi", narrativeText: "叙事" });
+		story.writer.insertDirective({ turnSeq: 5, content: "作者意图" });
+
+		const view = createDbView(story.reader, "user-related");
+		assert.equal(view.getClock()?.current_time, "0000-01-02", "clock 透传");
+		assert.equal(view.listTimeLog().length, 1, "time_log 透传");
+		assert.equal(view.listEvents().length, 1, "events 透传");
+		assert.equal(view.listPhases().length, 1, "phases 透传");
+		assert.equal(view.getTurnLog().length, 1, "turn_log 透传");
+		assert.equal(view.listDirectives().length, 1, "directives 透传");
+		assert.equal(view.listLocationLog().length, 1, "location_log 透传");
+		assert.equal(view.listLocations().length, 2, "locations 透传");
+		assert.equal(view.getLocation(city.id)?.name, "王城", "getLocation 透传");
+		assert.equal(view.getPlayerLocation()?.name, "王城", "getPlayerLocation 透传");
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("filter=none 全透传：NpcComposite 不滤、relations 不滤、world_state sys_ 键可见", () => {
+	const dir = makeTempDir();
+	try {
+		const { story, player, ally, local, stranger } = setupAnchorStory(dir);
+		story.writer.upsertWorldState({ key: "sys_demo", value: "x", turnSeq: 9 });
+
+		const view = createDbView(story.reader, "none");
+		// NPC 域全量
+		assert.equal(view.listNpcs().length, 4, "none 模式返回全部 NPC");
+		// 越集仍返回 composite（与 DbReader 同形）
+		const strangerComp = view.getNpc(stranger.id);
+		assert.notEqual(strangerComp, undefined);
+		assert.equal(strangerComp?.npc?.name, "无关者");
+		// relations 不滤：无关者复合含与盟友的关系
+		assert.ok(strangerComp!.relations.some((r) => r.npc_a === ally.id || r.npc_b === ally.id));
+		// 玩家复合含全部关系（R1 + R3）
+		assert.equal(view.getNpc(player.id)?.relations.length, 2);
+		// world_state 全量（含 sys_）
+		const wsKeys = view.listWorldState().map((r) => r.key);
+		assert.ok(wsKeys.includes("sys_demo"));
+		assert.ok(wsKeys.includes(PLAYER_NPC_ID_KEY));
+		assert.ok(wsKeys.includes(PLAYER_LOCATION_KEY));
+		// 无关的 local 也可见（none 不滤）
+		assert.equal(view.getNpc(local.id)?.npc?.name, "本地人");
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("isNpcCardVisible：card_ref 对应行在集合内即可见，未 seed 或越集不可见", () => {
+	const dir = makeTempDir();
+	try {
+		const { story, player, ally, local, stranger } = setupAnchorStory(dir);
+		const view = createDbView(story.reader, "user-related");
+		const set = view.relatedSet;
+
+		// 用 view.listNpcs()（已滤集）建索引时，无关者 card_ref 不在索引 → 不可见
+		const visibleIndex = buildNpcCardRefIndex(view.listNpcs());
+		assert.equal(isNpcCardVisible(set, visibleIndex, "pack:a"), true, "玩家行可见");
+		assert.equal(isNpcCardVisible(set, visibleIndex, "pack:b"), true, "盟友行可见");
+		assert.equal(isNpcCardVisible(set, visibleIndex, "pack:c"), true, "本地人行可见");
+		assert.equal(isNpcCardVisible(set, visibleIndex, "pack:d"), false, "无关者 card_ref 不在已滤索引");
+
+		// 用全量 listNpcs 建索引：无关者在索引内但集合外 → 仍不可见
+		const fullIndex = buildNpcCardRefIndex(story.reader.listNpcs());
+		assert.equal(isNpcCardVisible(set, fullIndex, "pack:d"), false, "集合外行不可见");
+		assert.equal(isNpcCardVisible(set, fullIndex, "pack:a"), true);
+		// 未 seed 的 card_ref → 不可见
+		assert.equal(isNpcCardVisible(set, fullIndex, "pack:not-seeded"), false, "未 seed 条目不可见");
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});

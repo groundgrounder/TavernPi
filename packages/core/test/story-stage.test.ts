@@ -93,6 +93,136 @@ test("sceneCardZodSchema：形状校验（缺字段/类型错被拒，合法通�
 	assert.equal(badType.success, false);
 });
 
+test("sceneCardZodSchema：input_validity 合法有/无 field；非法结构被拒", () => {
+	// 合法：带 input_validity（valid + reason + suggestion）
+	const withValid = sceneCardZodSchema.safeParse({
+		onstage_npc_ids: [1],
+		offscreen_npc_ids: [],
+		scene_location_name: "王城",
+		current_story_time: "0000-01-01",
+		time_span_estimate: "x",
+		to_time_suggestion: "0000-01-01",
+		scene_goal: "g",
+		tone: "t",
+		major_event: false,
+		input_validity: { valid: false, reason: "命令 NPC", suggestion: "改为第一人称" },
+	});
+	assert.equal(withValid.success, true);
+	assert.equal(withValid.success && withValid.data.input_validity?.valid, false);
+	// 合法：input_validity 缺席（validateInput=false 或创造模式，视为合法）
+	const absent = sceneCardZodSchema.safeParse({
+		onstage_npc_ids: [1],
+		offscreen_npc_ids: [],
+		scene_location_name: "王城",
+		current_story_time: "0000-01-01",
+		time_span_estimate: "x",
+		to_time_suggestion: "0000-01-01",
+		scene_goal: "g",
+		tone: "t",
+		major_event: false,
+	});
+	assert.equal(absent.success, true);
+	// 非法：input_validity 结构错误（valid 缺失 / reason 超长）
+	const badShape = sceneCardZodSchema.safeParse({
+		onstage_npc_ids: [1],
+		offscreen_npc_ids: [],
+		scene_location_name: "王城",
+		current_story_time: "0000-01-01",
+		time_span_estimate: "x",
+		to_time_suggestion: "0000-01-01",
+		scene_goal: "g",
+		tone: "t",
+		major_event: false,
+		input_validity: { reason: "缺 valid" },
+	});
+	assert.equal(badShape.success, false);
+	const tooLong = sceneCardZodSchema.safeParse({
+		onstage_npc_ids: [1],
+		offscreen_npc_ids: [],
+		scene_location_name: "王城",
+		current_story_time: "0000-01-01",
+		time_span_estimate: "x",
+		to_time_suggestion: "0000-01-01",
+		scene_goal: "g",
+		tone: "t",
+		major_event: false,
+		input_validity: { valid: false, reason: "r".repeat(121) },
+	});
+	assert.equal(tooLong.success, false);
+});
+
+test("buildFallbackSceneCard：兜底卡带 input_validity {valid:true}（兜底不阻塞）", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		story.writer.insertNpc({ name: "路人" });
+		const card = buildFallbackSceneCard(story);
+		assert.deepEqual(card.input_validity, { valid: true });
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("runSceneAnalysis：validateInput 开关注入判定指令——true 注入 / false 缺席", async () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		const ids = seedStoryStageStory(story);
+		const prompts: string[] = [];
+		const capturingExecutor = async (opts: SubagentRunOptions) => {
+			prompts.push(opts.userPrompt);
+			return stubResult(validCard(ids));
+		};
+		// validateInput=true → userPrompt 含「输入合法性判定」指令
+		await runSceneAnalysis(
+			{ turnSeq: 1, userInput: "我命令卫兵开城门", recentNarratives: [], validateInput: true },
+			{ storyDb: story, cwd: dir, executor: capturingExecutor },
+		);
+		assert.ok(prompts[0]!.includes("输入合法性判定"), "validateInput=true 注入判定指令");
+		assert.ok(prompts[0]!.includes("直接命令/操纵 NPC"), "判定标准出现（命令 NPC 非法）");
+		// validateInput=false → 不含判定指令
+		const prompts2: string[] = [];
+		await runSceneAnalysis(
+			{ turnSeq: 1, userInput: "我走进城门", recentNarratives: [] },
+			{ storyDb: story, cwd: dir, executor: async (o) => (prompts2.push(o.userPrompt), stubResult(validCard(ids))) },
+		);
+		assert.ok(!prompts2[0]!.includes("输入合法性判定"), "validateInput=false 不注入判定指令");
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("runSceneAnalysis：directives 门控——directivesAllowed=true 注入活跃指令 / false 停止下达", async () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		const ids = seedStoryStageStory(story);
+		story.writer.insertDirective({ turnSeq: 0, content: "主角必须在黎明前离开王城", status: "active" });
+		// directivesAllowed=true（创造模式）→ 注入活跃指令小节
+		const prompts: string[] = [];
+		await runSceneAnalysis(
+			{ turnSeq: 1, userInput: "我走向城门", recentNarratives: [], directivesAllowed: true },
+			{ storyDb: story, cwd: dir, executor: async (o) => (prompts.push(o.userPrompt), stubResult(validCard(ids))) },
+		);
+		assert.ok(prompts[0]!.includes("活跃指令（作者意图，必须纳入考量）"), "directivesAllowed=true 注入活跃指令");
+		assert.ok(prompts[0]!.includes("主角必须在黎明前离开王城"), "指令内容出现");
+		// directivesAllowed=false（生存/冒险）→ 不注入（存量指令不撤销但停止下达）
+		const prompts2: string[] = [];
+		await runSceneAnalysis(
+			{ turnSeq: 1, userInput: "我走向城门", recentNarratives: [], directivesAllowed: false },
+			{ storyDb: story, cwd: dir, executor: async (o) => (prompts2.push(o.userPrompt), stubResult(validCard(ids))) },
+		);
+		assert.ok(!prompts2[0]!.includes("活跃指令（作者意图，必须纳入考量）"), "directivesAllowed=false 不注入活跃指令");
+		// 指令仍保留在 DB（未撤销）
+		assert.equal(story.reader.listDirectives("active").length, 1, "存量指令未撤销");
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
 test("validateSceneCard：dead 在场 / 未登记地点 / 时间幻觉 / 未知 npc", () => {
 	const dir = makeTempDir();
 	try {

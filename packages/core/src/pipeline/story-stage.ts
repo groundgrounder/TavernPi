@@ -49,6 +49,15 @@ const sceneCardSchema = z.object({
 	scene_goal: z.string().max(100),
 	tone: z.string().max(40),
 	major_event: z.boolean(), // 全统筹触发依据之一
+	// 输入渠道校验（§10.1 + §8 决策记录「输入渠道校验判定」）：只在 validateInput=true 的轮次由模型判定；
+	// 缺席视为合法（创造模式不校验、story 关闭无场景卡均走此路）。valid=false → runtime 拒绝非 user 角色输入。
+	input_validity: z
+		.object({
+			valid: z.boolean(),
+			reason: z.string().max(120).optional(),
+			suggestion: z.string().max(120).optional(),
+		})
+		.optional(),
 });
 
 export const sceneCardZodSchema = sceneCardSchema;
@@ -92,7 +101,6 @@ export const OVERSEE_JSON_SCHEMA = overseeSchema.toJSONSchema() as unknown as TS
 export const SCENE_OUTPUT_TOOL_NAME = "submit_scene_card";
 export const REVIEW_OUTPUT_TOOL_NAME = "submit_review";
 export const OVERSEE_OUTPUT_TOOL_NAME = "submit_oversee";
-
 const SCENE_TOOL: SubagentOutputTool = {
 	name: SCENE_OUTPUT_TOOL_NAME,
 	description: "提交本轮场景卡（唯一输出通道）。必须且只调用一次。",
@@ -136,6 +144,21 @@ const SCENE_INSTRUCTIONS = [
 	"输出必须且只调用一次 submit_scene_card 工具提交。",
 ].join("\n");
 
+/**
+ * 输入渠道校验判定指令（§10.1 + §8 决策记录「输入渠道校验判定」）：只在 validateInput=true 时注入。
+ * 判定标准：只允许 user 角色自身的行动/对话；直接命令 NPC、指定剧情走向/结果、上帝视角陈述 = 非法。
+ * 措辞写硬（任务要求）：明确「直接以作者身份命令 NPC 或指定剧情结果 = 非法」，避免「宁可放行」的松弛反向导致漏拒。
+ */
+export const INPUT_VALIDITY_INSTRUCTIONS = [
+	"## 输入合法性判定（本轮必须判定并写入 input_validity）",
+	"只允许玩家以「我」身份进行自身行动/对白。以下输入确定判为非法（input_validity.valid=false，必须给出 reason 与改写建议 suggestion）：",
+	"- 直接命令/操纵 NPC：让某个 NPC 立刻做出某个动作或结果（例如「命令卫兵立刻打开城门」「让梅姑交出账本」）；",
+	"- 指定剧情走向/结果：以作者身份替故事决定接下来的情节（例如「让王后现在病逝」「本段要发展成悲剧」）；",
+	"- 上帝视角陈述事实/旁白（例如「事实上所有人都被骗了」）。",
+	"正常角色扮演（玩家自身行动、对白、内心活动）判为合法（input_validity.valid=true）。",
+	"若判非法，suggestion 必须给出改为第一人称角色扮演的改写示例（例如「命令卫兵」→「我试着说服卫兵，看能否让他通融」。）。",
+].join("\n");
+
 /** 场景卡语义校验：npc 存在且非 dead/absent（在场）、场景地点已登记、current_story_time == clock。 */
 export function validateSceneCard(storyDb: StoryDb, card: SceneCard): string[] {
 	const problems: string[] = [];
@@ -169,7 +192,8 @@ export function validateSceneCard(storyDb: StoryDb, card: SceneCard): string[] {
 	return problems;
 }
 
-/** 场景分析失败时的确定性兜底卡（M3 computeScenePlan 等价；离线名单留空，K 轮触发由 runtime 兜底）。 */
+/** 场景分析失败时的确定性兜底卡（M3 computeScenePlan 等价；离线名单留空，K 轮触发由 runtime 兜底）。
+ *  input_validity 固定 {valid:true}：兜底不阻塞（无法判定时默认放行，绝不误拒）。 */
 export function buildFallbackSceneCard(storyDb: StoryDb): SceneCard {
 	const plan = computeScenePlan(storyDb, 0);
 	const playerLoc = storyDb.reader.getPlayerLocation();
@@ -184,6 +208,7 @@ export function buildFallbackSceneCard(storyDb: StoryDb): SceneCard {
 		scene_goal: "",
 		tone: "",
 		major_event: false,
+		input_validity: { valid: true },
 	};
 }
 
@@ -193,7 +218,17 @@ interface RecentNarrative {
 	narrativeText: string;
 }
 
-function buildSceneUserPrompt(storyDb: StoryDb, input: { turnSeq: number; userInput: string; recentNarratives: RecentNarrative[] }): string {
+interface SceneUserPromptInput {
+	turnSeq: number;
+	userInput: string;
+	recentNarratives: RecentNarrative[];
+	/** 是否注入输入合法性判定指令（§10.1 + §8 决策记录）。仅生存/冒险的生存模式预设 inputValidation=true 时传 true。 */
+	validateInput?: boolean;
+	/** 是否注入活跃指令小节（§10.1 directives 门控）：仅创造模式传 true；缺省 true（向后兼容，不传=注入）。 */
+	directivesAllowed?: boolean;
+}
+
+function buildSceneUserPrompt(storyDb: StoryDb, input: SceneUserPromptInput): string {
 	const parts: string[] = [];
 	parts.push(`## 当前世界状态摘要（DB 权威事实，npc_id/地点名以此为准）\n${renderDbSummary(storyDb)}`);
 	const npcs = storyDb.reader.listNpcs();
@@ -214,11 +249,19 @@ function buildSceneUserPrompt(storyDb: StoryDb, input: { turnSeq: number; userIn
 		);
 	}
 	parts.push(`## 本轮玩家输入\n${input.userInput}`);
-	const directives = storyDb.reader.listDirectives("active");
-	if (directives.length > 0) {
-		parts.push(`## 活跃指令（作者意图，必须纳入考量）\n${directives.map((d) => `- ${d.content}`).join("\n")}`);
+	// 活跃指令（作者意图）仅创造模式注入（§10.1 directives 门控）：切生存/冒险后存量 active 指令
+	// 仍保留在 DB（不撤销）但停止下达；切回创造恢复。缺省 true = 向后兼容（外部直调 runSceneAnalysis 时注入）。
+	if (input.directivesAllowed !== false) {
+		const directives = storyDb.reader.listDirectives("active");
+		if (directives.length > 0) {
+			parts.push(`## 活跃指令（作者意图，必须纳入考量）\n${directives.map((d) => `- ${d.content}`).join("\n")}`);
+		}
 	}
 	parts.push(`## 指令\n${SCENE_INSTRUCTIONS}`);
+	// 输入渠道校验：仅在 validateInput=true（生存/冒险预设）时追加判定指令，否则不注入（零额外调用）。
+	if (input.validateInput === true) {
+		parts.push(INPUT_VALIDITY_INSTRUCTIONS);
+	}
 	return parts.join("\n\n");
 }
 
@@ -228,9 +271,17 @@ export interface SceneAnalysisResult {
 	fallback: boolean;
 }
 
-/** 场景分析（每轮最前）。重试耗尽 → 确定性兜底卡 + fallback:true + warning。 */
+/** 场景分析（每轮最前）。重试耗尽 → 确定性兜底卡 + fallback:true + warning。
+ *  validateInput：注入输入合法性判定指令（§10.1 + §8 决策记录），仅生存/冒险预设传 true。
+ *  directivesAllowed：注入活跃指令小节（§10.1 directives 门控），仅创造模式传 true（缺省 true）。 */
 export async function runSceneAnalysis(
-	input: { turnSeq: number; userInput: string; recentNarratives: RecentNarrative[] },
+	input: {
+		turnSeq: number;
+		userInput: string;
+		recentNarratives: RecentNarrative[];
+		validateInput?: boolean;
+		directivesAllowed?: boolean;
+	},
 	opts: StoryStageOptions,
 ): Promise<SceneAnalysisResult> {
 	const maxAttempts = opts.maxAttempts ?? 2;

@@ -23,6 +23,7 @@ import { loadPacks } from "./pack/loader.ts";
 import { packMigrations } from "./pack/seed.ts";
 import type { StoryMeta, WorldPack } from "./pack/types.ts";
 import type { StoryState } from "./pipeline/runtime.ts";
+import { isStoryMode, type StoryMode } from "./mode.ts";
 
 export interface CreateStoryOptions {
 	/** 故事根目录（缺省 ~/.tavernpi/stories）。 */
@@ -32,14 +33,46 @@ export interface CreateStoryOptions {
 	cwd: string;
 	/** 故事标题（覆盖 story.yaml title，写 story.meta.json）。 */
 	title?: string;
+	/** 内核级模式预设（§10.1 ★信任边界）；缺省 "creation"。adventure 创建时选定后锁定。 */
+	mode?: StoryMode;
 }
 
-/** story.meta.json 内容（--resume 恢复 packDirs / stylize defaultStyle 的载体）。 */
+/** story.meta.json 内容（--resume 恢复 packDirs / stylize defaultStyle / mode 的载体）。 */
 export interface StoryMetaFile {
 	title?: string;
 	packs: Array<{ name: string; dir: string; version?: string }>;
 	defaultStyle?: string;
+	/** 内核级模式（§10.1）；adventure 由其派生 locked，随 meta 持久化并 fork/clone 继承。 */
+	mode?: StoryMode;
 	createdAt: string;
+}
+
+/**
+ * 读 story.meta.json（--resume / mode 解析 / fork 继承共用）。读不到（文件缺失/损坏）返回 undefined。
+ * 注意：不校验 mode 字段合法性——非法值按「未记录」处理（resolveStoryMode 缺省回落 creation）。
+ */
+export function readStoryMeta(storyDir: string): StoryMetaFile | undefined {
+	try {
+		return JSON.parse(readFileSync(join(storyDir, "story.meta.json"), "utf8")) as StoryMetaFile;
+	} catch {
+		return undefined;
+	}
+}
+
+/** 写 story.meta.json（小 JSON，覆盖写即可；createStory 与 setMode 落盘共用）。 */
+export function writeStoryMeta(storyDir: string, meta: StoryMetaFile): void {
+	writeFileSync(join(storyDir, "story.meta.json"), `${JSON.stringify(meta, null, 2)}\n`);
+}
+
+/**
+ * fork/clone 时继承原故事元数据：复制 story.meta.json 到新故事目录（§10.1 fork 产物继承模式与锁定）。
+ * 模式与锁定随 mode 字段天然继承（adventure 由 mode 派生，无需单独复制锁标记）。
+ * 源无 meta（非 createStory 产物）→ 不写（目标无 meta = 无模式，缺省 creation）。
+ */
+export function inheritStoryMeta(srcStoryDir: string, dstStoryDir: string): void {
+	const meta = readStoryMeta(srcStoryDir);
+	if (meta === undefined) return;
+	writeStoryMeta(dstStoryDir, meta);
 }
 
 export interface CreateStoryResult {
@@ -58,6 +91,10 @@ const STORY_META_FIELDS = ["title", "calendar", "granularity", "opening", "defau
  * 加载失败（PackLoadError）在创建任何文件之前抛出（fail fast，不留下半成品故事目录）。
  */
 export async function createStory(opts: CreateStoryOptions): Promise<CreateStoryResult> {
+	// 入口校验模式（§10.1 ★信任边界）：非法值（如 "Survival"）建故事即报错，避免后续消费才 TypeError。
+	if (opts.mode !== undefined && !isStoryMode(opts.mode)) {
+		throw new Error(`非法模式值: ${JSON.stringify(opts.mode)}（应为 creation|survival|adventure）`);
+	}
 	const storiesRoot = opts.storiesRoot ?? defaultStoriesRoot();
 	// 1) 加载 + 全量校验先行（zod strict / 引用完整性 / 前缀静态扫描 / id 冲突）
 	const dirs = opts.packDirs.map((d) => resolve(d));
@@ -106,7 +143,7 @@ export async function createStory(opts: CreateStoryOptions): Promise<CreateStory
 			await takeSnapshot(storyDb, { turnSeq: 0, sessionEntryId: openingEntryId });
 		}
 
-		// 7) 故事元数据（--resume 恢复 packDirs / stylize defaultStyle 读取）
+		// 7) 故事元数据（--resume 恢复 packDirs / stylize defaultStyle / mode 的载体；§10.1 模式缺省 creation）
 		const meta: StoryMetaFile = {
 			...(opts.title !== undefined
 				? { title: opts.title }
@@ -115,9 +152,10 @@ export async function createStory(opts: CreateStoryOptions): Promise<CreateStory
 					: {}),
 			packs: packs.map((p) => ({ name: p.name, dir: p.dir, ...readPackVersion(p.dir) })),
 			...(story.defaultStyle !== undefined ? { defaultStyle: story.defaultStyle } : {}),
+			mode: opts.mode ?? "creation",
 			createdAt: new Date().toISOString(),
 		};
-		writeFileSync(join(storyDir, "story.meta.json"), `${JSON.stringify(meta, null, 2)}\n`);
+		writeStoryMeta(storyDir, meta);
 	} catch (error) {
 		storyDb.close();
 		snapshotsDb.close();

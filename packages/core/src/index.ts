@@ -24,6 +24,17 @@ export { DbWriter } from "./db/writer.ts";
 // db 工具集（pi ToolDefinition）
 export { createDbTools, type DbToolsOptions } from "./db/tools.ts";
 
+// DB 视图过滤（§10.1 冒险模式「与 user 相关」v0 规则）
+export {
+	buildNpcCardRefIndex,
+	createDbView,
+	DbView,
+	isNpcCardVisible,
+	PLAYER_NPC_ID_KEY,
+	resolveRelatedNpcSet,
+	type RelatedNpcSet,
+} from "./db/view.ts";
+
 // 行类型与常量
 export {
 	DEFAULT_STORY_CLOCK,
@@ -178,6 +189,7 @@ export {
 	SCENE_CARD_JSON_SCHEMA,
 	SCENE_OUTPUT_TOOL_NAME,
 	buildFallbackSceneCard,
+	INPUT_VALIDITY_INSTRUCTIONS,
 	overseeZodSchema,
 	renderOverseeNote,
 	renderRevisionRequest,
@@ -212,8 +224,12 @@ export {
 // StoryRuntime 编排器（§10.2 API 面 M2 形态 + §6.2 npc 阶段 + §6.3 story 阶段 + §6.4 stylize）
 export {
 	computeNextTurnSeq,
+	applyModeSwitch,
+	computeInputValidityAction,
 	createStoryRuntime,
 	findUserEntryOnBranch,
+	InputRejectedError,
+	resolveStoryMode,
 	type NpcStageRuntimeOptions,
 	type StoryRuntime,
 	type StoryRuntimeOptions,
@@ -248,9 +264,25 @@ export {
 } from "./pack/types.ts";
 
 // 故事创建（§4.1 M5：createStory——卡包校验 → SQL+seed 迁移 → story.yaml 消费 → 开场白首轮 → story.meta.json）
+// + story.meta.json 辅助（--resume / 模式解析 / fork 继承共用）
 export {
 	createStory,
+	inheritStoryMeta,
+	readStoryMeta,
+	writeStoryMeta,
 	type CreateStoryOptions,
 	type CreateStoryResult,
 	type StoryMetaFile,
 } from "./story.ts";
+
+// 内核级模式预设（§10.1 ★信任边界：三模式声明式预设——subagent 启用集合 / 切换规则 / 锁定）
+export {
+	MODE_PRESETS,
+	assertCanSwitchMode,
+	canSwitchMode,
+	isStoryMode,
+	validateSubagentSwitches,
+	type ModePreset,
+	type StoryMode,
+	type SubagentSwitchFlags,
+} from "./mode.ts";

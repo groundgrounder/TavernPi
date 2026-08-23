@@ -86,6 +86,15 @@ import {
 import { runStylize, type StylizeOptions } from "./stylize-stage.ts";
 import type { PipelineEventLog } from "./events.ts";
 import { renderDbSummary } from "./db-summary.ts";
+import {
+	assertCanSwitchMode,
+	isStoryMode,
+	MODE_PRESETS,
+	validateSubagentSwitches,
+	type StoryMode,
+	type SubagentSwitchFlags,
+} from "../mode.ts";
+import { readStoryMeta, writeStoryMeta } from "../story.ts";
 
 /** 当前最大 turn_seq 的下一轮（turn_log 每轮一行，PK 保证完整性；新库为 1）。与 m1-cli 同源。 */
 export function computeNextTurnSeq(storyDb: StoryDb): number {
@@ -332,6 +341,9 @@ export interface StoryRuntimeOptions {
 	cwd: string;
 	sessionManager: SessionManager;
 	storyState: StoryState;
+	/** 内核级模式预设（§10.1 ★信任边界）。解析顺序：显式 option → story.meta.json（storyDir 内）→ "creation"。
+	 *  若 meta 记录 adventure 而 option 传了别的值 → 抛错（锁不可绕）。 */
+	mode?: StoryMode;
 	settings?: TavernSettings;
 	modelRuntime?: ModelRuntime;
 	prompts?: PromptLayerDirs;
@@ -403,19 +415,129 @@ export interface StoryRuntime {
 	sessionManager: SessionManager;
 	storyState: StoryState;
 	hooks: SnapshotHooks;
-	runTurn(input: string): Promise<TurnResult>;
+	/** 当前内核级模式（§10.1）。 */
+	readonly mode: StoryMode;
+	/** 切换模式（§10.1）：断言可切换、校验当前 subagent 开关符合目标预设、写回 story.meta.json、更新内部状态。
+	 *  adventure 锁定不可切换（含切出）；违规抛中文 Error（列需先重开项，不自动改）。 */
+	setMode(next: StoryMode): void;
+	/** 跑一轮叙事。opts.force = /! 前缀（输入渠道校验强制提交，留痕 warning；§10.1 + §8 决策记录）。 */
+	runTurn(input: string, opts?: { force?: boolean }): Promise<TurnResult>;
 	dispose(): void;
+}
+
+/**
+ * 解析运行时生效模式（§10.1 ★信任边界）。优先级：显式 option → story.meta.json（storyDir 内）→ "creation"。
+ * 【adventure 锁】meta 记录 adventure 而 option 传了别的值 → 抛错（锁不可绕；中途不进出的契约）。
+ * 【升级守卫】meta 存在且非 adventure、option = adventure → 抛错（冒险只能在故事创建时选定，§10.1；不可把已存在的故事升级为冒险）。
+ * 【无 meta 升级拒】meta 缺失（非 createStory 产物）+ option = adventure → 抛错（无法确认曾以冒险创建）。
+ * 【合法性】非法模式值（option 或 meta.mode，如 "Survival"）→ 抛错（不回落；避免首次 runTurn 在 MODE_PRESETS[mode] 抛 TypeError）。
+ */
+export function resolveStoryMode(optsMode: StoryMode | undefined, storyDir: string): StoryMode {
+	if (optsMode !== undefined && !isStoryMode(optsMode)) {
+		throw new Error(`非法模式值: ${JSON.stringify(optsMode)}（应为 creation|survival|adventure）`);
+	}
+	const meta = readStoryMeta(storyDir);
+	const metaMode = meta?.mode;
+	if (metaMode !== undefined && !isStoryMode(metaMode)) {
+		throw new Error(`故事 meta 记录非法模式值: ${JSON.stringify(metaMode)}（应为 creation|survival|adventure）`);
+	}
+	if (metaMode === "adventure" && optsMode !== undefined && optsMode !== "adventure") {
+		throw new Error(`故事模式已锁定为 adventure（冒险），不能以 ${optsMode} 打开（锁不可绕，中途不进不出）。`);
+	}
+	if (meta !== undefined && metaMode !== "adventure" && optsMode === "adventure") {
+		throw new Error(
+			`不能以 adventure（冒险）打开已存在的故事（当前模式 ${metaMode ?? "（未记录，缺省 creation）"}）——冒险只能在创建故事时选定。`,
+		);
+	}
+	if (meta === undefined && optsMode === "adventure") {
+		throw new Error("冒险模式只能在创建故事时选定；该故事无模式元数据（story.meta.json 缺失）。");
+	}
+	return optsMode ?? metaMode ?? "creation";
+}
+
+/**
+ * 输入渠道校验错误（§10.1 + §8 决策记录「输入渠道校验判定」）：生存/冒险拒绝非 user 角色行为的输入
+ * （命令 NPC、指定剧情结果、上帝视角陈述）。携带 reason（非法原因）与 suggestion（改写建议）字段；
+ * 用户可改写成合法输入，或经 `/!` 前缀强制提交（留痕 warning，见 runTurn force 路径）。
+ */
+export class InputRejectedError extends Error {
+	readonly reason: string;
+	readonly suggestion: string;
+	constructor(reason: string, suggestion: string) {
+		super(`输入被拒绝：${reason}`);
+		this.name = "InputRejectedError";
+		this.reason = reason;
+		this.suggestion = suggestion;
+	}
+}
+
+/**
+ * 输入渠道校验判定（§10.1 + §8 决策记录；纯函数无副作用）：返回是否拒绝 + 原因/建议。
+ * 规则：只对模式预设 inputValidation=true（生存/冒险）且场景卡存在生效；creation（inputValidation=false）
+ * 或场景卡缺席（story 关闭）不校验。场景卡 input_validity 缺席或 valid=true → 放行。
+ * force=true（/! 前缀）→ 不拒绝（放行留痕）。驳回时返回 reason/suggestion 供 InputRejectedError 消费。
+ */
+export function computeInputValidityAction(
+	mode: StoryMode,
+	sceneCard: SceneCard | undefined,
+	force: boolean,
+): { reject: boolean; reason: string; suggestion: string } {
+	if (!MODE_PRESETS[mode].inputValidation || sceneCard === undefined) {
+		return { reject: false, reason: "", suggestion: "" };
+	}
+	const iv = sceneCard.input_validity;
+	if (iv === undefined || iv.valid === true) {
+		return { reject: false, reason: "", suggestion: "" };
+	}
+	const reason = iv.reason ?? "输入越权";
+	const suggestion = iv.suggestion ?? "";
+	return { reject: !force, reason, suggestion };
+}
+
+/**
+ * 切换模式（§10.1）：断言可切换、校验当前 subagent 开关符合目标模式预设、写回 story.meta.json、返回新模式。
+ * 不自动改 subagent 开关——违规抛中文 Error 列出需先重开的项。adventure 锁定（含切出）一律拒绝。
+ */
+export function applyModeSwitch(
+	currentMode: StoryMode,
+	nextMode: StoryMode,
+	flags: SubagentSwitchFlags,
+	storyDir: string,
+): StoryMode {
+	assertCanSwitchMode(currentMode, nextMode);
+	const problems = validateSubagentSwitches(nextMode, flags);
+	if (problems.length > 0) {
+		throw new Error(
+			`无法从 ${currentMode} 切换到 ${nextMode}：当前 subagent 开关不符合目标模式预设，需先重置：\n- ${problems.join("\n- ")}`,
+		);
+	}
+	const meta = readStoryMeta(storyDir) ?? { packs: [], createdAt: new Date().toISOString() };
+	writeStoryMeta(storyDir, { ...meta, mode: nextMode });
+	return nextMode;
 }
 
 /** 构建一次完整接线运行态（fork 后以新故事目录重建新实例）。 */
 export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<StoryRuntime> {
 	const { cwd, sessionManager, storyState, settings, modelRuntime, prompts, eventLog, onWarning } = opts;
+
+	// ---- 模式解析（§10.1 ★信任边界）：显式 option → story.meta.json → "creation"；adventure 锁不可绕 ----
+	let mode: StoryMode = resolveStoryMode(opts.mode, storyState.storyDir);
 	const maxDataAttempts = opts.maxDataAttempts ?? 3;
 	const failureWarningThreshold = opts.failureWarningThreshold ?? 3;
 	// 阶段选项：缺省全部关闭（enabled=false，M2/M3 形态不变）。
 	const npcOpts: NpcStageRuntimeOptions = { enabled: false, ...opts.npc };
 	const storyOpts: StoryStageRuntimeOptions = { enabled: false, ...opts.story };
 	const stylizeOpts: StylizeRuntimeOptions = { enabled: false, ...opts.stylize };
+	// 构建时以最终 mode 校验 subagent 开关组合（flags 取各阶段 enabled 解析结果），有问题则 throw（中文列出全部问题）。
+	const subagentFlags: SubagentSwitchFlags = {
+		story: storyOpts.enabled,
+		npc: npcOpts.enabled,
+		stylize: stylizeOpts.enabled,
+	};
+	const modeProblems = validateSubagentSwitches(mode, subagentFlags);
+	if (modeProblems.length > 0) {
+		throw new Error(`subagent 开关与故事模式（${mode}）冲突：\n- ${modeProblems.join("\n- ")}`);
+	}
 	// stylize.styleHint 缺省值：未显式传入时读 story.meta.json 的 defaultStyle（§6.4 世界包文风）。
 	if (stylizeOpts.styleHint === undefined) {
 		stylizeOpts.styleHint = readStoryMetaDefaultStyle(storyState.storyDir);
@@ -454,6 +576,9 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 	let pendingSceneCard: SceneCard | undefined;
 	let pendingOverseeNote: string | undefined;
 	let pendingRevision: string | undefined;
+	// 输入渠道校验 /! 强制留痕（§8）：内存记录「最近一次拒绝」（输入文本 + reason），不落库（零痕迹语义不破）。
+	// force=true 且输入匹配该记录时无条件留痕，即使第二次场景分析判合法（审计痕迹不丢）。
+	let lastRejectedInput: { input: string; reason: string } | undefined;
 	// 卡包检索注入输入/报告（§4.1）：输入由 runTurn 置入（重写循环保持同一输入）；报告在
 	// before_agent_start 每次渲染后暂存，供 TurnResult.collection（最后一次 prompt 的注入结果）。
 	let pendingCollectionInput: string | undefined;
@@ -538,7 +663,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		console.warn(`[warn] ${created.modelFallbackMessage}`);
 	}
 
-	const runTurn = async (input: string): Promise<TurnResult> => {
+	const runTurn = async (input: string, turnOpts?: { force?: boolean }): Promise<TurnResult> => {
 		if (session.isStreaming) {
 			throw new Error("isStreaming 期间不能 prompt（应等待上一轮完成）");
 		}
@@ -551,17 +676,54 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		pendingCollectionTurnSeq = turnSeq;
 		pendingCollectionReport = undefined;
 
-		// ---- story 阶段①：场景分析在最前，产出场景卡（npc 调度 / data 时间建议 / 轻检依据）----
+		// ---- story 阶段①：场景分析在最前，产出场景卡（npc 调度 / data 时间建议 / 轻检依据 / 输入校验）----
 		let sceneCard: SceneCard | undefined;
 		let sceneFallback = false;
 		if (storyOpts.enabled) {
 			const analysis = await runSceneAnalysis(
-				{ turnSeq, userInput: input, recentNarratives: recentNarratives(storyState.storyDb, storyOpts.recentNarratives ?? 5) },
+				{
+					turnSeq,
+					userInput: input,
+					recentNarratives: recentNarratives(storyState.storyDb, storyOpts.recentNarratives ?? 5),
+					validateInput: MODE_PRESETS[mode].inputValidation,
+					directivesAllowed: MODE_PRESETS[mode].directivesAllowed,
+				},
 				{ ...storyStageOptsBase, storyDb: storyState.storyDb },
 			);
 			sceneCard = analysis.card;
 			sceneFallback = analysis.fallback;
 			pendingSceneCard = analysis.card;
+		}
+
+		// ---- 输入渠道校验（§10.1 + §8 决策记录「输入渠道校验判定」）----
+		// 只在模式预设 inputValidation=true（生存/冒险）且 story 开启时生效（story 关闭无场景分析 → 无校验；
+		// inputValidation 模式强制 story 开，故 story 关闭必然是中立的创造降级形态，自洽）。创造模式只看字段不拦截。
+		let forcedInputWarning: string | undefined;
+		if (storyOpts.enabled && sceneCard) {
+			const validity = computeInputValidityAction(mode, sceneCard, turnOpts?.force ?? false);
+			if (validity.reject) {
+				// 拒绝轮零痕迹：不 prompt 主叙事（输入不进 session 树）、不消耗 turn_seq（未写 turn_log，
+				// 下轮 reapend 同号）、不写 turn_log、不拍快照、npc/data 不跑。场景分析只读 + eventLog 诊断留痕，
+				// 不落故事库状态。清当轮注入闭包，防泄漏到后续 prompt。
+				pendingSceneCard = undefined;
+				pendingRevision = undefined;
+				// 内存记最近一次拒绝（供 /! 强制留痕兜底；仅内存，零痕迹语义不破）。
+				lastRejectedInput = { input, reason: validity.reason };
+				throw new InputRejectedError(validity.reason, validity.suggestion);
+			}
+			// force=/! 前缀：放行继续 pipeline，留痕 warning（与 M4 超限放行 warning 并存时合并，见下方 setTurnLogWarnings）。
+			if (turnOpts?.force === true && MODE_PRESETS[mode].inputValidation) {
+				// 优先用「最近一次拒绝」的 reason 无条件留痕（即使本次场景分析判合法）；否则按本次判定。
+				const forceReason =
+					lastRejectedInput !== undefined && lastRejectedInput.input === input
+						? lastRejectedInput.reason
+						: sceneCard.input_validity?.valid === false
+							? validity.reason
+							: undefined;
+				if (forceReason !== undefined) {
+					forcedInputWarning = `输入经 /! 强制提交：${forceReason}`;
+				}
+			}
 		}
 
 		// ---- npc 阶段（§6.2）：场景卡驱动在场/离线名单；story 关闭时维持 M3 确定性判定 ----
@@ -605,7 +767,9 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				eventLog,
 				maxAttempts: npcOpts.maxAttempts,
 				executor: npcOpts.executor,
-				directives: storyOpts.enabled ? storyState.storyDb.reader.listDirectives("active").map((d) => d.content) : undefined,
+				directives: storyOpts.enabled && MODE_PRESETS[mode].directivesAllowed
+					? storyState.storyDb.reader.listDirectives("active").map((d) => d.content)
+					: undefined,
 			};
 			const [rehearsals, deltas] = await Promise.all([
 				onstageNpcs.length > 0
@@ -734,6 +898,15 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				warnings: releasedWarningsText,
 			});
 
+			// 输入强制提交留痕（§8 决策记录）：与 M4 超限放行 warning 并存时合并追加。
+			if (forcedInputWarning !== undefined) {
+				const existingWarnings = storyState.storyDb.reader.getTurnLog(turnSeq)[0]?.warnings;
+				const mergedWarnings = existingWarnings
+					? `${existingWarnings}；${forcedInputWarning}`
+					: forcedInputWarning;
+				storyState.storyDb.writer.setTurnLogWarnings(turnSeq, mergedWarnings);
+			}
+
 			// ---- data 阶段：抽取落库（唯一写者，§6.1）。narrativeText = 最终文本；
 			//      timeSuggestion = 场景卡时间建议（§6.3 → §5.3）；strictDrop = 超限放行轮 ----
 			const data = await runDataStage({
@@ -856,6 +1029,16 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		sessionManager,
 		storyState,
 		hooks,
+		get mode() {
+			return mode;
+		},
+		setMode(next: StoryMode): void {
+			// 入口拒绝非法模式值（避免 MODE_PRESETS[next] 首次切换才 TypeError）
+			if (!isStoryMode(next)) {
+				throw new Error(`非法模式值: ${JSON.stringify(next)}（应为 creation|survival|adventure）`);
+			}
+			mode = applyModeSwitch(mode, next, subagentFlags, storyState.storyDir);
+		},
 		runTurn,
 		dispose: () => {
 			session.dispose();

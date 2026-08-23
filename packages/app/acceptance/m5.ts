@@ -23,6 +23,7 @@ import { spawn } from "node:child_process";
 import {
 	PackCache,
 	PackLoadError,
+	buildFallbackSceneCard,
 	createPipelineEventLog,
 	createStory,
 	createStoryRuntime,
@@ -323,6 +324,15 @@ async function main(): Promise<void> {
 			storyState: dStory.storyState,
 			eventLog: dEventLog,
 			packs: { cache: new PackCache([SHOULING, MINIPACK]), pinned: () => dPinned },
+			// §10.1 模式校验：creation 下 story 关 + stylize 开 → 非法。开 story 并桩掉场景分析
+			// （buildFallbackSceneCard = computeScenePlan 等价），保持 stylize 路径可测；npc 仍关（story 开则合法）。
+			story: {
+				enabled: true,
+				executor: async (opts: SubagentRunOptions): Promise<SubagentResult<unknown>> =>
+					opts.role === "story_scene"
+						? stubResult(buildFallbackSceneCard(dStory.storyState.storyDb))
+						: stubResult({ findings: [] }),
+			},
 			stylize: { enabled: true, executor: dStylizeExecutor },
 			onWarning: (m) => dWarnings.push(m),
 			onSystemPromptRender: (rendered) => dSystemPrompts.push(rendered),

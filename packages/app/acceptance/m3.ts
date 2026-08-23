@@ -23,6 +23,7 @@ import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
+	buildFallbackSceneCard,
 	createPipelineEventLog,
 	createStoryRuntime,
 	openSnapshotsDb,
@@ -93,6 +94,25 @@ function advanceIsoDay(iso: string): string {
 
 function stubResult(output: unknown): SubagentResult<unknown> {
 	return { output, usage: ZERO_USAGE, durationMs: 1 };
+}
+
+/**
+ * 场景分析确定性桩（§10.1 模式校验连带修复）：M3 目标本来只测 npc 阶段，但 creation 下 story 可关的
+ * 前提是 npc/stylize 均关；为让 npc+story 合法，需开 story 并用桩替代场景分析 LLM。
+ * 桩读 DB 产出与 computeScenePlan 等价的场景卡（buildFallbackSceneCard：onstage=同地点、offscreen 空由
+ * runtime 的 K 轮确定性兜底补齐），保证 M3 原有断言（在场判定/K 轮触发/权威边界/回溯）语义不变。
+ * story_review 桩返回空 findings（放行）；story_oversee 不触发（无 major_event、轮数不足）。
+ */
+function sceneStubExecutor(storyState: StoryState): (opts: SubagentRunOptions) => Promise<SubagentResult<unknown>> {
+	return async (opts: SubagentRunOptions): Promise<SubagentResult<unknown>> => {
+		if (opts.role === "story_scene") {
+			return stubResult(buildFallbackSceneCard(storyState.storyDb));
+		}
+		if (opts.role === "story_review") {
+			return stubResult({ findings: [] });
+		}
+		return runSubagent(opts);
+	};
 }
 
 /** 手工合法变更集（data 桩用；确定性，不碰玩家位置与 NPC）。 */
@@ -205,6 +225,8 @@ async function newNpcStoryRuntime(
 		sessionManager,
 		storyState,
 		eventLog,
+		// §10.1 模式校验：creation 下 story 可关前提 = npc/stylize 均关；M3 需 npc → 须开 story（桩掉场景分析）。
+		story: { enabled: true, executor: sceneStubExecutor(storyState) },
 		npc: { enabled: true, offscreenAfterTurns: opts.offscreenAfterTurns ?? 99, executor: opts.npcExecutor },
 		dataExecutor: opts.dataExecutor,
 		maxDataAttempts: opts.maxDataAttempts,
