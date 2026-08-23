@@ -235,6 +235,16 @@ export {
 	type ChapterSummaryOutput,
 } from "./pipeline/chapter-summary.ts";
 
+// 带外顾问（§6.8：会话式、只读、草稿制、无开关；冒险视图走 user-related 过滤）
+export {
+	createAssistAdvisor,
+	createAssistTools,
+	type AssistAdvisor,
+	type AssistAdvisorOptions,
+	type AssistMode,
+	type AssistToolOptions,
+} from "./assist.ts";
+
 // StoryRuntime 编排器（§10.2 API 面 M2 形态 + §6.2 npc 阶段 + §6.3 story 阶段 + §6.4 stylize）
 export {
 	computeNextTurnSeq,

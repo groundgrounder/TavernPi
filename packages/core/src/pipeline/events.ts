@@ -14,6 +14,7 @@ import type { SubagentUsage } from "../subagent/runtime.ts";
 export interface PipelineEvent {
 	/** ISO 时间戳。 */
 	ts: string;
+	/** 归属轮次；带外角色（assist*）无轮次归属，用 -1 哨兵。 */
 	turnSeq: number;
 	/** 角色标识（narrator/data/…）。 */
 	role: string;

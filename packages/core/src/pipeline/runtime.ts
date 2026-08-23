@@ -88,6 +88,7 @@ import {
 	type StoryStageOptions,
 } from "./story-stage.ts";
 import { runChapterSummary } from "./chapter-summary.ts";
+import { createAssistAdvisor, type AssistAdvisor } from "../assist.ts";
 import { runStylize, type StylizeOptions } from "./stylize-stage.ts";
 import type { PipelineEventLog } from "./events.ts";
 import { renderDbSummary } from "./db-summary.ts";
@@ -400,6 +401,13 @@ export interface StoryRuntimeOptions {
 		/** 重试上限（默认 2）。 */
 		maxAttempts?: number;
 	};
+	/** 带外顾问（§6.8）选项：model 缺省走 settings.models.assist 或 pi 默认；sessionFactory 供测试/故障注入。
+	 *  assist 会话懒创建（不找它即零开销），无开关。 */
+	assist?: {
+		model?: NonNullable<CreateAgentSessionOptions["model"]>;
+		/** 会话工厂（替换 createAgentSession；测试计数/断言用）。 */
+		sessionFactory?: (opts: CreateAgentSessionOptions) => Promise<{ session: AgentSession }>;
+	};
 }
 
 export interface TurnResult {
@@ -444,6 +452,8 @@ export interface StoryRuntime {
 	hooks: SnapshotHooks;
 	/** 当前内核级模式（§10.1）。 */
 	readonly mode: StoryMode;
+	/** 带外顾问（§6.8）：会话式、只读、草稿制、无开关；不进叙事流。回溯/前进/fork 已由 session_tree 钩子同步重建。 */
+	assist: AssistAdvisor;
 	/** 切换模式（§10.1）：断言可切换、校验当前 subagent 开关符合目标预设、写回 story.meta.json、更新内部状态。
 	 *  adventure 锁定不可切换（含切出）；违规抛中文 Error（列需先重开项，不自动改）。 */
 	setMode(next: StoryMode): void;
@@ -593,6 +603,22 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 	// 章节摘要 compaction subagent（§3.0/§3.1）：模型配置 settings.models.chapter_summary；缺省走 pi 默认模型。
 	// 提示词由 runChapterSummary 内部 loadPrompt("chapter_summary") 加载，此处只解析模型。
 	const chapterSummaryModel = resolveRoleModel(settings, "chapter_summary", modelRuntime, onWarning);
+	// 带外顾问（§6.8）：模型配置 settings.models.assist；缺省走 pi 默认。assist 会话懒创建，不找它即零开销。
+	const assistModel = resolveRoleModel(settings, "assist", modelRuntime, onWarning);
+
+	// 带外顾问（§6.8）：只读、草稿制、无开关；mode 经 getter（setMode 后 rebuild 用新人格）
+	// storyDb 经 getter（快照恢复替换实例后工具始终访问当前库）；seopts.assist.model 可覆盖模型。
+	const assist = createAssistAdvisor({
+		storyDb: () => storyState.storyDb,
+		mode: () => mode,
+		cwd,
+		prompts,
+		modelRuntime,
+		// opts.assist.model 覆盖 settings.models.assist 解析模型（供测试注入可控模型）。
+		model: opts.assist?.model ?? assistModel,
+		eventLog,
+		...(opts.assist?.sessionFactory !== undefined ? { sessionFactory: opts.assist.sessionFactory } : {}),
+	});
 
 	// story 阶段 runner 公共选项（storyDb 逐调用注入当前实例——重写循环经快照恢复替换实例后不能持有旧连接）。
 	const storyStageOptsBase: Omit<StoryStageOptions, "storyDb"> = {
@@ -623,8 +649,11 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			pi.on("session_before_tree", (event, ctx) => {
 				hooks.sessionBeforeTree(event, ctx);
 			});
-			pi.on("session_tree", (event, ctx) => {
+			pi.on("session_tree", async (event, ctx) => {
 				hooks.sessionTree(event, ctx);
+				// 带外顾问（§6.8）：回溯/前进触发 session_tree；快照恢复（setStoryDb）已完成后重建 assist 会话，
+				// 记忆不得包含被回滚掉的剧情。fork/故事重载天然经新 runtime 重建。
+				await assist.rebuild();
 			});
 			// 章节摘要 compaction（§3.0/§3.1）：session_before_compact 触发时用 chapter_summary subagent
 			// 生成章节摘要（完全替换 pi 默认摘要）。返回 undefined（失败回退默认摘要）绝不阻塞 compaction。
@@ -1106,6 +1135,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		sessionManager,
 		storyState,
 		hooks,
+		assist,
 		get mode() {
 			return mode;
 		},
@@ -1115,6 +1145,8 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				throw new Error(`非法模式值: ${JSON.stringify(next)}（应为 creation|survival|adventure）`);
 			}
 			mode = applyModeSwitch(mode, next, subagentFlags, storyState.storyDir);
+			// 三模式人格（§6.8）：模式切换后重建 assist 会话，下次 chat 用新人格/视图。
+			void assist.rebuild();
 		},
 		runTurn,
 		// /swipe（§3.0 重骰）：基于分支重生成最后一个 user 轮次的响应，旧稿留树。
@@ -1149,6 +1181,8 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		},
 		dispose: () => {
 			session.dispose();
+			// 级联释放带外顾问（§6.8）inMemory 会话资源。
+			assist.dispose();
 		},
 	};
 }

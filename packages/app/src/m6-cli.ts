@@ -193,6 +193,7 @@ function printHelp(): void {
 			"  /plot <文本>         创造模式专属：写入剧情大纲指令（生存/冒险报错）",
 			"  /swipe             基于分支重生成最后一个 user 轮次（旧稿留树，§3.0）",
 			"  /compact           触发章节摘要 compaction（§3.0/§3.1；会话太小友好提示）",
+			"  /assist <文本>       带外顾问（§6.8，只读/草稿制/不进叙事）：创作建议或 RPG 建议",
 			"  /help              本帮助",
 			"  空行               退出（不删故事目录，可 --resume 续写）",
 			"",
@@ -375,6 +376,20 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 				} else {
 					throw err;
 				}
+			}
+			return undefined;
+		}
+		case "assist": {
+			// /assist（§6.8）：带外顾问，只读、草稿制、不进叙事流。输出为草稿，由用户决定是否作为输入发出。
+			if (arg === "") {
+				console.log("用法: /assist <问题/求助>");
+				return undefined;
+			}
+			try {
+				const reply = await runtime.assist.chat(arg);
+				console.log(`> [assist]（带外顾问，不进叙事；输出为草稿）\n${reply}`);
+			} catch (err) {
+				console.log(`> assist 失败: ${err instanceof Error ? err.message : String(err)}`);
 			}
 			return undefined;
 		}

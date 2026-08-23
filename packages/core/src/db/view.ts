@@ -111,6 +111,10 @@ function isSysBookkeepingKey(key: string): boolean {
  * - 可见 NPC 的 composite 内 relations 再按「对端也在集合内」过滤；
  * - world_state 隐藏 sys_ 前缀内核簿记键（player_location / player_npc_id 保持可见）；
  * - 世界公开面（locations / events / phases / time_log / turn_log / location_log / directives / clock）全量透传。
+ *
+ * 注意：相关集合（relatedSet）在**构造时**解析并冻结一次——冒险可见性在该视图实例上不会随 NPC 移动而刷新。
+ * 需要新鲜可见性的调用方（如 assist 工具的跨轮存续会话）应**每次查询重建**视图（createDbView + resolveRelatedNpcSet
+ * 开销可忽略），而不是复用同一实例。
  */
 export class DbView {
 	private readonly reader: DbReader;

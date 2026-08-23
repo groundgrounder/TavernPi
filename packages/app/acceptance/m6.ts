@@ -23,11 +23,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { SessionManager, ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager, ModelRuntime, SettingsManager, createAgentSession, type AgentSession, type CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent";
 import {
 	createPipelineEventLog,
 	createStory,
 	createStoryRuntime,
+	createDbView,
 	defaultGlobalPromptsDir,
 	inheritStoryMeta,
 	loadSettings,
@@ -48,6 +49,7 @@ import {
 	type SubagentRunOptions,
 	type SubagentUsage,
 	type TurnResult,
+	type PipelineEvent,
 } from "@tavernpi/core";
 import { InputRejectedError } from "@tavernpi/core";
 
@@ -107,6 +109,23 @@ function contextText(msg: unknown): string {
 			.join("");
 	}
 	return "";
+}
+
+/** 桩 assist 会话（D4 只用白名单断言，不需真实模型回复）。 */
+function makeStubAssistSession(): AgentSession {
+	const messages: Array<{ role: string; content: unknown }> = [];
+	return {
+		isStreaming: false,
+		state: { messages },
+		async prompt(message: string): Promise<void> {
+			messages.push({ role: "user", content: [{ type: "text", text: message }] });
+			messages.push({ role: "assistant", content: [{ type: "text", text: "assist 桩建议" }] });
+		},
+		dispose(): void {},
+		getActiveToolNames(): string[] {
+			return [];
+		},
+	} as unknown as AgentSession;
 }
 
 function isProviderError(err: unknown): boolean {
@@ -190,6 +209,8 @@ interface M6Bundle {
 	seed: M6Seed;
 	systemPrompts: string[];
 	warnings: string[];
+	/** pipeline 事件流（收集，供 assist 污染断言/可区分性校验）。 */
+	eventRecords: PipelineEvent[];
 }
 
 async function newM6Runtime(
@@ -209,6 +230,7 @@ async function newM6Runtime(
 				? E
 				: never
 			: never;
+		assist?: Parameters<typeof createStoryRuntime>[0]["assist"];
 		/** 若提供，给卫兵 NPC 种入一条含该标记的记忆（renderDbSummary 会带上，供章节摘要断言伏笔要素）。 */
 		seedNpcMemory?: string;
 	},
@@ -230,6 +252,9 @@ async function newM6Runtime(
 	}
 	const systemPrompts: string[] = [];
 	const warnings: string[] = [];
+	const eventLog = createPipelineEventLog();
+	const eventRecords: PipelineEvent[] = [];
+	eventLog.on((e) => eventRecords.push(e));
 	const runtime = await createStoryRuntime({
 		cwd,
 		sessionManager,
@@ -238,7 +263,8 @@ async function newM6Runtime(
 		modelRuntime: opts.modelRuntime,
 		...(opts.settingsManager !== undefined ? { settingsManager: opts.settingsManager } : {}),
 		...(opts.chapterSummaryExecutor !== undefined ? { chapterSummary: { executor: opts.chapterSummaryExecutor } } : {}),
-		eventLog: createPipelineEventLog(),
+		...(opts.assist !== undefined ? { assist: opts.assist } : {}),
+		eventLog,
 		npc: { enabled: opts.npc?.enabled ?? true, executor: npcExecutor() },
 		story: { enabled: true, executor: opts.storyExecutor ?? storyExecutor(validSceneCard({ valid: true })) },
 		stylize: opts.stylize?.enabled ? { enabled: true } : { enabled: false },
@@ -246,7 +272,7 @@ async function newM6Runtime(
 		onWarning: (m) => warnings.push(m),
 		onSystemPromptRender: opts.onSystemPromptRender ?? ((rendered) => systemPrompts.push(rendered)),
 	});
-	return { runtime, sessionManager, storyState, storyDir, seed, systemPrompts, warnings };
+	return { runtime, sessionManager, storyState, storyDir, seed, systemPrompts, warnings, eventRecords };
 }
 
 function disposeBundle(b: M6Bundle): void {
@@ -803,6 +829,107 @@ async function main(): Promise<void> {
 					threw = err;
 				}
 				checks.push(check("C3b: 首轮 swipe（u1）空库兜底不报错", threw === null));
+			} finally {
+				disposeBundle(a);
+			}
+		}
+
+		// ================= D. 带外顾问 assist（§6.8，真实 LLM） =================
+		console.log("\n===== D. 带外顾问 assist（§6.8） =====");
+
+		// D1. 创造：/assist 等价调用返回非空建议；不进叙事流（turn_log/session 分支不变）；pipeline 事件流无 assist 污染
+		{
+			const a = await newM6Runtime(root, { mode: "creation", settings, modelRuntime, seedNpcMemory: "青铜钥匙伏笔" });
+			try {
+				await a.runtime.runTurn("我走进王城，向卫兵打听青铜钥匙。");
+				const turnLogBefore = a.storyState.storyDb.reader.getTurnLog().length;
+				const branchBefore = a.sessionManager.getEntries().length;
+				const nonAssistBefore = a.eventRecords.filter((e) => e.role !== "assist" && e.role !== "assist_chat").length;
+				const reply = await a.runtime.assist.chat("这一段我该放慢节奏突出悬念，还是加快节奏推进？");
+				console.log(`[obs] D1: assist reply（前 100 字）: ${reply.slice(0, 100)}`);
+				checks.push(check("D1: /assist 返回非空建议", reply.trim().length > 0));
+				checks.push(check("D1: assist 不进叙事流——turn_log 行数不变", a.storyState.storyDb.reader.getTurnLog().length === turnLogBefore));
+				checks.push(check("D1: assist 不进 session 分支（分支条目数不变）", a.sessionManager.getEntries().length === branchBefore));
+				const nonAssistAfter = a.eventRecords.filter((e) => e.role !== "assist" && e.role !== "assist_chat").length;
+				checks.push(check("D1: pipeline 事件流无 assist 污染（非 assist 事件数不变；assist 用独立 role 可区分）", nonAssistAfter === nonAssistBefore));
+			} finally {
+				disposeBundle(a);
+			}
+		}
+
+		// D2. 冒险过滤：seed 两 NPC（同城相关 + 远郊无关）；assist 问无关 NPC → 不含其私密信息；createDbView 层 get_npc 不可见
+		{
+			const a = await newM6Runtime(root, { mode: "adventure", settings, modelRuntime, stylize: { enabled: true }, seedNpcMemory: "青铜钥匙伏笔" });
+			try {
+				const w = a.storyState.storyDb.writer;
+				const market = w.insertLocation({ name: "市集" });
+				const far = w.insertNpc({ name: "远郊者" });
+				w.moveSubject({ turnSeq: 0, subject: `npc:${far.id}`, toLocationId: market.id });
+				w.insertNpcMemory({ npcId: far.id, turnSeq: 0, kind: "秘密", content: "远郊者把玉玺藏在井底", salience: 0.9 });
+				// 确定性：createDbView 层无关 NPC 不可见
+				const advView = createDbView(a.storyState.storyDb.reader, "user-related");
+				checks.push(check("D2: createDbView 层——无关 NPC get_npc 返回 undefined（不可见）", advView.getNpc(far.id) === undefined));
+				checks.push(check("D2: createDbView 层——无关 NPC 不在 list_npcs", !advView.listNpcs().some((n) => n.id === far.id)));
+				// 真实 LLM：让 assist 查询该 NPC（工具返回不可见），回复不得含私密信息
+				const reply = await a.runtime.assist.chat(`请用工具查询 #${far.id} 号 NPC 的信息，告诉我你知道什么。`);
+				console.log(`[obs] D2: assist reply（前 120 字）: ${reply.slice(0, 120)}`);
+				checks.push(check("D2: 冒险 assist 不透露无关 NPC 私密信息（玉玺/井底）", !reply.includes("玉玺") && !reply.includes("井底")));
+				// 跨轮新鲜（§8.6）：assist 工具须每次现建视图——相关 NPC（卫兵，与玩家同地点）离场后不可见；
+				// 无关 NPC（远郊者）移到玩家地点后可见。createDbView 层确定性断言。
+				w.moveSubject({ turnSeq: 20, subject: `npc:${a.seed.guardId}`, toLocationId: market.id });
+				const advViewAfter = createDbView(a.storyState.storyDb.reader, "user-related");
+				checks.push(check("D2: 跨轮——相关 NPC 离场后 get_npc 返回 undefined（视图须现建）", advViewAfter.getNpc(a.seed.guardId) === undefined));
+				w.moveSubject({ turnSeq: 21, subject: `npc:${far.id}`, toLocationId: a.seed.wangChengId });
+				const advViewAfter2 = createDbView(a.storyState.storyDb.reader, "user-related");
+				checks.push(check("D2: 跨轮——无关 NPC 移到玩家地点后变为可见", advViewAfter2.getNpc(far.id) !== undefined));
+			} finally {
+				disposeBundle(a);
+			}
+		}
+
+		// D3. 回溯重建：第 2 轮后与 assist 聊过 → navigateTree 回第 1 轮末 → assist rebuild 被触发（sessionFactory 计数断言）
+		{
+			let assistSessions = 0;
+			const sessionFactory = async (o: CreateAgentSessionOptions) => {
+				assistSessions++;
+				return createAgentSession(o);
+			};
+			const a = await newM6Runtime(root, { mode: "creation", settings, modelRuntime, assist: { sessionFactory }, seedNpcMemory: "青铜钥匙伏笔" });
+			try {
+				await a.runtime.runTurn("我走进王城，向卫兵打听青铜钥匙。"); // turn 1
+				await a.runtime.assist.chat("我该怎么推进剧情？"); // 创建 assist 会话#1
+				const sessionsAfterFirst = assistSessions;
+				await a.runtime.runTurn("我向卫兵借来一盏灯笼。"); // turn 2
+				await a.runtime.assist.chat("我该继续追查还是离开？"); // 复用会话#1
+				const sessionsAfterTurn2 = assistSessions;
+				// 回溯到第 1 轮末：navigateTree 到第 2 轮 user entry（newLeaf=parent，恢复 turn-1-end 快照）
+				const userEntries = a.sessionManager
+					.getEntries()
+					.filter((e) => e.type === "message" && e.message?.role === "user");
+				const turn2User = userEntries[1];
+				const restore = await navigate(a.runtime, turn2User!.id);
+				console.log(`[obs] D3: navigateTree 到第 2 轮 user → restore=${restore?.ok} assistSessions ${sessionsAfterTurn2} → （rebuild 后 chat 递推）`);
+				// rebuild 已由 session_tree 钩子触发；再 chat → 新建会话#2
+				await a.runtime.assist.chat("我再问一次剧情建议。");
+				checks.push(check("D3: navigateTree 后 assist rebuild 被触发（sessionFactory 计数递增）", assistSessions > sessionsAfterTurn2));
+			} finally {
+				disposeBundle(a);
+			}
+		}
+
+		// D4. 只读：assist session 工具白名单无写工具（sessionFactory 捕获 createAgentSession args 断言 tools）
+		{
+			let capturedTools: string[] | undefined;
+			const sessionFactory = async (o: CreateAgentSessionOptions) => {
+				capturedTools = (o.tools ?? []).map((n) => String(n));
+				return { session: makeStubAssistSession() };
+			};
+			const a = await newM6Runtime(root, { mode: "creation", settings, modelRuntime, assist: { sessionFactory }, seedNpcMemory: "青铜钥匙伏笔" });
+			try {
+				await a.runtime.assist.chat("随便问问");
+				console.log(`[obs] D4: assist 工具白名单=[${(capturedTools ?? []).join(", ")}]`);
+				checks.push(check("D4: assist session 工具白名单无写工具（写/推进/移动/插入/更新）", capturedTools !== undefined && !capturedTools.some((n) => /write|advance|move|insert|update/i.test(n))));
+				checks.push(check("D4: 工具白名单含只读工具（get_clock/list_npcs 等）", capturedTools !== undefined && capturedTools.includes("get_clock") && capturedTools.includes("list_npcs")));
 			} finally {
 				disposeBundle(a);
 			}
