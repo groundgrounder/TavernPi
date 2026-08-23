@@ -42,11 +42,15 @@ import {
 	createAgentSession,
 	DefaultResourceLoader,
 	getAgentDir,
+	SettingsManager,
 	type AgentSession,
+	type CompactionResult,
 	type CreateAgentSessionOptions,
 	type ExtensionAPI,
 	type ModelRuntime,
+	type SessionEntry,
 	type SessionManager,
+	type SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
 import type { StoryDb } from "../db/story-db.ts";
 import type { SnapshotsDb } from "../snapshot/snapshots-db.ts";
@@ -55,7 +59,7 @@ import { createSnapshotHooks, type SnapshotHooks } from "../snapshot/hooks.ts";
 import { takeSnapshot } from "../snapshot/snapshots-db.ts";
 import type { TavernModels, TavernSettings } from "../settings.ts";
 import { loadPrompt, renderPlaceholders, type PromptLayerDirs } from "../prompts/loader.ts";
-import type { SubagentRunOptions } from "../subagent/runtime.ts";
+import type { SubagentResult, SubagentRunOptions } from "../subagent/runtime.ts";
 import { buildCollectionInjection } from "../pack/matcher.ts";
 import type { PackCache } from "../pack/cache.ts";
 import { runDataStage, type DataStageOptions, type DataStageOutcome } from "./data-stage.ts";
@@ -83,6 +87,7 @@ import {
 	type SceneCard,
 	type StoryStageOptions,
 } from "./story-stage.ts";
+import { runChapterSummary } from "./chapter-summary.ts";
 import { runStylize, type StylizeOptions } from "./stylize-stage.ts";
 import type { PipelineEventLog } from "./events.ts";
 import { renderDbSummary } from "./db-summary.ts";
@@ -247,6 +252,19 @@ function extractLastAssistantReply(messages: ReadonlyArray<{ role: string; conte
 	return undefined;
 }
 
+/** message 条目的文本（content 数组或纯字符串）。 */
+function messageTextOfEntry(entry: SessionEntry): string {
+	if (entry.type !== "message") return "";
+	const content = (entry.message as { content?: unknown }).content;
+	if (Array.isArray(content)) {
+		return (content as Array<{ type: string; text?: string }>)
+			.filter((c) => c.type === "text")
+			.map((c) => c.text ?? "")
+			.join("");
+	}
+	return typeof content === "string" ? content : "";
+}
+
 /** data_status 中 status='failed' 的轮次，join turn_log 取 user_input/narrative_text（待补齐轮）。 */
 function computePendingTurns(storyDb: StoryDb): DataStageOptions["input"]["pendingTurns"] {
 	const failedTurns = storyDb.reader.listDataStatus().filter((r) => r.status === "failed").map((r) => r.turn_seq);
@@ -373,6 +391,15 @@ export interface StoryRuntimeOptions {
 	/** 系统提示渲染完成回调（§10.2 pipeline 可观测性）：before_agent_start 每次注入后调用，
 	 *  参数为渲染好的当轮系统提示全文（含 db_summary 与当轮预演/场景卡/统筹/打回批注）。观测钩子，不影响渲染语义。 */
 	onSystemPromptRender?: (rendered: string) => void;
+	/** 主叙事 session 的 pi SettingsManager（§3.0/§3.1 compaction 触发参数：keepRecentTokens 等）。
+	 *  缺省走 createAgentSession 默认（~/.pi/agent 全局设置）；测试/验收可传 SettingsManager.inMemory 注入小 keepRecentTokens。 */
+	settingsManager?: SettingsManager;
+	/** 章节摘要 compaction subagent 选项（§3.0/§3.1）：缺省走真实 runSubagent。executor 供测试故障注入。 */
+	chapterSummary?: {
+		executor?: (opts: SubagentRunOptions) => Promise<SubagentResult<unknown>>;
+		/** 重试上限（默认 2）。 */
+		maxAttempts?: number;
+	};
 }
 
 export interface TurnResult {
@@ -420,8 +447,11 @@ export interface StoryRuntime {
 	/** 切换模式（§10.1）：断言可切换、校验当前 subagent 开关符合目标预设、写回 story.meta.json、更新内部状态。
 	 *  adventure 锁定不可切换（含切出）；违规抛中文 Error（列需先重开项，不自动改）。 */
 	setMode(next: StoryMode): void;
-	/** 跑一轮叙事。opts.force = /! 前缀（输入渠道校验强制提交，留痕 warning；§10.1 + §8 决策记录）。 */
+	/** 跑一轮叙事。opts.force = /! 前缀（输入渠道校验强制提交，留痕 warning；§10.1 + §8 决策记录）。
+	 *  skipInputValidation 为内部选项（swipe 重放历史已接受输入时跳过校验），不经公开签名。 */
 	runTurn(input: string, opts?: { force?: boolean }): Promise<TurnResult>;
+	/** /swipe（§3.0 重骰）：基于分支重生成最后一个 user 轮次的响应，旧稿留树。 */
+	swipe(): Promise<TurnResult>;
 	dispose(): void;
 }
 
@@ -560,6 +590,9 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 	const npcModel = resolveRoleModel(settings, "npc", modelRuntime, onWarning);
 	const storyModel = resolveRoleModel(settings, "story", modelRuntime, onWarning);
 	const stylizeModel = resolveRoleModel(settings, "stylize", modelRuntime, onWarning);
+	// 章节摘要 compaction subagent（§3.0/§3.1）：模型配置 settings.models.chapter_summary；缺省走 pi 默认模型。
+	// 提示词由 runChapterSummary 内部 loadPrompt("chapter_summary") 加载，此处只解析模型。
+	const chapterSummaryModel = resolveRoleModel(settings, "chapter_summary", modelRuntime, onWarning);
 
 	// story 阶段 runner 公共选项（storyDb 逐调用注入当前实例——重写循环经快照恢复替换实例后不能持有旧连接）。
 	const storyStageOptsBase: Omit<StoryStageOptions, "storyDb"> = {
@@ -592,6 +625,44 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			});
 			pi.on("session_tree", (event, ctx) => {
 				hooks.sessionTree(event, ctx);
+			});
+			// 章节摘要 compaction（§3.0/§3.1）：session_before_compact 触发时用 chapter_summary subagent
+			// 生成章节摘要（完全替换 pi 默认摘要）。返回 undefined（失败回退默认摘要）绝不阻塞 compaction。
+			pi.on("session_before_compact", async (event) => {
+				const prep = event.preparation;
+				const summary = await runChapterSummary(
+					{
+						branchEntries: event.branchEntries,
+						firstKeptEntryId: prep.firstKeptEntryId,
+						// 迭代 compaction（§3.1）：把上次章节摘要（previousSummary）与 SDK 精确吞并集
+						// （messagesToSummarize + turnPrefixMessages）一并交给 chapter_summary——新摘要吸收前情要点，
+						// 避免前置章节摘要 S1 从活上下文消失导致伏笔丢失。
+						previousSummary: prep.previousSummary,
+						messagesToSummarize: prep.messagesToSummarize,
+						turnPrefixMessages: prep.turnPrefixMessages,
+					},
+					{
+						storyDb: storyState.storyDb,
+						cwd,
+						model: chapterSummaryModel,
+						modelRuntime,
+						prompts,
+						eventLog,
+						executor: opts.chapterSummary?.executor,
+						maxAttempts: opts.chapterSummary?.maxAttempts,
+					},
+				);
+				if (summary === undefined) {
+					onWarning?.(`章节摘要生成失败（回退 pi 默认摘要）：被吞并区段 ${prep.tokensBefore} tokens`);
+					return undefined;
+				}
+				return {
+					compaction: {
+						summary,
+						firstKeptEntryId: prep.firstKeptEntryId,
+						tokensBefore: prep.tokensBefore,
+					} satisfies CompactionResult,
+				};
 			});
 			// 每轮注入通道：before_agent_start 每次 prompt 触发一次，整串替换当轮系统提示。
 			// 渲染逻辑收敛在 renderNarratorPrompt（独立导出，单测确定性覆盖）：
@@ -651,6 +722,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		tools: [],
 		model: narratorModel,
 		modelRuntime,
+		...(opts.settingsManager !== undefined ? { settingsManager: opts.settingsManager } : {}),
 	};
 	let created = await createAgentSession(sessionOptions);
 	let session = created.session;
@@ -663,7 +735,9 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		console.warn(`[warn] ${created.modelFallbackMessage}`);
 	}
 
-	const runTurn = async (input: string, turnOpts?: { force?: boolean }): Promise<TurnResult> => {
+	// 私有 runTurn 主体（§10.2 API 面收口）：skipInputValidation 是内部选项（swipe 重放历史已接受输入故跳过校验），
+	// 不进公开签名（对比 force 有留痕；skipInputValidation 是无痕旁路，不对外暴露）。
+	const runTurnInternal = async (input: string, turnOpts?: { force?: boolean; skipInputValidation?: boolean }): Promise<TurnResult> => {
 		if (session.isStreaming) {
 			throw new Error("isStreaming 期间不能 prompt（应等待上一轮完成）");
 		}
@@ -699,7 +773,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		// 只在模式预设 inputValidation=true（生存/冒险）且 story 开启时生效（story 关闭无场景分析 → 无校验；
 		// inputValidation 模式强制 story 开，故 story 关闭必然是中立的创造降级形态，自洽）。创造模式只看字段不拦截。
 		let forcedInputWarning: string | undefined;
-		if (storyOpts.enabled && sceneCard) {
+		if (storyOpts.enabled && sceneCard && turnOpts?.skipInputValidation !== true) {
 			const validity = computeInputValidityAction(mode, sceneCard, turnOpts?.force ?? false);
 			if (validity.reject) {
 				// 拒绝轮零痕迹：不 prompt 主叙事（输入不进 session 树）、不消耗 turn_seq（未写 turn_log，
@@ -1024,6 +1098,9 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		}
 	};
 
+	// 公开 runTurn（§10.2）：只暴露 force（/! 留痕）；skipInputValidation 为内部选项，不进公开签名。
+	const runTurn = async (input: string, opts?: { force?: boolean }): Promise<TurnResult> => runTurnInternal(input, opts);
+
 	return {
 		session,
 		sessionManager,
@@ -1040,6 +1117,36 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			mode = applyModeSwitch(mode, next, subagentFlags, storyState.storyDir);
 		},
 		runTurn,
+		// /swipe（§3.0 重骰）：基于分支重生成最后一个 user 轮次的响应，旧稿留树。
+		// 找到当前分支最后一个 user message（getBranch）；取其输入文本；navigateTree(u_N) 前查
+		// rewriteHasSnapshot 同款守卫（§3.1：有快照走导航恢复、无快照跳过导航直接重写——首轮/无快照不误清库）；
+		// 然后以同一输入重放完整 pipeline（runTurn，skipInputValidation=true：重放的是历史已接受输入，不再过输入校验）。
+		async swipe(): Promise<TurnResult> {
+			if (session.isStreaming) {
+				throw new Error("isStreaming 期间不能 swipe（应等待上一轮完成）");
+			}
+			const branch = sessionManager.getBranch();
+			const userEntries = branch.filter(
+				(e): e is SessionMessageEntry => e.type === "message" && e.message.role === "user",
+			);
+			const lastUser = userEntries[userEntries.length - 1];
+			if (!lastUser) {
+				throw new Error("没有可重新生成的轮次（当前分支无 user 消息）");
+			}
+			const input = messageTextOfEntry(lastUser);
+			if (input.trim() === "") {
+				throw new Error("最后一个 user 轮次输入为空，无法重新生成");
+			}
+			// 快照守卫（§3.1）：target 是 user 消息 u_N → newLeaf = parentId（N-1 轮末），快照钩子恢复 DB 到 N-1 末；
+			// 无快照（如首轮 u1）跳过导航直接重写（旧稿留在上下文，语义偏差可接受，绝不误清库）。
+			const rewriteHasSnapshot =
+				storyState.snapshotsDb.findNearestSnapshot(buildAncestorChain(sessionManager.getEntries(), lastUser.id)) !== undefined;
+			if (rewriteHasSnapshot) {
+				await session.navigateTree(lastUser.id);
+			}
+			// swipe 走内部路径（skipInputValidation: 重放的是历史已接受输入，不再过输入校验）。
+			return runTurnInternal(input, { skipInputValidation: true });
+		},
 		dispose: () => {
 			session.dispose();
 		},

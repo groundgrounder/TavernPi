@@ -191,6 +191,8 @@ function printHelp(): void {
 			"  /mode              查看当前内核级模式（creation/survival/adventure）",
 			"  /mode <模式>         切换模式（catch 非法切换错；adventure 锁定不可切）",
 			"  /plot <文本>         创造模式专属：写入剧情大纲指令（生存/冒险报错）",
+			"  /swipe             基于分支重生成最后一个 user 轮次（旧稿留树，§3.0）",
+			"  /compact           触发章节摘要 compaction（§3.0/§3.1；会话太小友好提示）",
 			"  /help              本帮助",
 			"  空行               退出（不删故事目录，可 --resume 续写）",
 			"",
@@ -340,6 +342,40 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			const turnSeq = computeNextTurnSeq(runtime.storyState.storyDb);
 			const directive = runtime.storyState.storyDb.writer.insertDirective({ turnSeq, content: arg });
 			console.log(`> 已写入剧情指令 #${directive.id}: ${arg}`);
+			return undefined;
+		}
+		case "swipe": {
+			// /swipe（§3.0 重骰）：基于分支重生成最后一个 user 轮次，旧稿留树。
+			if (arg !== "") {
+				console.log("用法: /swipe（无参数，重生成最后一个 user 轮次）");
+				return undefined;
+			}
+			try {
+				const report = await runtime.swipe();
+				printTurn(report);
+			} catch (err) {
+				console.log(`> swipe 失败: ${err instanceof Error ? err.message : String(err)}`);
+			}
+			return undefined;
+		}
+		case "compact": {
+			// /compact（§3.0/§3.1）：章节摘要 compaction。
+			if (arg !== "") {
+				console.log("用法: /compact（无参数，触发章节摘要 compaction）");
+				return undefined;
+			}
+			try {
+				const result = await runtime.session.compact();
+				console.log(`> compaction 完成: ${result.summary.slice(0, 120)}${result.summary.length > 120 ? "…" : ""}`);
+				console.log(`> 摘要替换 ${result.tokensBefore} tokens（压缩条目已写入会话）`);
+			} catch (err) {
+				const m = err instanceof Error ? err.message : String(err);
+				if (/Nothing to compact|Already compacted/i.test(m)) {
+					console.log(`> compaction 跳过（友好提示）: ${m}`);
+				} else {
+					throw err;
+				}
+			}
 			return undefined;
 		}
 		case "help":

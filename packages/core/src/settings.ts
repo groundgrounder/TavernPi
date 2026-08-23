@@ -20,6 +20,7 @@ export interface TavernModels {
 	story?: ModelRef;
 	npc?: ModelRef;
 	stylize?: ModelRef;
+	chapter_summary?: ModelRef;
 }
 
 export interface TavernSettings {
@@ -31,7 +32,7 @@ export function defaultSettingsPath(): string {
 	return join(homedir(), ".tavernpi", "settings.json");
 }
 
-const MODEL_ROLES = ["narrator", "data", "story", "npc", "stylize"] as const;
+const MODEL_ROLES = ["narrator", "data", "story", "npc", "stylize", "chapter_summary"] as const;
 type ModelRole = (typeof MODEL_ROLES)[number];
 
 function isModelRef(value: unknown): value is ModelRef {

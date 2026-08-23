@@ -221,6 +221,20 @@ export {
 	type StylizeOutput,
 } from "./pipeline/stylize-stage.ts";
 
+// 章节摘要 compaction（§3.0/§3.1：session_before_compact 钩子生成章节摘要替换默认摘要）
+export {
+	CHAPTER_SUMMARY_INSTRUCTIONS_TEXT,
+	CHAPTER_SUMMARY_JSON_SCHEMA,
+	CHAPTER_SUMMARY_OUTPUT_TOOL_NAME,
+	buildChapterSummaryUserPrompt,
+	chapterSummaryZodSchema,
+	extractSwallowedMessages,
+	runChapterSummary,
+	type ChapterSummaryInput,
+	type ChapterSummaryOptions,
+	type ChapterSummaryOutput,
+} from "./pipeline/chapter-summary.ts";
+
 // StoryRuntime 编排器（§10.2 API 面 M2 形态 + §6.2 npc 阶段 + §6.3 story 阶段 + §6.4 stylize）
 export {
 	computeNextTurnSeq,

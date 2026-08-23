@@ -23,7 +23,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { SessionManager, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { SessionManager, ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 import {
 	createPipelineEventLog,
 	createStory,
@@ -40,6 +40,7 @@ import {
 	writeStoryMeta,
 	type PromptLayerDirs,
 	type SceneCard,
+	type SnapshotRestoreResult,
 	type StoryMode,
 	type StoryRuntime,
 	type StoryState,
@@ -79,6 +80,33 @@ function printChecks(checks: Check[]): void {
 
 function stubResult(output: unknown): SubagentResult<unknown> {
 	return { output, usage: ZERO_USAGE, durationMs: 1 };
+}
+
+/** navigateTree 到目标条目，返回快照钩子恢复结果。 */
+async function navigate(runtime: StoryRuntime, targetId: string): Promise<SnapshotRestoreResult | undefined> {
+	if (runtime.session.isStreaming) throw new Error("isStreaming 期间不能 navigateTree");
+	await runtime.session.navigateTree(targetId);
+	return runtime.hooks.state.lastRestoreResult;
+}
+
+/** 消息条目中 role=assistant 的数量。 */
+function countAssistant(entries: ReadonlyArray<{ type?: string; message?: { role?: string } }>): number {
+	return entries.filter((e) => e.type === "message" && e.message?.role === "assistant").length;
+}
+
+/** buildSessionContext 消息文本：compactionSummary 用 summary 字段；其余用 content（字符串或 content 块数组）。 */
+function contextText(msg: unknown): string {
+	const m = msg as { content?: unknown; summary?: unknown };
+	if (typeof m.summary === "string") return m.summary;
+	const content = m.content;
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return (content as Array<{ type: string; text?: string }>)
+			.filter((c) => c.type === "text")
+			.map((c) => c.text ?? "")
+			.join("");
+	}
+	return "";
 }
 
 function isProviderError(err: unknown): boolean {
@@ -175,6 +203,14 @@ async function newM6Runtime(
 		onSystemPromptRender?: (rendered: string) => void;
 		settings?: Parameters<typeof createStoryRuntime>[0]["settings"];
 		modelRuntime?: Parameters<typeof createStoryRuntime>[0]["modelRuntime"];
+		settingsManager?: Parameters<typeof createStoryRuntime>[0]["settingsManager"];
+		chapterSummaryExecutor?: Parameters<typeof createStoryRuntime>[0]["chapterSummary"] extends infer U
+			? U extends { executor?: infer E }
+				? E
+				: never
+			: never;
+		/** 若提供，给卫兵 NPC 种入一条含该标记的记忆（renderDbSummary 会带上，供章节摘要断言伏笔要素）。 */
+		seedNpcMemory?: string;
 	},
 ): Promise<M6Bundle> {
 	const cwd = root;
@@ -189,6 +225,9 @@ async function newM6Runtime(
 	};
 	writeStoryMeta(storyDir, { packs: [], mode: opts.mode, createdAt: new Date().toISOString() });
 	const seed = seedStoryStage(storyState.storyDb);
+	if (opts.seedNpcMemory !== undefined) {
+		storyState.storyDb.writer.insertNpcMemory({ npcId: seed.guardId, turnSeq: 0, kind: "观察", content: opts.seedNpcMemory, salience: 0.9 });
+	}
 	const systemPrompts: string[] = [];
 	const warnings: string[] = [];
 	const runtime = await createStoryRuntime({
@@ -197,6 +236,8 @@ async function newM6Runtime(
 		storyState,
 		settings: opts.settings,
 		modelRuntime: opts.modelRuntime,
+		...(opts.settingsManager !== undefined ? { settingsManager: opts.settingsManager } : {}),
+		...(opts.chapterSummaryExecutor !== undefined ? { chapterSummary: { executor: opts.chapterSummaryExecutor } } : {}),
 		eventLog: createPipelineEventLog(),
 		npc: { enabled: opts.npc?.enabled ?? true, executor: npcExecutor() },
 		story: { enabled: true, executor: opts.storyExecutor ?? storyExecutor(validSceneCard({ valid: true })) },
@@ -590,6 +631,181 @@ async function main(): Promise<void> {
 			console.log(`[obs] B11b: exit=${r.code} /plot 输出含「该模式不可用」=${r.stdout.includes("该模式不可用")}`);
 			if (r.code !== 0) console.log(`[obs] B11b stderr: ${r.stderr.slice(0, 200)}`);
 			checks.push(check("B11b: m6-cli 生存模式 /plot 报错「该模式不可用」", r.code === 0 && r.stdout.includes("该模式不可用")));
+		}
+
+		// ================= C. 章节摘要 compaction + /swipe（真实 LLM） =================
+		console.log("\n===== C. 章节摘要 compaction + /swipe（§3.0/§3.1） =====");
+
+		// C1a. 章节摘要 compaction：数轮叙事 → /compact → 摘要含章节摘要特征（伏笔标记）；上下文替换；后续连贯
+		{
+			const marker = "青铜钥匙";
+			const settingsManager = SettingsManager.inMemory({
+				defaultProvider: "deepseek",
+				defaultModel: "deepseek-v4-flash",
+				compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 1 },
+			});
+			const a = await newM6Runtime(root, {
+				mode: "creation",
+				settings,
+				modelRuntime,
+				settingsManager,
+				seedNpcMemory: "我曾在王陵见过一枚刻着暗纹的青铜钥匙（伏笔）",
+			});
+			try {
+				const inputs = [
+					"我走进王城，向卫兵打听青铜钥匙的来历。",
+					"我追问那枚青铜钥匙上的暗纹是什么意思。",
+					"我决定去王陵查证这条线索。",
+				];
+				let ok = true;
+				for (const input of inputs) {
+					const r = await a.runtime.runTurn(input);
+					ok = ok && r.data.ok;
+				}
+				checks.push(check("C1a: 数轮叙事 data.ok（供 compaction 前置）", ok));
+				const comp = await a.runtime.session.compact();
+				console.log(`[obs] C1a: compact summary（前 200 字）: ${comp.summary.slice(0, 200)}`);
+				checks.push(
+					check("C1a: compaction 摘要含章节摘要特征（在场 NPC/伏笔标记 青铜钥匙或暗纹）", comp.summary.includes("青铜钥匙") || comp.summary.includes("暗纹")),
+				);
+				// 压缩后上下文含摘要、被吞并原文（首个 user 输入原文）不再进上下文
+				const ctx = a.sessionManager.buildSessionContext();
+				const ctxAll = ctx.messages.map((m) => contextText(m)).join("\n");
+				checks.push(check("C1a: 压缩后上下文含摘要（青铜钥匙/暗纹伏笔要素）", ctxAll.includes("青铜钥匙") || ctxAll.includes("暗纹")));
+				checks.push(check("C1a: 被吞并原文（首个 user 输入）不再进上下文", !ctxAll.includes(inputs[0]!)));
+				// 后续一轮叙事连贯（能引用摘要中的伏笔；DB 摘要仍含该标记，故叙事应提到）
+				const follow = await a.runtime.runTurn("我顺着那条线索，问卫兵可否让我看一眼那把钥匙。");
+				console.log(`[obs] C1a: compaction 后后续叙事（前 100 字）: ${follow.narrativeText.slice(0, 100)}`);
+				// 连贯性：后续叙事引用伏笔（钥匙/暗纹，摘要与 DB 权威事实中的前设）；LLM 措辞可能不同，放宽为「钥」或「暗纹」。
+				checks.push(check("C1a: compaction 后后续叙事连贯（引用伏笔 青铜钥匙/钥匙/暗纹）", follow.narrativeText.includes("钥") || follow.narrativeText.includes("暗纹")));
+			} finally {
+				disposeBundle(a);
+			}
+		}
+
+		// C1b. 迭代 compaction（桩）：第二次 compact 的 chapter_summary 输入含第一次摘要的独特标记（前情不丢）
+		{
+			const firstMarker = "前情摘要独特标记：紫晶王座";
+			const settingsManager = SettingsManager.inMemory({
+				defaultProvider: "deepseek",
+				defaultModel: "deepseek-v4-flash",
+				compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 1 },
+			});
+			const prompts: string[] = [];
+			let call = 0;
+			const chapterStub = async (o: SubagentRunOptions): Promise<SubagentResult<unknown>> => {
+				prompts.push(o.userPrompt);
+				call++;
+				// 第一次返回带标记摘要（成为第二次 previousSummary）；第二次返回普通摘要（避免真跑 LLM）。
+				return stubResult({ summary: call === 1 ? firstMarker : `第二次章节摘要（迭代）` });
+			};
+			const a = await newM6Runtime(root, {
+				mode: "creation",
+				settings,
+				modelRuntime,
+				settingsManager,
+				chapterSummaryExecutor: chapterStub,
+				seedNpcMemory: "青铜钥匙伏笔",
+			});
+			try {
+				await a.runtime.runTurn("我走进王城，向卫兵打听青铜钥匙。");
+				await a.runtime.runTurn("我向卫兵借来一盏灯笼。");
+				await a.runtime.session.compact(); // 第一次 compact（summary = firstMarker）
+				// 第一次 compact 后追加一轮（产生第二次吞并区段，且分支末不再是 compaction 条目）
+				await a.runtime.runTurn("我沿着线索走出城门。");
+				await a.runtime.session.compact(); // 第二次 compact（previousSummary = firstMarker）
+				const secondPrompt = prompts[1] ?? "";
+				console.log(`[obs] C1b: prompts=${prompts.length} 第二次输入含前情标记=${secondPrompt.includes(firstMarker)} 含前情小节=${secondPrompt.includes("## 前情章节摘要")}`);
+				checks.push(check("C1b: 第二次 compact 的 chapter_summary 输入含第一次摘要独特标记（前情不丢）", secondPrompt.includes(firstMarker)));
+				checks.push(check("C1b: 第二次 compact 输入含「前情章节摘要」小节", secondPrompt.includes("## 前情章节摘要")));
+			} finally {
+				disposeBundle(a);
+			}
+		}
+
+		// C2. 压缩区快照语义：compaction 后 navigateTree 到压缩区内部 entry → DB 恢复到对应祖先快照；后退再前进 data/快照正常
+		{
+			const settingsManager = SettingsManager.inMemory({
+				defaultProvider: "deepseek",
+				defaultModel: "deepseek-v4-flash",
+				compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 1 },
+			});
+			const a = await newM6Runtime(root, { mode: "creation", settings, modelRuntime, settingsManager, seedNpcMemory: "青铜钥匙伏笔" });
+			try {
+				const inputs = [
+					"我走进王城，向卫兵打听青铜钥匙。",
+					"我向卫兵借来一盏灯笼。",
+					"我沿着线索走出城门。",
+				];
+				const reports: TurnResult[] = [];
+				for (const input of inputs) {
+					reports.push(await a.runtime.runTurn(input));
+				}
+				const eventsBefore = a.storyState.storyDb.reader.listEvents().length;
+				await a.runtime.session.compact();
+				console.log(`[obs] C2: compaction 后 eventsBefore=${eventsBefore}`);
+				// navigateTree 到压缩区内部 entry（第 2 轮 user，位于 compaction 之前）→ DB 恢复到第 1 轮末快照
+				const restore = await navigate(a.runtime, reports[1]!.userEntryId);
+				console.log(`[obs] C2: navigateTree 到第 2 轮 user → restore=${restore?.ok} restoredTurnSeq=${restore?.restoredTurnSeq}`);
+				checks.push(check("C2: compaction 后 navigateTree 到压缩区 entry 恢复 ok", restore?.ok === true));
+				checks.push(check(`C2: 恢复到的快照轮次=1（第 1 轮末；实际 ${restore?.restoredTurnSeq}）`, restore?.restoredTurnSeq === 1));
+				// 恢复后正常前进一轮：data.ok + 快照正常（turn 2 复用）
+				const fwd = await a.runtime.runTurn("我重新审视这条线索。");
+				console.log(`[obs] C2: 恢复后前进一轮 turnSeq=${fwd.turnSeq} data.ok=${fwd.data.ok} snapshot=${fwd.snapshotTaken}`);
+				checks.push(check("C2: 恢复后前进一轮 data.ok + 快照正常", fwd.data.ok && fwd.snapshotTaken));
+			} finally {
+				disposeBundle(a);
+			}
+		}
+
+		// C3. /swipe：基于分支重生成最后一个 user 轮次（旧稿留树、DB 不双重落库）；首轮 swipe 不报错
+		{
+			const settingsManager = SettingsManager.inMemory({
+				defaultProvider: "deepseek",
+				defaultModel: "deepseek-v4-flash",
+				compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 1 },
+			});
+			const a = await newM6Runtime(root, { mode: "creation", settings, modelRuntime, settingsManager, seedNpcMemory: "青铜钥匙伏笔" });
+			try {
+				const r1 = await a.runtime.runTurn("我走进王城，向卫兵打听青铜钥匙。");
+				const r2 = await a.runtime.runTurn("我向卫兵借来一盏灯笼。");
+				const assistantBefore = countAssistant(a.sessionManager.getEntries());
+				const eventsBefore = a.storyState.storyDb.reader.listEvents().length;
+				// swipe：重生成最后一个 user 轮次（turn 2）
+				const sw = await a.runtime.swipe();
+				const assistantAfter = countAssistant(a.sessionManager.getEntries());
+				const eventsAfter = a.storyState.storyDb.reader.listEvents().length;
+				console.log(
+					`[obs] C3: swipe turnSeq=${sw.turnSeq} assistant ${assistantBefore}→${assistantAfter} events ${eventsBefore}→${eventsAfter} data.ok=${sw.data.ok} snapshot=${sw.snapshotTaken}`,
+				);
+				checks.push(check("C3: swipe 后旧稿留树（assistant 条目 +1，b 分支可见两稿）", assistantAfter === assistantBefore + 1));
+				checks.push(check("C3: swipe 后 DB 不双重落库（events 数不变）", eventsAfter === eventsBefore));
+				checks.push(check("C3: swipe 后数据正常落库 + 快照正常", sw.data.ok && sw.snapshotTaken));
+			} finally {
+				disposeBundle(a);
+			}
+		}
+
+		// C3b. 首轮 swipe（u1，唯一 user 消息）→ 空库兜底不报错
+		{
+			const settingsManager = SettingsManager.inMemory({
+				defaultProvider: "deepseek",
+				defaultModel: "deepseek-v4-flash",
+				compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 1 },
+			});
+			const a = await newM6Runtime(root, { mode: "creation", settings, modelRuntime, settingsManager, seedNpcMemory: "青铜钥匙伏笔" });
+			try {
+				await a.runtime.runTurn("我走进王城。");
+				let threw: unknown = null;
+				try {
+					await a.runtime.swipe();
+				} catch (err) {
+					threw = err;
+				}
+				checks.push(check("C3b: 首轮 swipe（u1）空库兜底不报错", threw === null));
+			} finally {
+				disposeBundle(a);
+			}
 		}
 
 		console.log("\n===== M6 验收检查表 =====");
