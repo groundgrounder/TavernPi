@@ -89,7 +89,20 @@ import {
 } from "./story-stage.ts";
 import { runChapterSummary } from "./chapter-summary.ts";
 import { createAssistAdvisor, type AssistAdvisor } from "../assist.ts";
+import {
+	applyChangeset,
+	changesetZodSchema,
+	type ApplySummary,
+	type Changeset,
+} from "./changeset.ts";
+import { InteractionBroker } from "../interaction/broker.ts";
 import { runStylize, type StylizeOptions } from "./stylize-stage.ts";
+import {
+	clearStoryPromptOverride,
+	resolvePromptChain,
+	setStoryPromptOverride,
+	type PromptChainInfo,
+} from "../prompts/loader.ts";
 import type { PipelineEventLog } from "./events.ts";
 import { renderDbSummary } from "./db-summary.ts";
 import {
@@ -107,6 +120,29 @@ export function computeNextTurnSeq(storyDb: StoryDb): number {
 	const logs = storyDb.reader.getTurnLog();
 	const last = logs.at(-1);
 	return last ? last.turn_seq + 1 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// 轮中交互 broker 访问器（§6.7 + §10.2）：主叙事 session 是唯一宿主——runtime 创建时注册当前 broker，
+// 卡包 extension 代码 import tavernpi-core 的 getInteractionBroker() 取当前 runtime 的 broker 调 request。
+// dispose 时若仍是最新注册则清除。
+// ---------------------------------------------------------------------------
+
+let currentRuntimeBroker: InteractionBroker | undefined;
+
+/** 取当前 runtime 的轮中交互 broker（卡包自定义工具发起交互用）；无/已清除返回 undefined。 */
+export function getInteractionBroker(): InteractionBroker | undefined {
+	return currentRuntimeBroker;
+}
+
+/** 注册当前 runtime broker（runtime 创建时调用；已注册时直接替换——单一宿主）。 */
+function registerRuntimeBroker(broker: InteractionBroker): void {
+	currentRuntimeBroker = broker;
+}
+
+/** 清除当前 runtime broker（仅当指向同一实例；dispose 时调用）。 */
+function clearRuntimeBroker(broker: InteractionBroker): void {
+	if (currentRuntimeBroker === broker) currentRuntimeBroker = undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +243,18 @@ function readStoryMetaDefaultStyle(storyDir: string): string | undefined {
 		return typeof meta.defaultStyle === "string" ? meta.defaultStyle : undefined;
 	} catch {
 		return undefined;
+	}
+}
+
+/** 收集卡包代码挂载入口（§4.1/M6-P4a）：story.meta.json packs[].extensionEntryPaths 展平；无则空数组。 */
+function collectCodePackEntryPaths(storyDir: string): string[] {
+	try {
+		const meta = JSON.parse(readFileSync(join(storyDir, "story.meta.json"), "utf8")) as {
+			packs?: Array<{ extensionEntryPaths?: string[] }>;
+		};
+		return (meta.packs ?? []).flatMap((p) => p.extensionEntryPaths ?? []);
+	} catch {
+		return [];
 	}
 }
 
@@ -445,15 +493,33 @@ export interface TurnResult {
 	collection?: { injected: string[]; warnings: string[] };
 }
 
+/** 提示词分层管理（§10.2「各层读写与覆盖链查询」），绑定当前 runtime 的层目录。 */
+export interface RuntimePrompts {
+	/** 当前 runtime 生效的提示词层目录。 */
+	dirs: PromptLayerDirs;
+	/** 覆盖链查询：四层各自状态（路径/是否存在/内容长度/是否生效层）+ 生效层。 */
+	resolveChain(role: string): PromptChainInfo;
+	/** 写/覆盖 story 层提示词覆盖（<storyDir>/prompts/<role>.md）。 */
+	setStoryOverride(role: string, content: string): void;
+	/** 删 story 层提示词覆盖（不存在则 no-op）。 */
+	clearStoryOverride(role: string): void;
+}
+
 export interface StoryRuntime {
 	session: AgentSession;
 	sessionManager: SessionManager;
 	storyState: StoryState;
 	hooks: SnapshotHooks;
-	/** 当前内核级模式（§10.1）。 */
 	readonly mode: StoryMode;
 	/** 带外顾问（§6.8）：会话式、只读、草稿制、无开关；不进叙事流。回溯/前进/fork 已由 session_tree 钩子同步重建。 */
 	assist: AssistAdvisor;
+	/** 受信任写入（§6.1 写者例外 + §10.2承诺面）：pipeline 外唯一合法写路径（编辑器直改场景）。
+	 *  复用 changeset zod schema + 语义校验 + applyChangeset；校验失败 → 抛中文错列全部问题、不落库。 */
+	trustedWrite(changeset: Changeset): Promise<{ summary: ApplySummary; turnSeq: number; snapshotTaken: boolean }>;
+	/** 轮中交互 broker（§6.7）：主叙事 session 卡包自定义工具经 getInteractionBroker() 取当前 broker 调 request。 */
+	interaction: InteractionBroker;
+	/** 提示词分层管理（§10.2「各层读写与覆盖链查询」），绑定当前 runtime 的层目录。 */
+	prompts: RuntimePrompts;
 	/** 切换模式（§10.1）：断言可切换、校验当前 subagent 开关符合目标预设、写回 story.meta.json、更新内部状态。
 	 *  adventure 锁定不可切换（含切出）；违规抛中文 Error（列需先重开项，不自动改）。 */
 	setMode(next: StoryMode): void;
@@ -593,8 +659,11 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		onWarning,
 	});
 
-	// 主叙事提示词模板（占位符 before_agent_start 每轮现算注入）。
-	const narratorTemplate = loadPrompt("narrator", prompts).content;
+	// 运行时提示词目录（含 storyDir 故事层）：活管线与管理 API 共用（§10.2；story 级覆盖下轮生效——
+	// narrator 模板每轮现载、subagent 逐调用现载）。
+	const runtimePromptDirs: PromptLayerDirs = { ...prompts, storyDir: storyState.storyDir };
+	// 主叙事提示词模板：before_agent_start 每轮现载（占位符同轮现算注入；story 层覆盖下轮生效）。
+	const loadNarratorTemplate = (): string => loadPrompt("narrator", runtimePromptDirs).content;
 	const narratorModel = resolveRoleModel(settings, "narrator", modelRuntime, onWarning);
 	const dataModel = resolveRoleModel(settings, "data", modelRuntime, onWarning);
 	const npcModel = resolveRoleModel(settings, "npc", modelRuntime, onWarning);
@@ -612,7 +681,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		storyDb: () => storyState.storyDb,
 		mode: () => mode,
 		cwd,
-		prompts,
+		prompts: runtimePromptDirs,
 		modelRuntime,
 		// opts.assist.model 覆盖 settings.models.assist 解析模型（供测试注入可控模型）。
 		model: opts.assist?.model ?? assistModel,
@@ -625,7 +694,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		cwd,
 		model: storyModel,
 		modelRuntime,
-		prompts,
+		prompts: runtimePromptDirs,
 		eventLog,
 		executor: storyOpts.executor,
 	};
@@ -675,7 +744,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 						cwd,
 						model: chapterSummaryModel,
 						modelRuntime,
-						prompts,
+						prompts: runtimePromptDirs,
 						eventLog,
 						executor: opts.chapterSummary?.executor,
 						maxAttempts: opts.chapterSummary?.maxAttempts,
@@ -701,7 +770,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			// 注入报告暂存 pendingCollectionReport，供 TurnResult.collection（最后一次 prompt 的结果）。
 			pi.on("before_agent_start", () => {
 				const result = renderNarratorPrompt({
-					template: narratorTemplate,
+					template: loadNarratorTemplate(),
 					storyDb: () => storyState.storyDb,
 					packs: opts.packs,
 					currentInput: () => pendingCollectionInput ?? "",
@@ -725,6 +794,9 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		},
 	];
 
+	// 卡包代码挂载（§4.1/M6-P4a）：主叙事 session 是宿主——story.meta.json packs[].extensionEntryPaths
+	// 经 additionalExtensionPaths 委托 pi loader 加载卡包 extension（工具注册进主叙事 session）。
+	const codePackEntryPaths = collectCodePackEntryPaths(storyState.storyDir);
 	const loader = new DefaultResourceLoader({
 		cwd,
 		agentDir: getAgentDir(),
@@ -732,37 +804,57 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		noSkills: true,
 		noPromptTemplates: true,
 		noContextFiles: true,
-		systemPromptOverride: () => narratorTemplate,
+		systemPromptOverride: () => loadNarratorTemplate(),
 		agentsFilesOverride: () => ({ agentsFiles: [] }),
 		skillsOverride: () => ({ skills: [], diagnostics: [] }),
 		promptsOverride: () => ({ prompts: [], diagnostics: [] }),
 		extensionFactories,
+		// 卡包 extension 入口（无代码包则不传 → 零工具，m2 零工具验收零影响）。
+		...(codePackEntryPaths.length > 0 ? { additionalExtensionPaths: codePackEntryPaths } : {}),
 	});
 	await loader.reload();
 
-	// 零工具会话：tools 是严格白名单，空数组 = 零工具（§6.0 主叙事不持有 DB 工具）。
-	// 构建后断言；若非空（SDK 行为异常）则回退 noTools:"builtin" 重建（customTools 为空，
-	// noTools 只会关闭内置工具，最终仍为零工具）。
+	// 枚举卡包 extension 注册的自定义工具名（SDK tools 白名单需静态名字）：loader.getExtensions() 的 extensions[].tools。
+	const codePackToolNames = codePackEntryPaths.length > 0
+		? loader.getExtensions().extensions.flatMap((e) => [...e.tools.keys()])
+		: [];
+
+	// 零工具会话（无代码包时 tools:[]）：tools 是严格白名单——卡包工具注入主叙事（§6.0 禁的是 DB 工具，非全部工具）。
+	// 构建后断言活动工具集 = 卡包工具集（无内置/DB 工具混入）；无代码包零工具 → 回退 noTools:"builtin" 对齐旧行为。
 	const sessionOptions: CreateAgentSessionOptions = {
 		cwd,
 		sessionManager,
 		resourceLoader: loader,
 		customTools: [],
-		tools: [],
+		tools: codePackToolNames,
 		model: narratorModel,
 		modelRuntime,
 		...(opts.settingsManager !== undefined ? { settingsManager: opts.settingsManager } : {}),
 	};
 	let created = await createAgentSession(sessionOptions);
 	let session = created.session;
-	if (session.getActiveToolNames().length > 0) {
-		session.dispose();
-		created = await createAgentSession({ ...sessionOptions, tools: undefined, noTools: "builtin" });
-		session = created.session;
+	{
+		const active = new Set(session.getActiveToolNames());
+		const expected = new Set(codePackToolNames);
+		const mismatch = active.size !== expected.size || [...active].some((n) => !expected.has(n));
+		if (mismatch) {
+			session.dispose();
+			if (codePackToolNames.length === 0) {
+				// 零工具形态：回退 noTools:"builtin"（SDK 意外塞内置工具；customTools 为空 → 最终仍零工具）。
+				created = await createAgentSession({ ...sessionOptions, tools: undefined, noTools: "builtin" });
+				session = created.session;
+			} else {
+				throw new Error(`卡包工具集未精确成立：期望 [${codePackToolNames.join(",")}]，实际 [${[...active].join(",")}]`);
+			}
+		}
 	}
 	if (created.modelFallbackMessage) {
 		console.warn(`[warn] ${created.modelFallbackMessage}`);
 	}
+
+	// 轮中交互 broker（§6.7）：主叙事 session 是唯一宿主——注册当前 runtime broker，卡包工具经 getInteractionBroker() 取用。
+	const interaction = new InteractionBroker();
+	registerRuntimeBroker(interaction);
 
 	// 私有 runTurn 主体（§10.2 API 面收口）：skipInputValidation 是内部选项（swipe 重放历史已接受输入故跳过校验），
 	// 不进公开签名（对比 force 有留痕；skipInputValidation 是无痕旁路，不对外暴露）。
@@ -866,7 +958,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				cwd,
 				model: npcModel,
 				modelRuntime,
-				prompts,
+				prompts: runtimePromptDirs,
 				eventLog,
 				maxAttempts: npcOpts.maxAttempts,
 				executor: npcOpts.executor,
@@ -975,7 +1067,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 						cwd,
 						model: stylizeModel,
 						modelRuntime,
-						prompts,
+						prompts: runtimePromptDirs,
 						eventLog,
 						maxAttempts: stylizeOpts.maxAttempts,
 						executor: stylizeOpts.executor,
@@ -1028,7 +1120,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				cwd,
 				model: dataModel,
 				modelRuntime,
-				prompts,
+				prompts: runtimePromptDirs,
 				eventLog,
 				maxAttempts: maxDataAttempts,
 				executor: opts.dataExecutor,
@@ -1130,12 +1222,22 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 	// 公开 runTurn（§10.2）：只暴露 force（/! 留痕）；skipInputValidation 为内部选项，不进公开签名。
 	const runTurn = async (input: string, opts?: { force?: boolean }): Promise<TurnResult> => runTurnInternal(input, opts);
 
+	// 提示词分层管理（§10.2「各层读写与覆盖链查询」）：绑定当前 runtime 层目录 + story 覆盖写。
+	// runtimePromptDirs 定义于构建期前部（活管线共用）；story 级覆盖下轮生效。
+
 	return {
 		session,
 		sessionManager,
 		storyState,
 		hooks,
 		assist,
+		interaction,
+		prompts: {
+			dirs: runtimePromptDirs,
+			resolveChain: (role: string) => resolvePromptChain(runtimePromptDirs, role),
+			setStoryOverride: (role: string, content: string) => setStoryPromptOverride(storyState.storyDir, role, content),
+			clearStoryOverride: (role: string) => clearStoryPromptOverride(storyState.storyDir, role),
+		},
 		get mode() {
 			return mode;
 		},
@@ -1149,6 +1251,36 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			void assist.rebuild();
 		},
 		runTurn,
+		// 受信任写入（§6.1 写者例外 + §10.2承诺面）：校验失败抛中文错列全部问题、零落库；
+		// turnSeq 取 turn_log 最大（无轮次取 0）；写后 takeSnapshot 绑定当前 leaf（快照绑定语义与轮末一致）。
+		async trustedWrite(changeset: Changeset): Promise<{ summary: ApplySummary; turnSeq: number; snapshotTaken: boolean }> {
+			if (session.isStreaming) {
+				throw new Error("isStreaming 期间不能 trustedWrite（应等待当前轮完成）");
+			}
+			const parsed = changesetZodSchema.safeParse(changeset);
+			if (!parsed.success) {
+				throw new Error(
+					`受信任写入变更集格式非法：${parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}`,
+				);
+			}
+			const turnSeq = storyState.storyDb.reader.getTurnLog().at(-1)?.turn_seq ?? 0;
+			const summary = applyChangeset(storyState.storyDb, parsed.data, { turnSeq });
+			const leafId = sessionManager.getLeafId();
+			let snapshotTaken = false;
+			if (leafId !== null) {
+				await takeSnapshot(storyState.storyDb, { turnSeq, sessionEntryId: leafId });
+				snapshotTaken = true;
+			}
+			eventLog?.record({
+				ts: new Date().toISOString(),
+				turnSeq,
+				role: "trusted_write",
+				ok: true,
+				durationMs: 0,
+				inputChars: JSON.stringify(changeset).length,
+			});
+			return { summary, turnSeq, snapshotTaken };
+		},
 		// /swipe（§3.0 重骰）：基于分支重生成最后一个 user 轮次的响应，旧稿留树。
 		// 找到当前分支最后一个 user message（getBranch）；取其输入文本；navigateTree(u_N) 前查
 		// rewriteHasSnapshot 同款守卫（§3.1：有快照走导航恢复、无快照跳过导航直接重写——首轮/无快照不误清库）；
@@ -1183,6 +1315,8 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			session.dispose();
 			// 级联释放带外顾问（§6.8）inMemory 会话资源。
 			assist.dispose();
+			// 清除轮中交互 broker 注册（§6.7）：仅当仍指向本实例。
+			clearRuntimeBroker(interaction);
 		},
 	};
 }

@@ -178,6 +178,8 @@ async function newM4Runtime(
 		overseeEveryTurns?: number;
 		maxRevisions?: number;
 		storyExecutor?: (o: SubagentRunOptions) => Promise<SubagentResult<unknown>>;
+		/** 用 seed 构建 story executor（需在 seed 落库后引用 NPC id；优先于 storyExecutor）。 */
+		storyExecutorBuilder?: (seed: M4Seed) => (o: SubagentRunOptions) => Promise<SubagentResult<unknown>>;
 		stylize?: { enabled: boolean; styleHint?: string; executor?: (o: SubagentRunOptions) => Promise<SubagentResult<unknown>> };
 		dataExecutor?: (o: SubagentRunOptions) => Promise<SubagentResult<unknown>>;
 		withDeadNpc?: boolean;
@@ -208,7 +210,7 @@ async function newM4Runtime(
 			enabled: true,
 			overseeEveryTurns: opts.overseeEveryTurns ?? 99,
 			...(opts.maxRevisions !== undefined ? { maxRevisions: opts.maxRevisions } : {}),
-			executor: opts.storyExecutor,
+			executor: opts.storyExecutorBuilder !== undefined ? opts.storyExecutorBuilder(seed) : opts.storyExecutor,
 		},
 		stylize: opts.stylize?.enabled
 			? { enabled: true, styleHint: opts.stylize.styleHint, executor: opts.stylize.executor }
@@ -355,7 +357,45 @@ async function main(): Promise<void> {
 			offscreenAfterTurns: 99,
 			overseeEveryTurns: 99,
 			maxRevisions: 1,
-			storyExecutor: b1ReviewExecutor, // review 恒 hard → 两稿都打回 → 超限放行
+			// B2 需确定性地触发「超限放行」：用 scene 桩在 LAOWANG 轮返回 rule-2 硬冲突卡
+			// （贝罗在场但位于市集 ≠ 玩家位置——validateSceneCard 容忍、runRuleChecks 规则 2 硬冲突），
+			// 使每稿都命中 revisionBasis → revision(1) >= maxRevisions(1) → releasedWithWarnings=true，
+			// 不再依赖真实 LLM 的「重写稿是否仍提死者名」方差。review 桩仍恒 hard（对齐 B1）。
+			storyExecutorBuilder: (seed) => async (o: SubagentRunOptions) => {
+				if (o.role === "story_scene") {
+					const isLaowang = o.userPrompt.includes("老王");
+					const card = isLaowang
+						? // 硬冲突：贝罗（市集）被列入在场（位置 ≠ 玩家 酒馆）→ runRuleChecks 规则 2
+							{
+								onstage_npc_ids: [seed.berlo.id],
+								offscreen_npc_ids: [],
+								scene_location_name: "酒馆",
+								current_story_time: "0000-01-01",
+								time_span_estimate: "x",
+								to_time_suggestion: "0000-01-01",
+								scene_goal: "g",
+								tone: "t",
+								major_event: false,
+							}
+						: // 干净卡：梅姑在场（与玩家同地点 酒馆）
+							{
+								onstage_npc_ids: [seed.mei.id],
+								offscreen_npc_ids: [],
+								scene_location_name: "酒馆",
+								current_story_time: "0000-01-01",
+								time_span_estimate: "x",
+								to_time_suggestion: "0000-01-01",
+								scene_goal: "g",
+								tone: "t",
+								major_event: false,
+							};
+					return stubResult(card);
+				}
+				if (o.role === "story_review") {
+					return stubResult({ findings: [{ kind: "timeline", description: "叙事时间与库内时钟矛盾（注入）", severity: "hard" }] });
+				}
+				return runSubagent(o);
+			},
 			dataExecutor: b2DataExecutor,
 			withDeadNpc: true,
 		});

@@ -7,10 +7,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { cleanupTempDir, makeTempDir } from "./helpers.ts";
 import {
+	assertValidRole,
 	builtinPromptsDir,
+	clearStoryPromptOverride,
 	defaultGlobalPromptsDir,
 	loadPrompt,
 	renderPlaceholders,
+	resolvePromptChain,
+	setStoryPromptOverride,
 } from "../src/prompts/loader.ts";
 
 /** 在 <root>/prompts/ 下写 <role>.md（层目录语义：pack/story 是根目录）。 */
@@ -39,12 +43,12 @@ test("各层单独命中：global/pack/story 均以自身内容覆盖低层", ()
 		assert.equal(loadPrompt("narrator", { globalDir }).content, "全局内容");
 
 		writeLayerPrompt(packDir, "narrator", "卡包内容");
-		assert.equal(loadPrompt("narrator", { globalDir, packDir }).layer, "pack");
-		assert.equal(loadPrompt("narrator", { globalDir, packDir }).content, "卡包内容");
+		assert.equal(loadPrompt("narrator", { globalDir, packDirs: [packDir] }).layer, "pack");
+		assert.equal(loadPrompt("narrator", { globalDir, packDirs: [packDir] }).content, "卡包内容");
 
 		writeLayerPrompt(storyDir, "narrator", "故事内容");
-		assert.equal(loadPrompt("narrator", { globalDir, packDir, storyDir }).layer, "story");
-		assert.equal(loadPrompt("narrator", { globalDir, packDir, storyDir }).content, "故事内容");
+		assert.equal(loadPrompt("narrator", { globalDir, packDirs: [packDir], storyDir }).layer, "story");
+		assert.equal(loadPrompt("narrator", { globalDir, packDirs: [packDir], storyDir }).content, "故事内容");
 	} finally {
 		cleanupTempDir(globalDir);
 		cleanupTempDir(packDir);
@@ -61,7 +65,7 @@ test("四层同时存在：story 最高层生效，warnings 为空", () => {
 		writeFileSync(join(globalDir, "narrator.md"), "G");
 		writeLayerPrompt(packDir, "narrator", "P");
 		writeLayerPrompt(storyDir, "narrator", "S");
-		const result = loadPrompt("narrator", { globalDir, packDir, storyDir });
+		const result = loadPrompt("narrator", { globalDir, packDirs: [packDir], storyDir });
 		assert.equal(result.layer, "story");
 		assert.equal(result.content, "S");
 		assert.deepEqual(result.warnings, []);
@@ -81,7 +85,7 @@ test("高层文件缺失：静默回退到下一存在层（无 warning）", () 
 		writeFileSync(join(globalDir, "narrator.md"), "G");
 		writeLayerPrompt(packDir, "narrator", "P");
 		// story 层未提供文件 → 回退 pack
-		const result = loadPrompt("narrator", { globalDir, packDir, storyDir });
+		const result = loadPrompt("narrator", { globalDir, packDirs: [packDir], storyDir });
 		assert.equal(result.layer, "pack");
 		assert.equal(result.content, "P");
 		assert.deepEqual(result.warnings, []);
@@ -101,7 +105,7 @@ test("高层文件为空（含纯空白）：warning 并回退到下一层", () 
 		writeFileSync(join(globalDir, "narrator.md"), "G");
 		writeLayerPrompt(packDir, "narrator", "P");
 		writeLayerPrompt(storyDir, "narrator", "   \n\t  "); // 纯空白 = 空
-		const result = loadPrompt("narrator", { globalDir, packDir, storyDir });
+		const result = loadPrompt("narrator", { globalDir, packDirs: [packDir], storyDir });
 		assert.equal(result.layer, "pack");
 		assert.equal(result.content, "P");
 		assert.equal(result.warnings.length, 1);
@@ -121,7 +125,7 @@ test("高层文件读取失败（非 ENOENT）：warning 并回退到下一层",
 		writeFileSync(join(globalDir, "narrator.md"), "G");
 		// pack 层的 narrator.md 用一个目录占位 → readFileSync 抛 EISDIR（非 ENOENT）
 		mkdirSync(join(packDir, "prompts", "narrator.md"), { recursive: true });
-		const result = loadPrompt("narrator", { globalDir, packDir });
+		const result = loadPrompt("narrator", { globalDir, packDirs: [packDir] });
 		assert.equal(result.layer, "global");
 		assert.equal(result.content, "G");
 		assert.equal(result.warnings.length, 1);
@@ -169,4 +173,74 @@ test("renderPlaceholders：已知替换 / 未知原样保留并去重 / 两侧�
 
 test("defaultGlobalPromptsDir 路径形态：~/.tavernpi/prompts", () => {
 	assert.equal(defaultGlobalPromptsDir(), join(homedir(), ".tavernpi", "prompts"));
+});
+
+// ---------------------------------------------------------------------------
+// 多包提示词合并（§6.5/§10.2：后包覆盖先包 + 覆盖 warning）+ 分层管理 API
+// ---------------------------------------------------------------------------
+
+test("多包提示词合并：后包覆盖先包（效包），命中层为 pack + 覆盖 warning", () => {
+	const packA = makeTempDir();
+	const packB = makeTempDir();
+	try {
+		writeLayerPrompt(packA, "narrator", "包A内容");
+		writeLayerPrompt(packB, "narrator", "包B内容");
+		const result = loadPrompt("narrator", { packDirs: [packA, packB] });
+		assert.equal(result.layer, "pack");
+		assert.equal(result.content, "包B内容", "后包（packB）覆盖先包（packA）");
+		assert.equal(result.path, join(packB, "prompts", "narrator.md"));
+		assert.ok(result.warnings.some((w) => w.includes("被后包覆盖")), "覆盖 warning");
+	} finally {
+		cleanupTempDir(packA);
+		cleanupTempDir(packB);
+	}
+});
+
+test("resolvePromptChain：四层各自状态 + 生效层标记（pack 层多包）", () => {
+	const globalDir = makeTempDir();
+	const packA = makeTempDir();
+	const storyDir = makeTempDir();
+	try {
+		mkdirSync(globalDir, { recursive: true });
+		writeFileSync(join(globalDir, "narrator.md"), "G");
+		writeLayerPrompt(packA, "narrator", "P");
+		const chain = resolvePromptChain({ globalDir, packDirs: [packA], storyDir }, "narrator");
+		assert.equal(chain.role, "narrator");
+		assert.equal(chain.effectiveLayer, "pack", "pack 命中则生效层=pack（故事层无该 role）");
+		const storyLayer = chain.layers.find((l) => l.layer === "story")!;
+		assert.equal(storyLayer.exists, false);
+		const packLayer = chain.layers.find((l) => l.layer === "pack")!;
+		assert.equal(packLayer.exists, true);
+		assert.equal(packLayer.effective, true);
+		assert.ok(packLayer.contentLength > 0);
+		assert.equal(chain.layers.length, 4);
+	} finally {
+		cleanupTempDir(globalDir);
+		cleanupTempDir(packA);
+		cleanupTempDir(storyDir);
+	}
+});
+
+test("setStoryPromptOverride / clearStoryPromptOverride：story 层覆盖命中、清除后回退；非法 role 抛错", () => {
+	const storyDir = makeTempDir();
+	try {
+		// 未覆盖时 → builtin
+		assert.equal(loadPrompt("narrator", { storyDir }).layer, "builtin");
+		// 覆盖 story 层
+		setStoryPromptOverride(storyDir, "narrator", "故事覆盖内容");
+		const loaded = loadPrompt("narrator", { storyDir });
+		assert.equal(loaded.layer, "story");
+		assert.equal(loaded.content, "故事覆盖内容");
+		// resolvePromptChain 反映
+		assert.equal(resolvePromptChain({ storyDir }, "narrator").effectiveLayer, "story");
+		// 清除后回退 builtin
+		clearStoryPromptOverride(storyDir, "narrator");
+		assert.equal(loadPrompt("narrator", { storyDir }).layer, "builtin");
+		// 非法 role 抛错
+		assert.throws(() => setStoryPromptOverride(storyDir, "../evil", "x"), /非法提示词角色名/);
+		assert.throws(() => clearStoryPromptOverride(storyDir, "a/b"), /非法提示词角色名/);
+		assert.throws(() => assertValidRole("Narrator"), /非法提示词角色名/);
+	} finally {
+		cleanupTempDir(storyDir);
+	}
 });

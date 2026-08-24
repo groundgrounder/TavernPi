@@ -37,10 +37,10 @@ export interface CreateStoryOptions {
 	mode?: StoryMode;
 }
 
-/** story.meta.json 内容（--resume 恢复 packDirs / stylize defaultStyle / mode 的载体）。 */
+/** story.meta.json 内容（--resume 恢复 packDirs / stylize defaultStyle / mode / extensionEntryPaths 的载体）。 */
 export interface StoryMetaFile {
 	title?: string;
-	packs: Array<{ name: string; dir: string; version?: string }>;
+	packs: Array<{ name: string; dir: string; version?: string; extensionEntryPaths?: string[] }>;
 	defaultStyle?: string;
 	/** 内核级模式（§10.1）；adventure 由其派生 locked，随 meta 持久化并 fork/clone 继承。 */
 	mode?: StoryMode;
@@ -150,7 +150,13 @@ export async function createStory(opts: CreateStoryOptions): Promise<CreateStory
 				: story.title !== undefined
 					? { title: story.title }
 					: {}),
-			packs: packs.map((p) => ({ name: p.name, dir: p.dir, ...readPackVersion(p.dir) })),
+			packs: packs.map((p) => ({
+				name: p.name,
+				dir: p.dir,
+				...readPackVersion(p.dir),
+				// 代码挂载（§4.1/M6-P4a）：extensionEntryPaths 透传进 meta，--resume 可恢复。
+				...(p.extensionEntryPaths.length > 0 ? { extensionEntryPaths: p.extensionEntryPaths } : {}),
+			})),
 			...(story.defaultStyle !== undefined ? { defaultStyle: story.defaultStyle } : {}),
 			mode: opts.mode ?? "creation",
 			createdAt: new Date().toISOString(),

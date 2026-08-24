@@ -1,9 +1,15 @@
 // tavernpi-core 对外导出收敛（创作规划 §10.2 API 承诺面的源头）。
 // M1-P1：故事 DB 层；M1-P2：快照管理器（§3.1 ★承重机制）；M2-P1：提示词分层/subagent 运行时/
 // pipeline 事件流/模型配置最小形态；M2-P2：data subagent（§6.1）+ StoryRuntime 编排器（§10.2）；
-// M3-P2：npc subagent 阶段（§6.2）接入 StoryRuntime；M4-P2：story 阶段（§6.3）+ stylize（§6.4）接入。
+// M3-P2：npc subagent 阶段（§6.2）接入 StoryRuntime；M4-P2：story 阶段（§6.3）+ stylize（§6.4）接入；
+// M5：卡包系统；M6-P1：模式内核；M6-P2：章节摘要 compaction+/swipe；M6-P3：assist 带外顾问；
+// M6-P4a：受信任写入/提示词分层管理/卡包代码挂载/多包提示词合并（§10.2承诺面定型）。
+//
+// 按 §10.2 分组（导出注释）：故事生命周期 / 带模式过滤的 DB 查询（DbView）/ 受信任写入 /
+// 提示词分层管理 / agent 模型配置（settings）/ 模式管理（mode/setMode/MODE_PRESETS）/
+// pipeline 事件流 / 轮中交互通道 / assist。
 
-export const CORE_VERSION = "0.0.0";
+export const CORE_VERSION = "0.6.0";
 
 // 故事目录与打开
 export {
@@ -96,14 +102,20 @@ export type {
 	InteractionRequest,
 } from "./interaction/index.ts";
 
-// 提示词分层加载器（§6.5）
+// 提示词分层加载器（§6.5）+ 分层管理 API（§10.2「各层读写与覆盖链查询」）
 export {
+	assertValidRole,
 	builtinPromptsDir,
+	clearStoryPromptOverride,
 	defaultGlobalPromptsDir,
 	loadPrompt,
 	renderPlaceholders,
+	resolvePromptChain,
+	setStoryPromptOverride,
 	type LoadedPrompt,
 	type PlaceholderRender,
+	type PromptChainInfo,
+	type PromptChainLayerInfo,
 	type PromptLayer,
 	type PromptLayerDirs,
 } from "./prompts/loader.ts";
@@ -245,16 +257,18 @@ export {
 	type AssistToolOptions,
 } from "./assist.ts";
 
-// StoryRuntime 编排器（§10.2 API 面 M2 形态 + §6.2 npc 阶段 + §6.3 story 阶段 + §6.4 stylize）
+// StoryRuntime 编排器（§10.2 API 面）——受信任写入 / 轮中交互 broker / 提示词分层管理 均在此暴露
 export {
 	computeNextTurnSeq,
 	applyModeSwitch,
 	computeInputValidityAction,
 	createStoryRuntime,
 	findUserEntryOnBranch,
+	getInteractionBroker,
 	InputRejectedError,
 	resolveStoryMode,
 	type NpcStageRuntimeOptions,
+	type RuntimePrompts,
 	type StoryRuntime,
 	type StoryRuntimeOptions,
 	type StoryStageRuntimeOptions,

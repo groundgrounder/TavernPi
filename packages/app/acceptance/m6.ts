@@ -19,7 +19,8 @@
 // 成本控制：A 区零 LLM；B 区真实 LLM ≈ 3 轮叙事 + 1 次场景分析冒烟 + 1 次 m6-cli 冒烟。
 // 需要 auth.json（M0 已配）。结束时清理临时目录。运行：npm run m6:accept。
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -31,10 +32,12 @@ import {
 	createDbView,
 	defaultGlobalPromptsDir,
 	inheritStoryMeta,
+	loadPrompt,
 	loadSettings,
 	openSnapshotsDb,
 	openStoryDb,
 	readStoryMeta,
+	resolvePromptChain,
 	runSceneAnalysis,
 	snapshotsDbPath,
 	storyDbPath,
@@ -54,6 +57,8 @@ import {
 import { InputRejectedError } from "@tavernpi/core";
 
 const repoRoot = resolve(import.meta.dirname, "../../..");
+// 跨区汇总的 pipeline 事件（§6.6 端到端延迟实测用；打印即可，不做硬断言）。
+const ALL_EVENTS: PipelineEvent[] = [];
 const ZERO_USAGE: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, costTotal: 0 };
 
 // ---------------------------------------------------------------------------
@@ -78,6 +83,33 @@ function printChecks(checks: Check[]): void {
 	const passCount = checks.length - failed;
 	console.log(`===== M6 验收: ${failed === 0 ? "PASS" : "FAIL"}（${passCount}/${checks.length} 通过） =====`);
 	if (failed > 0) process.exitCode = 1;
+}
+
+/** §6.6 端到端延迟实测（打印即可，不做硬断言）：按轮汇总 narrator 墙钟 + 各阶段耗时（事件流聚合）。 */
+function printLatencySummary(): void {
+	console.log("\n===== §6.6 端到端延迟实测（观测，非断言） =====");
+	const narratorByTurn = new Map<number, { count: number; totalMs: number }>();
+	const stageMs: Record<string, number> = {};
+	for (const e of ALL_EVENTS) {
+		if (e.role === "narrator") {
+			const cur = narratorByTurn.get(e.turnSeq) ?? { count: 0, totalMs: 0 };
+			cur.count++;
+			cur.totalMs += e.durationMs;
+			narratorByTurn.set(e.turnSeq, cur);
+		}
+		stageMs[e.role] = (stageMs[e.role] ?? 0) + e.durationMs;
+	}
+	if (narratorByTurn.size === 0) {
+		console.log("（无 narrator 事件，跳过）");
+		return;
+	}
+	for (const [turnSeq, { count, totalMs }] of [...narratorByTurn.entries()].sort((a, b) => a[0] - b[0])) {
+		console.log(`  turn ${turnSeq}: 端到端墙钟 ${totalMs}ms（narrator 事件 ${count} 次）`);
+	}
+	console.log("  各阶段累计耗时（ms）:");
+	for (const [role, ms] of Object.entries(stageMs).sort((a, b) => b[1] - a[1])) {
+		console.log(`    ${role}: ${ms}ms`);
+	}
 }
 
 function stubResult(output: unknown): SubagentResult<unknown> {
@@ -254,7 +286,10 @@ async function newM6Runtime(
 	const warnings: string[] = [];
 	const eventLog = createPipelineEventLog();
 	const eventRecords: PipelineEvent[] = [];
-	eventLog.on((e) => eventRecords.push(e));
+	eventLog.on((e) => {
+		eventRecords.push(e);
+		ALL_EVENTS.push(e);
+	});
 	const runtime = await createStoryRuntime({
 		cwd,
 		sessionManager,
@@ -935,8 +970,134 @@ async function main(): Promise<void> {
 			}
 		}
 
+		// ================= E. §10.2 承诺面定型（受信任写入 / prompts 管理 / 卡包代码挂载 / 多包提示词合并） =================
+		console.log("\n===== E. §10.2 承诺面定型 =====");
+
+		// E1. 受信任写入：合法落库+快照立拍；非法 changeset 拒绝零落库；editor 直改场景的 pipeline 外唯一写路径。
+		{
+			const a = await newM6Runtime(root, { mode: "creation", settings, modelRuntime });
+			try {
+				const eventsBefore = a.storyState.storyDb.reader.listEvents().length;
+				const res = await a.runtime.trustedWrite({
+					events: [{ summary: "受信任编辑事件" }],
+					time_advance: { to_time: "0000-01-02", span_note: "编辑器直改" },
+					new_locations: [],
+					location_moves: [],
+					new_npcs: [],
+					npc_updates: [],
+					world_state: [],
+				});
+				checks.push(check("E1: trustedWrite 合法变更集落库（events +1）", a.storyState.storyDb.reader.listEvents().length === eventsBefore + 1));
+				checks.push(check("E1: trustedWrite 后立即拍快照（绑定当前 leaf）", res.snapshotTaken === true));
+				// 非法 changeset（未登记地点）→ 拒绝零落库
+				await assert.rejects(
+					a.runtime.trustedWrite({
+						events: [{ summary: "x", location_name: "不存在之地" }],
+						time_advance: undefined,
+						new_locations: [],
+						location_moves: [],
+						new_npcs: [],
+						npc_updates: [],
+						world_state: [],
+					}),
+					/未登记/,
+				);
+				checks.push(check("E1: trustedWrite 非法变更集拒绝零落库", a.storyState.storyDb.reader.listEvents().length === eventsBefore + 1));
+			} finally {
+				disposeBundle(a);
+			}
+		}
+
+		// E2. prompts 分层管理：覆盖链查询、story 级覆盖后 loadPrompt 命中、清除后回退。
+		{
+			const a = await newM6Runtime(root, { mode: "creation", settings, modelRuntime });
+			try {
+				const chainBuiltin = a.runtime.prompts.resolveChain("narrator");
+				checks.push(check("E2: resolveChain 默认生效层 builtin（无覆盖）", chainBuiltin.effectiveLayer === "builtin"));
+				a.runtime.prompts.setStoryOverride("narrator", "故事层覆盖内容");
+				const loaded = loadPrompt("narrator", { storyDir: a.storyState.storyDir });
+				checks.push(check("E2: story 级覆盖后 loadPrompt 命中 story 层", loaded.layer === "story" && loaded.content === "故事层覆盖内容"));
+				checks.push(check("E2: resolveChain 反映 story 生效层", a.runtime.prompts.resolveChain("narrator").effectiveLayer === "story"));
+				a.runtime.prompts.clearStoryOverride("narrator");
+				checks.push(check("E2: 清除后回退 builtin", loadPrompt("narrator", { storyDir: a.storyState.storyDir }).layer === "builtin"));
+			} finally {
+				disposeBundle(a);
+			}
+		}
+
+		// E2b. story 层覆盖进活管线（Gate 4 M1）：narrator 下轮生效（每轮现载）+ subagent 逐调用现载。
+		{
+			const narratorMarker = "故事层标记_narrator_紫晶";
+			const sceneMarker = "故事层标记_scene_紫晶";
+			let capturedSceneSystemPrompt = "";
+			const a = await newM6Runtime(root, {
+				mode: "creation",
+				settings,
+				modelRuntime,
+				storyExecutor: async (o) => {
+					if (o.role === "story_scene") capturedSceneSystemPrompt = o.systemPrompt;
+					return storyExecutor(validSceneCard({ valid: true }))(o);
+				},
+			});
+			try {
+				a.runtime.prompts.setStoryOverride("narrator", narratorMarker);
+				a.runtime.prompts.setStoryOverride("story_scene", sceneMarker);
+				await a.runtime.runTurn("我在王城门口驻足观望片刻。");
+				const lastNarratorPrompt = a.systemPrompts.at(-1) ?? "";
+				checks.push(check("E2b: narrator story 覆盖下轮生效（活管线捕获）", lastNarratorPrompt.includes(narratorMarker)));
+				checks.push(check("E2b: story_scene story 覆盖进 subagent 活管线", capturedSceneSystemPrompt.includes(sceneMarker)));
+			} finally {
+				disposeBundle(a);
+			}
+		}
+
+		// E3. 卡包代码挂载：主叙事 session 活动工具含 roll_check 且无 DB/内置工具混入。
+		{
+			const packDir = join(repoRoot, "packages/app/acceptance/fixtures/codepack");
+			const story = await createStory({ storiesRoot: join(root, "e3-stories"), packDirs: [packDir], cwd: root });
+			const rt = await createStoryRuntime({
+				cwd: root,
+				sessionManager: story.sessionManager,
+				storyState: story.storyState,
+				stylize: { enabled: false },
+				npc: { enabled: true, executor: npcExecutor() },
+				story: { enabled: true },
+			});
+			try {
+				const active = rt.session.getActiveToolNames();
+				console.log(`[obs] E3: 主叙事活动工具=${JSON.stringify(active)}`);
+				checks.push(check("E3: 主叙事 session 活动工具含 roll_check（卡包 extension 挂载）", active.includes("roll_check")));
+				checks.push(check("E3: 活动工具 = 卡包工具集（无 DB/内置工具混入）", active.length === 1 && active[0] === "roll_check"));
+			} finally {
+				rt.dispose();
+				story.storyState.storyDb.close();
+				story.storyState.snapshotsDb.close();
+			}
+		}
+
+		// E4. 多包提示词合并：后包覆盖先包 + warning（§6.5/§10.2）。
+		{
+			const packA = join(root, "e4-packA");
+			const packB = join(root, "e4-packB");
+			for (const [dir, name, content] of [
+				[packA, "packa", "包A的narrator"],
+				[packB, "packb", "包B的narrator（后包覆盖）"],
+			] as Array<[string, string, string]>) {
+				mkdirSync(join(dir, "prompts"), { recursive: true });
+				mkdirSync(join(dir, "db"), { recursive: true });
+				writeFileSync(join(dir, "package.json"), JSON.stringify({ name, version: "0.0.0" }, null, 2) + "\n");
+				writeFileSync(join(dir, "db", "schema.sql"), "");
+				writeFileSync(join(dir, "prompts", "narrator.md"), content);
+			}
+			const loaded = loadPrompt("narrator", { packDirs: [packA, packB] });
+			checks.push(check("E4: 后包覆盖先包（效包为 packB）", loaded.layer === "pack" && loaded.content === "包B的narrator（后包覆盖）"));
+			checks.push(check("E4: 覆盖 warning", loaded.warnings.some((w: string) => w.includes("被后包覆盖"))));
+			checks.push(check("E4: resolvePromptChain pack 层命中", resolvePromptChain({ packDirs: [packA, packB] }, "narrator").effectiveLayer === "pack"));
+		}
+
 		console.log("\n===== M6 验收检查表 =====");
 		printChecks(checks);
+		printLatencySummary();
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

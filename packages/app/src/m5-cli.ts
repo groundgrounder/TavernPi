@@ -10,8 +10,8 @@
 // 命令增量：`--pack <dir>`（可重复）、`/packs`、`/pin` / `/unpin`、`/reload`。
 //
 // 坑（同 m4-cli）：session.prompt 必须 await 完才能 navigateTree；退出不删故事目录。
-// TODO(M6)：多包提示词层——PromptLayerDirs.packDir 单目录，M5 取首包 prompts/；
-//   包代码（extensionEntryPaths → additionalExtensionPaths）挂载点待 M6 模式设计。
+//   packDirs 传全部包 prompts/（§6.5 多包提示词合并，后包覆盖先包）；
+//   包代码（extensionEntryPaths → additionalExtensionPaths）挂载点见 runtime（M6-P4a）。
 
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -495,7 +495,8 @@ export async function main(argv: readonly string[]): Promise<void> {
 	const { settings, warnings: settingsWarnings } = loadSettings();
 	const prompts: PromptLayerDirs = {
 		globalDir: defaultGlobalPromptsDir(),
-		...(packDirs.length > 0 ? { packDir: packDirs[0] } : {}),
+		// §6.5/§10.2 多包提示词合并：传全部包 prompts/ 目录（后包覆盖先包；存在的才被探测）。
+		...(packDirs.length > 0 ? { packDirs } : {}),
 	};
 	const modelRuntime = await ModelRuntime.create();
 	const eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"));

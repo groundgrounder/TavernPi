@@ -1,0 +1,6 @@
+{
+  "name": "codepack",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "M6-P4a 代码包 fixture：注册 roll_check 自定义工具（只读，不写库）"
+}

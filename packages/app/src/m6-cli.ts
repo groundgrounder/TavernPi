@@ -20,7 +20,7 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { Interface } from "node:readline";
 import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { SessionEntry, SessionTreeNode } from "@earendil-works/pi-coding-agent";
 import {
 	buildAncestorChain,
 	computeNextTurnSeq,
@@ -36,6 +36,10 @@ import {
 	openStoryDb,
 	snapshotsDbPath,
 	storyDbPath as coreStoryDbPath,
+	type DbReader,
+	type LocationRow,
+	type NpcRow,
+	type NpcTraitRow,
 	type PromptLayerDirs,
 	type SnapshotRestoreResult,
 	type StoryMetaFile,
@@ -123,6 +127,98 @@ function truncate(text: string, max: number): string {
 	return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+// ---------------------------------------------------------------------------
+// 呈现层工具（呈现美化：显示宽 / 模式文案 / 树形引导线 / 度量徽章）
+// ---------------------------------------------------------------------------
+
+/** 模式中文名（§10.1 三模式；adventure 追加「已锁定」徽章）。 */
+const MODE_LABEL: Record<StoryMode, string> = {
+	creation: "创造",
+	survival: "生存",
+	adventure: "冒险",
+};
+
+/** 会话条目类型 → 树形展示的角色标签；非消息条目尽量平实中文。 */
+const ENTRY_ROLE_LABEL: Record<string, string> = {
+	custom: "自定义",
+	custom_message: "自定义消息",
+};
+
+/** 故事树可见条目类型（其余如模型/思考变更等簿记条目透视隐藏，不破坏缩进）。 */
+const STORY_TREE_TYPES = new Set<string>(["message", "compaction", "branch_summary", "custom", "custom_message"]);
+
+/** 单个字符的显示宽度（自写最小 wcwidth：CJK/全角按 2 列，控制字符 0，其余 1）。不依赖外部库。 */
+function charWidth(ch: string): number {
+	const code = ch.codePointAt(0)!;
+	if (code === 0) return 0;
+	if (code < 32 || (code >= 0x7f && code < 0xa0)) return 0;
+	// East Asian Wide / Fullwidth 区间：按 2 列排版，保证中文列表对齐。
+	if (
+		(code >= 0x1100 && code <= 0x115f) ||
+		(code >= 0x2e80 && code <= 0x303e) ||
+		(code >= 0x3041 && code <= 0x33ff) ||
+		(code >= 0x3400 && code <= 0x4dbf) ||
+		(code >= 0x4e00 && code <= 0x9fff) ||
+		(code >= 0xa000 && code <= 0xa4cf) ||
+		(code >= 0xa960 && code <= 0xa97f) ||
+		(code >= 0xac00 && code <= 0xd7a3) ||
+		(code >= 0xf900 && code <= 0xfaff) ||
+		(code >= 0xfe10 && code <= 0xfe19) ||
+		(code >= 0xfe30 && code <= 0xfe6f) ||
+		(code >= 0xff00 && code <= 0xff60) ||
+		(code >= 0xffe0 && code <= 0xffe6) ||
+		(code >= 0x1f300 && code <= 0x1faff) ||
+		(code >= 0x20000 && code <= 0x2fffd) ||
+		(code >= 0x30000 && code <= 0x3fffd)
+	) {
+		return 2;
+	}
+	return 1;
+}
+
+/** 文本的显示宽度（CJK 计 2；供对齐与截断）。 */
+function displayWidth(text: string): number {
+	let w = 0;
+	for (const ch of text) w += charWidth(ch);
+	return w;
+}
+
+/** 按显示宽度截断到 max：超出部分以省略号收尾；按码点走，绝不切断多字节字符。 */
+function truncateByWidth(text: string, max: number): string {
+	if (displayWidth(text) <= max) return text;
+	let w = 0;
+	let out = "";
+	for (const ch of text) {
+		const cw = charWidth(ch);
+		if (w + cw > max) break;
+		out += ch;
+		w += cw;
+	}
+	return `${out}…`;
+}
+
+/** 权重（0–1）映射为 5 格度量徽章，如 0.6 → ▰▰▰▱▱。 */
+function weightGauge(weight: number): string {
+	const clamped = Math.max(0, Math.min(1, weight));
+	const filled = Math.round(clamped * 5);
+	return "▰".repeat(filled) + "▱".repeat(5 - filled);
+}
+
+/** 从地点沿 parent_id 上溯解析父链（如「王城 > 庭院」）；未登记父名断链；无地点返回「未定位」。 */
+function locationChain(loc: LocationRow | undefined, byId: Map<number, LocationRow>): string {
+	if (!loc) return "未定位";
+	const chain: string[] = [];
+	const seen = new Set<number>();
+	let cur: LocationRow | undefined = loc;
+	while (cur && !seen.has(cur.id)) {
+		seen.add(cur.id);
+		chain.push(cur.name);
+		cur = cur.parent_id === null ? undefined : byId.get(cur.parent_id);
+	}
+	chain.reverse();
+	return chain.join(" > ");
+}
+
 function readStoryMeta(storyDir: string): StoryMetaFile | undefined {
 	try {
 		return JSON.parse(readFileSync(join(storyDir, "story.meta.json"), "utf8")) as StoryMetaFile;
@@ -135,15 +231,87 @@ function readStoryMeta(storyDir: string): StoryMetaFile | undefined {
 // CLI 命令（沿 m5-cli，增 /mode /plot）
 // ---------------------------------------------------------------------------
 
-function printTree(sessionManager: SessionManager): void {
-	const entries = messageEntries(sessionManager);
-	const leafId = sessionManager.getLeafId();
-	console.log(`--- branch（${entries.length} 条消息）---`);
-	for (const [i, e] of entries.entries()) {
-		const mark = e.id === leafId ? " *" : "";
-		const text = truncate(messageText(e.message), 40);
-		console.log(`#${i + 1} [${e.message.role}]${mark} ${text}  (${e.id.slice(0, 8)})`);
+/** 会话条目 → 树行文本：消息给 `#轮号 [角色] 摘要`，compaction/分支摘要给 ◆ 摘要，其余给平实角色标签。 */
+function formatTreeEntry(entry: SessionEntry, currentId: string | null, msgIndex: Map<string, number>): string {
+	const isLeaf = entry.id === currentId;
+	let line: string;
+	if (entry.type === "message") {
+		const idx = msgIndex.get(entry.id) ?? "?";
+		line = `#${idx} [${entry.message.role}] ${truncateByWidth(messageText(entry.message), 40)}`;
+	} else if (entry.type === "compaction") {
+		line = `◆ [摘要] ${truncateByWidth(entry.summary, 40)}`;
+	} else if (entry.type === "branch_summary") {
+		line = `◆ [分支摘要] ${truncateByWidth(entry.summary, 40)}`;
+	} else {
+		const role = ENTRY_ROLE_LABEL[entry.type] ?? entry.type;
+		line = `[${role}]`;
 	}
+	return isLeaf ? `▸ ${line}（当前）` : line;
+}
+
+/** 收集「故事树可见节点」：簿记条目（模型/思考变更等）透视展开，其可见后代提升到当前层（不增深）。 */
+function collectTreeNodes(nodes: SessionTreeNode[]): SessionTreeNode[] {
+	const out: SessionTreeNode[] = [];
+	for (const n of nodes) {
+		if (STORY_TREE_TYPES.has(n.entry.type)) out.push(n);
+		else out.push(...collectTreeNodes(n.children));
+	}
+	return out;
+}
+
+/** 递归渲染会话树：│ / ├─ / └─ 表达嵌套分支缩进；隐藏条目不占缩进层级。 */
+function renderTreeNodes(
+	nodes: SessionTreeNode[],
+	prefix: string,
+	isTop: boolean,
+	out: string[],
+	currentId: string | null,
+	msgIndex: Map<string, number>,
+): void {
+	const visible = collectTreeNodes(nodes);
+	for (const [i, node] of visible.entries()) {
+		const isLast = i === visible.length - 1;
+		const connector = isTop && visible.length === 1 ? "" : isLast ? "└─ " : "├─ ";
+		const entryText = formatTreeEntry(node.entry, currentId, msgIndex);
+		out.push(`${prefix}${connector}${entryText}`);
+		const childPrefix = isTop && visible.length === 1 ? "" : prefix + (isLast ? "   " : "│  ");
+		renderTreeNodes(node.children, childPrefix, false, out, currentId, msgIndex);
+	}
+}
+
+function printTree(sessionManager: SessionManager): void {
+	const tree = sessionManager.getTree();
+	const leafId = sessionManager.getLeafId();
+	// #轮号 与 /tree <序号> 导航对齐：按 messageEntries（同 resolveTreeTarget）过滤顺序编号。
+	const msgIndex = new Map<string, number>();
+	{
+		let idx = 0;
+		for (const e of sessionManager.getEntries()) {
+			if (e.type === "message") {
+				idx++;
+				msgIndex.set(e.id, idx);
+			}
+		}
+	}
+	// 当前 leaf 可能是簿记条目（如 model/thinking 变更），在故事树中不可见；
+	// 向上找到最近的可见祖先作为「当前」标记位，让 ▸（当前）仍可见。
+	let currentId: string | null = null;
+	{
+		let cur = leafId ? sessionManager.getEntry(leafId) : undefined;
+		while (cur && !STORY_TREE_TYPES.has(cur.type)) {
+			cur = cur.parentId ? sessionManager.getEntry(cur.parentId) : undefined;
+		}
+		currentId = cur?.id ?? null;
+	}
+	console.log("── 故事树 ──");
+	const rootNodes = collectTreeNodes(tree);
+	if (rootNodes.length === 0) {
+		console.log("（空故事，尚无叙事条目）");
+		return;
+	}
+	const out: string[] = [];
+	renderTreeNodes(rootNodes, "", true, out, currentId, msgIndex);
+	console.log(out.join("\n"));
 }
 
 function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: ReturnType<typeof createStoryRuntime> extends Promise<infer T> ? T : never): void {
@@ -161,35 +329,72 @@ function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: 
 	console.log(`> 当前 clock: ${clock?.current_time ?? "(未初始化)"}，events: ${events.length} 行`);
 }
 
-function printStatus(runtime: ReturnType<typeof createStoryRuntime> extends Promise<infer T> ? T : never): void {
-	const { sessionManager, storyState } = runtime;
-	const clock = storyState.storyDb.reader.getClock();
-	const events = storyState.storyDb.reader.listEvents();
-	const turns = storyState.storyDb.reader.getTurnLog();
-	const snaps = storyState.snapshotsDb.listSnapshots();
-	const dataStatus = storyState.storyDb.reader.listDataStatus();
-	console.log("--- status ---");
-	console.log(`sessionId: ${sessionManager.getSessionId()}`);
-	console.log(`sessionFile: ${sessionManager.getSessionFile()}`);
-	console.log(`leafId: ${sessionManager.getLeafId()}`);
-	console.log(`storyDir: ${storyState.storyDir}`);
-	console.log(`mode: ${runtime.mode}`);
-	console.log(`clock: ${clock ? `${clock.current_time}（${clock.calendar}/${clock.granularity}）` : "(未初始化)"}`);
-	console.log(
-		`events: ${events.length} 行 | turn_log: ${turns.length} 行 | snapshots: ${snaps.length} 份 | data_status: ${dataStatus.length} 行`,
-	);
+/** 单个 NPC 分卡细节：特征（最新演化）/ 关系（对端 + 好感）/ 记忆（条数 + 最近一条）。 */
+function printNpcDetails(reader: DbReader, npc: NpcRow, npcNameById: Map<number, string>): void {
+	const comp = reader.getNpc(npc.id);
+	// 特征：同名单取最新一次演化（turn_seq 最大），权重 0–1 映射 5 格。
+	const traitByLatest = new Map<string, NpcTraitRow>();
+	for (const t of comp.traits) {
+		const cur = traitByLatest.get(t.trait);
+		if (!cur || t.turn_seq > cur.turn_seq) traitByLatest.set(t.trait, t);
+	}
+	for (const t of traitByLatest.values()) {
+		console.log(`    特征 ${t.trait} ${weightGauge(t.weight)} ${t.weight.toFixed(1)}`);
+	}
+	// 关系：对房另一侧 id → 姓名，好感带符号。
+	for (const rel of comp.relations) {
+		const other = rel.npc_a === npc.id ? rel.npc_b : rel.npc_a;
+		const otherName = npcNameById.get(other) ?? `#${other}`;
+		const sign = rel.disposition >= 0 ? "+" : "";
+		console.log(`    关系 对 ${otherName} ${sign}${rel.disposition}`);
+	}
+	// 记忆：条数 + 最近一条（turn_seq 最大）内容按显示宽截断。
+	if (comp.memories.length > 0) {
+		const recent = comp.memories.reduce((a, b) => (b.turn_seq > a.turn_seq ? b : a));
+		console.log(`    记忆: ${comp.memories.length} 条 · 最近: ${truncateByWidth(recent.content, 30)}`);
+	}
+}
+
+function printStatus(runtime: StoryRuntime): void {
+	const reader = runtime.storyState.storyDb.reader;
+	const clock = reader.getClock();
+	const events = reader.listEvents();
+	const turns = reader.getTurnLog();
+	const snaps = runtime.storyState.snapshotsDb.listSnapshots();
+	const dataStatus = reader.listDataStatus();
+	const playerLoc = reader.getPlayerLocation();
+	const locById = new Map<number, LocationRow>(reader.listLocations().map((l) => [l.id, l]));
+	const npcs = reader.listNpcs();
+	const npcNameById = new Map<number, string>(npcs.map((n) => [n.id, n.name]));
+
+	const time = clock ? `${clock.current_time}（${clock.calendar}/${clock.granularity}）` : "未初始化";
+	const pos = locationChain(playerLoc, locById);
+
+	console.log("── 状态 ──");
+	console.log(`时间: ${time} · 位置: ${pos} · 模式: ${MODE_LABEL[runtime.mode]}`);
+	if (npcs.length === 0) {
+		console.log("未发现 NPC（暂时没有角色登场）。");
+	} else {
+		for (const npc of npcs) {
+			console.log(`◆ ${npc.name} #${npc.id}（${npc.status}）@ ${npc.current_location_name ?? "未定位"}`);
+			printNpcDetails(reader, npc, npcNameById);
+		}
+	}
+	console.log("");
+	console.log(`轮数: ${turns.length} · events: ${events.length} 行 · 快照: ${snaps.length} 份 · data_status: ${dataStatus.length} 行`);
+	console.log(`session: ${runtime.sessionManager.getSessionId()} · leaf: ${runtime.sessionManager.getLeafId()}`);
 }
 
 function printHelp(): void {
 	console.log(
 		[
 			"可用命令：",
-			"  /tree              列出当前 branch 的消息条目",
+			"  /tree              列出当前故事的条目树（引导线 + 当前分支标记 ▸）",
 			"  /tree <序号|entryId>  跳转到目标条目（钩子自动恢复 DB）",
-			"  /fork <序号|entryId>  从目标条目分叉新故事（fork 产物继承 mode，adventure 继承锁定）",
-			"  /status            打印 sessionId / mode / clock / 行数",
-			"  /mode              查看当前内核级模式（creation/survival/adventure）",
-			"  /mode <模式>         切换模式（catch 非法切换错；adventure 锁定不可切）",
+			"  /fork <序号|entryId>  从目标条目分叉新故事（fork 产物继承模式，冒险继承锁定）",
+			"  /status            查看当前状态：时间 / 位置 / 模式 / NPC 分卡",
+			"  /mode              查看当前内核级模式（创造 / 生存 / 冒险）",
+			"  /mode <模式>         切换模式（catch 非法切换错；冒险锁定不可切）",
 			"  /plot <文本>         创造模式专属：写入剧情大纲指令（生存/冒险报错）",
 			"  /swipe             基于分支重生成最后一个 user 轮次（旧稿留树，§3.0）",
 			"  /compact           触发章节摘要 compaction（§3.0/§3.1；会话太小友好提示）",
@@ -197,7 +402,7 @@ function printHelp(): void {
 			"  /help              本帮助",
 			"  空行               退出（不删故事目录，可 --resume 续写）",
 			"",
-			"模式（§10.1）：--mode creation|survival|adventure 仅创建时生效；--resume 从 story.meta.json 恢复。",
+			"模式（§10.1）：--mode 创造|生存|冒险 仅创建时生效；--resume 从 story.meta.json 恢复；提示符为 [模式]>。",
 			"输入校验（§8）：生存/冒险拒非 user 角色输入（命令 NPC/指定剧情结局）→ 打印 reason/suggestion，",
 			"  可用 /! 前缀强制提交（留痕 warning）；创造模式不校验。",
 			"story/npc/stylize/data 阶段全开（all-on 在三种模式下均满足预设）。",
@@ -206,37 +411,39 @@ function printHelp(): void {
 }
 
 function printTurn(report: TurnResult): void {
-	console.log(`\n========== 第 ${report.turnSeq} 轮 ==========`);
-	console.log("--- 正文 ---");
-	console.log(report.narrativeText);
+	console.log(`\n────────── 第 ${report.turnSeq} 轮 ──────────`);
+	if (report.narrativeText.trim().length > 0) {
+		console.log(report.narrativeText.trim());
+		console.log("");
+	}
+	// 系统信息行：`· ` 前缀；警告/错误用 `! ` 前缀。
 	if (report.npc) {
-		const onstageIds = report.npc.onstageNpcIds;
-		const offIds = report.npc.offscreenTriggeredIds;
+		const onstage = report.npc.onstageNpcIds;
 		console.log(
-			`--- npc 阶段（§6.2） ---\n在场预演: ${onstageIds.length} 个（${onstageIds.length > 0 ? onstageIds.join(", ") : "无"}）| 离线推演: ${offIds.length} 个`,
+			`· npc 预演: ${onstage.length} 个在场${onstage.length > 0 ? `（${onstage.join(", ")}）` : ""} · 离线推演: ${report.npc.offscreenTriggeredIds.length} 个`,
 		);
 	}
 	if (report.story) {
 		const s = report.story;
 		console.log(
-			`--- story 阶段（§6.3） ---\n场景卡: ${s.sceneFallback ? "fallback" : "ok"} | 硬冲突: ${s.hardConflicts.length} | 报疑: ${s.suspicions.length} | 重写: ${s.revisions} 次${s.releasedWithWarnings ? " | 超限放行" : ""}`,
+			`· story: 场景卡 ${s.sceneFallback ? "fallback" : "ok"} · 硬冲突 ${s.hardConflicts.length} · 报疑 ${s.suspicions.length} · 重写 ${s.revisions} 次`,
 		);
+		if (s.releasedWithWarnings) console.log("! 超限放行（story 阶段，冲突留痕）");
 	}
 	if (report.stylize) {
 		console.log(
-			`--- stylize（§6.4） ---\n${report.stylize.applied ? "✓ 已润色" : "✗ 回退原文"}${report.stylize.drift ? `，drift: ${report.stylize.drift.join("; ")}` : ""}`,
+			`· stylize: ${report.stylize.applied ? "已润色" : "回退原文"}${report.stylize.drift && report.stylize.drift.length > 0 ? ` · drift: ${report.stylize.drift.join("; ")}` : ""}`,
 		);
 	}
-	console.log("--- data 落库（§6.1） ---");
 	if (report.data.ok) {
 		const a = report.data.applied;
 		console.log(
-			`✓ 成功（attempts=${report.data.attempts}）events=${a.events} new_npcs=${a.newNpcs} time_advance=${a.timeAdvanced ? "是" : "否"}${report.data.dropped ? `，strictDrop 剔除 ${report.data.dropped.length} 项` : ""}`,
+			`· data 已落库（attempts=${report.data.attempts} · events=${a.events} · new_npcs=${a.newNpcs} · 时间推进=${a.timeAdvanced ? "是" : "否"}${report.data.dropped && report.data.dropped.length > 0 ? ` · strictDrop 剔除 ${report.data.dropped.length} 项` : ""}）`,
 		);
 	} else {
-		console.log(`✗ 失败（attempts=${report.data.attempts}）: ${truncate(report.data.error, 300)}`);
+		console.log(`! data 落库失败（attempts=${report.data.attempts}）: ${truncate(report.data.error, 300)}`);
 	}
-	console.log(`--- 快照: ${report.snapshotTaken ? "已拍" : "跳过"} ---`);
+	console.log(`· 快照: ${report.snapshotTaken ? "已拍" : "跳过"}`);
 }
 
 async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise<StoryRuntime> {
@@ -257,7 +464,7 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 		`> forkStoryDb → 新故事目录 ${newStoryDir}（events=${forkResult.storyDb.reader.listEvents().length}，snapshots=${forkResult.snapshotsDb.listSnapshots().length} 份）`,
 	);
 
-	session.dispose();
+	runtime.dispose(); // 级联释放 assist 会话与 broker 注册（不只 session）
 	oldStoryState.storyDb.close();
 	oldStoryState.snapshotsDb.close();
 
@@ -316,16 +523,16 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			return undefined;
 		case "mode": {
 			if (arg === "") {
-				console.log(`> 当前模式: ${runtime.mode}`);
+				console.log(`> 当前模式: ${MODE_LABEL[runtime.mode]}（${runtime.mode}）`);
 				return undefined;
 			}
 			if (!MODE_SET.includes(arg as StoryMode)) {
-				console.log(`> 非法模式: ${arg}（可选: ${MODE_SET.join(" / ")}）`);
+				console.log(`> 非法模式: ${arg}（可选: ${MODE_SET.map((m) => MODE_LABEL[m]).join(" / ")}）`);
 				return undefined;
 			}
 			try {
 				runtime.setMode(arg as StoryMode);
-				console.log(`> 已切换到 ${arg}（story.meta.json 已持久化）`);
+				console.log(`> 已切换到 ${MODE_LABEL[arg as StoryMode]}（story.meta.json 已持久化）`);
 			} catch (err) {
 				console.log(`> 切换失败: ${err instanceof Error ? err.message : String(err)}`);
 			}
@@ -337,7 +544,7 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 				return undefined;
 			}
 			if (runtime.mode !== "creation") {
-				console.log(`该模式不可用：/plot 仅创造模式合法（剧情大纲指令；生存/冒险拒绝非 user 角色输入）。`);
+				console.log(`! 该模式不可用：/plot 仅创造模式合法（剧情大纲指令；生存/冒险拒绝非 user 角色输入）。`);
 				return undefined;
 			}
 			const turnSeq = computeNextTurnSeq(runtime.storyState.storyDb);
@@ -387,7 +594,10 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			}
 			try {
 				const reply = await runtime.assist.chat(arg);
-				console.log(`> [assist]（带外顾问，不进叙事；输出为草稿）\n${reply}`);
+				console.log("\n── 带外顾问 ──");
+				console.log("只读/草稿制，不进叙事流；以下为草稿，可自行决定是否作为输入发出。");
+				console.log(reply);
+				console.log("──────────────");
 			} catch (err) {
 				console.log(`> assist 失败: ${err instanceof Error ? err.message : String(err)}`);
 			}
@@ -507,7 +717,8 @@ export async function main(argv: readonly string[]): Promise<void> {
 	const { settings, warnings: settingsWarnings } = loadSettings();
 	const prompts: PromptLayerDirs = {
 		globalDir: defaultGlobalPromptsDir(),
-		...(packDirs.length > 0 ? { packDir: packDirs[0] } : {}),
+		// §6.5/§10.2 多包提示词合并：传全部包 prompts/ 目录（后包覆盖先包；存在的才被探测）。
+		...(packDirs.length > 0 ? { packDirs } : {}),
 	};
 	const modelRuntime = await ModelRuntime.create();
 	const eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"));
@@ -542,15 +753,21 @@ export async function main(argv: readonly string[]): Promise<void> {
 	console.log(
 		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具，§6.0）`,
 	);
+	// 启动横幅：故事标题 + 模式中文名（adventure 追加「已锁定」徽章）。
+	const bannerMeta = readStoryMeta(storyState.storyDir);
+	const storyTitle = bannerMeta?.title ?? sessionManager.getSessionName() ?? "未命名故事";
+	const modeLabel = MODE_LABEL[runtime.mode];
+	const lockedBadge = runtime.mode === "adventure" ? " · 已锁定" : "";
+	console.log(`═══ 《${storyTitle}》 · ${modeLabel}模式${lockedBadge} ═══`);
 	if (runtime.mode !== "creation") {
-		const modeInfo = runtime.mode === "adventure" ? "（锁定不可切换）" : "（story/输入校验生效）";
-		console.log(`> 当前模式: ${runtime.mode}${modeInfo}`);
+		const modeInfo = runtime.mode === "adventure" ? "锁定，不可切换" : "story/输入校验生效";
+		console.log(`模式说明: ${modeLabel}（${modeInfo}）`);
 	}
 
 	console.log("\n输入行动/对话开始叙事；斜杠命令见 /help；空行退出。");
 	try {
 		for (;;) {
-			const line = (await queue.nextLine("> ")).trim();
+			const line = (await queue.nextLine(`[${MODE_LABEL[runtime.mode]}]> `)).trim();
 			if (line === "") break;
 			// /! 前缀：输入渠道校验强制提交（去前缀 + force:true）
 			if (line.startsWith("/! ")) {
@@ -568,9 +785,9 @@ export async function main(argv: readonly string[]): Promise<void> {
 					printTurn(report);
 				} catch (err) {
 					if (err instanceof InputRejectedError) {
-						console.log(`> 输入被拒绝（§8 输入渠道校验）：${err.reason}`);
-						console.log(`> 建议改写：${err.suggestion}`);
-						console.log(`> 如确需原样提交，以 /! 开头强制提交（将留痕 warning）。`);
+						console.log(`! 输入被拒绝（§8 输入渠道校验）：${err.reason}`);
+						console.log(`! 建议改写：${err.suggestion}`);
+						console.log(`! 如确需原样提交，以 /! 开头强制提交（将留痕 warning）。`);
 					} else {
 						throw err;
 					}
