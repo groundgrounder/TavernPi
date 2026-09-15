@@ -179,8 +179,13 @@ export function validateSceneCard(storyDb: StoryDb, card: SceneCard): string[] {
 			problems.push(`offscreen_npc_ids 含死者 NPC #${off.npc_id}`);
 		}
 	}
+	// 地点自洽性：仅在注册表非空（有参照系）时判「未登记」。
+	// locations 由 data 阶段（每轮最后）登记，而本阶段在每轮最前读到的只是上一轮末的快照——
+	// 无卡包时的开场地、玩家新抵达的地点都必然尚未登记；且模型重试修正不了（注册表里没有
+	// 可改选的目标，它只能再编一个），只会白跑 maxAttempts 次 LLM 后降到兜底卡。
+	// 注册表为空即无参照系，此时「未登记」不构成矛盾，不判。
 	const locations = new Set(storyDb.reader.listLocations().map((l) => l.name));
-	if (!locations.has(card.scene_location_name)) {
+	if (locations.size > 0 && !locations.has(card.scene_location_name)) {
 		problems.push(`scene_location_name 未登记: ${JSON.stringify(card.scene_location_name)}`);
 	}
 	const clock = storyDb.reader.getClock();

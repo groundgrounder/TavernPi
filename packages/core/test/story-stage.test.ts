@@ -250,6 +250,37 @@ test("validateSceneCard：dead 在场 / 未登记地点 / 时间幻觉 / 未知 
 	}
 });
 
+test("validateSceneCard：地点注册表为空时不判「未登记」（开场地尚无参照系）", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		// 不登记任何地点 → 注册表为空（无卡包的故事开局即此形态）。
+		// locations 由 data 阶段（每轮最后）登记，场景分析在每轮最前只能读到上一轮末的快照，
+		// 故开场地必然「未登记」；若在此判失败，重试无法修正（注册表无可改选目标）→ 必然降兜底卡。
+		const npc = story.writer.insertNpc({ name: "艾琳" });
+		const card: SceneCard = {
+			onstage_npc_ids: [npc.id],
+			offscreen_npc_ids: [],
+			scene_location_name: "尚未登记的开场地",
+			current_story_time: "0000-01-01",
+			time_span_estimate: "",
+			to_time_suggestion: "",
+			scene_goal: "",
+			tone: "",
+			major_event: false,
+		};
+		const problems = validateSceneCard(story, card);
+		assert.ok(
+			!problems.some((p) => p.includes("scene_location_name 未登记")),
+			"注册表为空时不应判未登记",
+		);
+		assert.equal(problems.length, 0, "该卡其余字段合法，整体应无 problem");
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
 // ---------------------------------------------------------------------------
 // runSceneAnalysis
 // ---------------------------------------------------------------------------
