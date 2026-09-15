@@ -1,13 +1,13 @@
-// M4 故事驱动集成验收（创作规划 §6.3 / §6.4 / §7-M4）：story 阶段（场景分析/轻检/打回/全统筹）+ stylize 自断言脚本。
+// M4 故事驱动集成验收：story 阶段（场景分析/轻检/打回/全统筹）+ stylize 自断言脚本。
 //
 // 五区：
 // A. 场景分析正常流转（真实 LLM，3 轮）：场景卡产出非兜底 / onstage 驱动 npc 调度一致 / 时间零幻觉 /
 //    story_scene eventLog / 场景卡注入主叙事 / data 正常（timeSuggestion 链路不破坏落库）。
-// B. 打回与超限放行（§6.3 核心契约；story_review 桩注入，确定性）：dead NPC 报疑 → 审查 hard → 打回重写；
+// B. 打回与超限放行（核心契约；story_review 桩注入，确定性）：dead NPC 报疑 → 审查 hard → 打回重写；
 //    maxRevisions 耗尽 → 超限放行 + data strictDrop（时间倒流项剔除、正常事件落库、clock 不倒流）。
 // C. 全统筹与批注注入（真实 LLM，3 轮，overseeEveryTurns=2）：K 轮触发 → 批注跨轮注入下一轮主叙事；
 //    major_event 在非 K 轮触发统筹。
-// D. stylize 零漂移（§6.4）：真实路径（applied 或回退皆契约允许）+ 桩 drift 路径（factCheck 拒绝 →
+// D. stylize 零漂移：真实路径（applied 或回退皆契约允许）+ 桩 drift 路径（factCheck 拒绝 →
 //    applied=false、原文回退、eventLog ok:false）。
 // E. 回归与冒烟：npm test / typecheck / m1/m2/m3:accept 外部执行（见报告）；m4-cli 两种冒烟
 //    （story+npc 一轮 / --stylize 一轮）。
@@ -409,7 +409,7 @@ async function main(): Promise<void> {
 		console.log(`[obs] B2: revisions=${b2s.revisions} released=${b2s.releasedWithWarnings} warnings="${(b2TurnLog?.warnings ?? "").slice(0, 120)}"`);
 		console.log(`[obs] B2: data.ok=${b2Report.data.ok} dropped=${JSON.stringify(b2Dropped)} clock=${b2Clock} events=${b2Events.map((e) => e.summary).join(" | ")}`);
 		checks.push(check(`B2: releasedWithWarnings=true（实际 ${b2s.releasedWithWarnings}）`, b2s.releasedWithWarnings === true));
-		checks.push(check("B2: turn_log 该轮 warnings 非空（§6.3 留痕）", (b2TurnLog?.warnings ?? "").trim().length > 0));
+		checks.push(check("B2: turn_log 该轮 warnings 非空（留痕）", (b2TurnLog?.warnings ?? "").trim().length > 0));
 		checks.push(
 			check(
 				`B2: data.ok 且 dropped 含 time_advance 项（实际 ${JSON.stringify(b2Dropped.map((d) => d.item))}）`,

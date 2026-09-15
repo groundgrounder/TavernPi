@@ -1,4 +1,4 @@
-# 条目格式（创作规划 §4.1）：文件名即条目 id（teahouse）。
+# 条目格式：文件名即条目 id（teahouse）。
 type: location
 name: 城南茶肆
 keys: [茶肆]

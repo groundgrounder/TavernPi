@@ -1,4 +1,4 @@
-// stylize 纯模块层单测（§6.4；stub executor 无 LLM）：零事实漂移抽查（数字/实体/篇幅）、
+// stylize 纯模块层单测（stub executor 无 LLM）：零事实漂移抽查（数字/实体/篇幅）、
 // runStylize 成功/自纠/回退原文。
 
 import assert from "node:assert/strict";

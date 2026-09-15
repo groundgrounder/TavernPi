@@ -1,20 +1,20 @@
-// 故事 DB 行类型与共享常量（创作规划 §5.1 schema 的结构化镜像）。
+// 故事 DB 行类型与共享常量（schema 的结构化镜像）。
 
-/** clock 单例（id=1）。不带 turn_seq —— 创作规划 §5.1 的显式例外。 */
+/** clock 单例（id=1）。不带 turn_seq ——的显式例外。 */
 export interface StoryClock {
 	current_time: string;
 	calendar: string;
 	granularity: string;
 }
 
-/** 默认时钟初值。历法/粒度由卡包配置，默认弹性时间（§5.3）；具体初值待 M2 校准。 */
+/** 默认时钟初值。历法/粒度由卡包配置，默认弹性时间；具体初值待 M2 校准。 */
 export const DEFAULT_STORY_CLOCK: StoryClock = {
 	current_time: "0000-01-01",
 	calendar: "default",
 	granularity: "elastic",
 };
 
-/** 每轮时间推进记录（§5.3）。 */
+/** 每轮时间推进记录。 */
 export interface TimeLogRow {
 	turn_seq: number;
 	from_time: string;
@@ -22,8 +22,8 @@ export interface TimeLogRow {
 	span_note: string | null;
 }
 
-/** 叙事事件。story_time = 事件发生的故事时间（§5.3 events.story_time 锚点）。
- *  location 自由文本留作叙事描述；location_id 引用 locations（登记校验，§5.1）。 */
+/** 叙事事件。story_time = 事件发生的故事时间（events.story_time 锚点）。
+ *  location 自由文本留作叙事描述；location_id 引用 locations（登记校验）。 */
 export interface EventRow {
 	id: number;
 	turn_seq: number;
@@ -47,7 +47,7 @@ export interface PhaseRow {
 	status: string;
 }
 
-/** 世界状态键值（天气、经济等）。约定键 player_location = 玩家当前 location_id（§5.1）。 */
+/** 世界状态键值（天气、经济等）。约定键 player_location = 玩家当前 location_id。 */
 export interface WorldStateRow {
 	key: string;
 	value: string;
@@ -63,7 +63,7 @@ export function parseLocationId(value: string): number | null {
 	return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
-/** 地点注册表行（§5.1）。parent_id 表达包含关系（如 王城>庭院），不构成完整拓扑，内核不校验连通性。 */
+/** 地点注册表行。parent_id 表达包含关系（如 王城>庭院），不构成完整拓扑，内核不校验连通性。 */
 export interface LocationRow {
 	id: number;
 	name: string;
@@ -73,7 +73,7 @@ export interface LocationRow {
 	parent_name: string | null;
 }
 
-/** 位置变更记录（§5.1，镜像 time_log）。subject = 'player' 或 'npc:<id>'。 */
+/** 位置变更记录（镜像 time_log）。subject = 'player' 或 'npc:<id>'。 */
 export interface LocationLogRow {
 	turn_seq: number;
 	subject: string;
@@ -115,7 +115,7 @@ export interface NpcMemoryRow {
 	salience: number;
 }
 
-/** 关系/好感。disposition 参考 §5.2 favor 示例（-100~100，INTEGER）。 */
+/** 关系/好感。disposition 参考 favor 示例（-100~100，INTEGER）。 */
 export interface NpcRelationRow {
 	npc_a: number;
 	npc_b: number;
@@ -124,7 +124,7 @@ export interface NpcRelationRow {
 }
 
 /** 每轮一致性记录。raw_text = stylize 前原文（未启用则同 narrative_text）。
- *  warnings = §6.3 轻检/审查留痕（规则层硬冲突或 LLM 审查 findings 的文本摘要；可空，后补写）。 */
+ *  warnings = 轻检/审查留痕（规则层硬冲突或 LLM 审查 findings 的文本摘要；可空，后补写）。 */
 export interface TurnLogRow {
 	turn_seq: number;
 	session_entry_id: string;
@@ -142,7 +142,7 @@ export interface DirectiveRow {
 	status: "active" | "done" | "revoked";
 }
 
-/** data subagent 落库状态（§6.1 失败路径持久化；PK turn_seq）。
+/** data subagent 落库状态（失败路径持久化；PK turn_seq）。
  *  status：ok = 落库成功；failed = 本轮失败待补；compensated = 后续轮补齐（含本轮事实）。 */
 export interface DataStatusRow {
 	turn_seq: number;

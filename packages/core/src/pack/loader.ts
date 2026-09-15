@@ -1,8 +1,8 @@
-// 世界包自研加载器（创作规划 §4.1 加载形态 M5 定稿 / §8 决策行「卡包加载形态」）。
+// 世界包自研加载器（加载形态 M5 定稿 /「卡包加载形态」）。
 // 纯内容包由本模块直接读目录树，不走 pi package 自动发现；代码包（index.ts / pi.extensions）
 // 只收集入口（hasCode / extensionEntryPaths），实际加载执行在 Lane C 经 SDK 委托 pi loader。
 //
-// 目录布局（§4.1）：
+// 目录布局：
 //   package.json           name 必填，须匹配 ^[a-z][a-z0-9_]*$（直接作 SQL 前缀，不转换）
 //   story.yaml             可选，缺失 = 空 StoryMeta
 //   collection/<type>/<id>.yaml
@@ -38,7 +38,7 @@ import {
 } from "./types.ts";
 
 // ---------------------------------------------------------------------------
-// 条目 zod strict schema（§4.1 条目格式定稿）
+// 条目 zod strict schema（条目格式定稿）
 // ---------------------------------------------------------------------------
 
 const commonFields = {
@@ -59,7 +59,7 @@ const characterSpecialized = {
 const locationSpecialized = {
 	overview: z.string(),
 	features: z.array(z.string()),
-	// v0：父地点条目 id（同包引用，§5.1 父子地点）；seed 时先种父再种子。消费在 seed.ts。
+	// v0：父地点条目 id（同包引用，父子地点）；seed 时先种父再种子。消费在 seed.ts。
 	parent: z.string().optional(),
 };
 
@@ -207,7 +207,7 @@ function renderEntryBody(type: EntryType, data: Record<string, unknown>): string
 	}
 }
 
-/** summaryLine = name + 首非空行截 60 字（refs 一级摘要行内容，§4.1）。 */
+/** summaryLine = name + 首非空行截 60 字（refs 一级摘要行内容）。 */
 function buildSummaryLine(name: string, body: string): string {
 	const first = body.split("\n").find((l) => l.trim() !== "");
 	if (first === undefined) return name;
@@ -473,7 +473,7 @@ function validateInPackRefs(dir: string, packName: string, entries: CollectionEn
 }
 
 /**
- * 内核保留表白名单（§4.1 卡包 SQL 静态扫描豁免名单）。卡包 SQL 不应写这些表——
+ * 内核保留表白名单（卡包 SQL 静态扫描豁免名单）。卡包 SQL 不应写这些表——
  * 写了也报错（表归属内核，多包/内核语义由 core 管理）。
  */
 export const KERNEL_TABLE_WHITELIST: readonly string[] = [

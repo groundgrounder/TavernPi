@@ -1,4 +1,4 @@
-// 模型配置最小形态（创作规划 §6.6：~/.tavernpi/settings.json 里 models.narrator/story/npc/data/stylize
+// 模型配置最小形态（~/.tavernpi/settings.json 里 models.narrator/story/npc/data/stylize
 // 各自指定 provider/model id）。M2 只承载字段解析；provider/id 是否真实存在不在此校验
 // （解析在调用侧经 ModelRuntime.getModel 完成）。
 //

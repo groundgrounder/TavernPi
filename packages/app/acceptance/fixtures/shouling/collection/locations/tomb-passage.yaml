@@ -1,4 +1,4 @@
-# 条目格式（创作规划 §4.1）：文件名即条目 id（tomb-passage）。
+# 条目格式：文件名即条目 id（tomb-passage）。
 type: location
 name: 墓道
 keys: [墓道]

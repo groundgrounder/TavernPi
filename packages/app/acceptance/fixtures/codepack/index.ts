@@ -1,5 +1,5 @@
 // 代码包 fixture（M6-P4a 卡包代码挂载）：主叙事 session 挂载本 extension → 注册 roll_check 工具。
-// 只读工具，不写库（§6.0 禁的是 DB 工具）；经 additionalExtensionPaths 委托 pi loader 加载（jiti import）。
+// 只读工具，不写库（禁的是 DB 工具）；经 additionalExtensionPaths 委托 pi loader 加载（jiti import）。
 // 工具在 M6-P4a 验收只断言「注册与白名单正确」，不硬断言真实模型是否调用。
 
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";

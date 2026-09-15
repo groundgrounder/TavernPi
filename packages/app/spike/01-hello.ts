@@ -1,12 +1,12 @@
 // M0 spike #1：最小 createAgentSession 对话。
 //
-// 目的：复验「SDK 应用形态」基座（创作规划 §8.1 / 技术路线 §3.2）——
+// 目的：复验「SDK 应用形态」基座——
 // 用最省配置跑通 createAgentSession → prompt → 取回模型回复。
 //
 // 配置说明：
 // - 不传 modelRuntime / model：默认 ModelRuntime.create() 读 ~/.pi/agent/auth.json 与 models.json，
 //   初始模型取 settings.json 的 defaultProvider/defaultModel（findInitialModel）。
-// - SessionManager.inMemory()：会话转录只存内存，不落盘（技术路线 §3.2 第 4 行）。
+// - SessionManager.inMemory()：会话转录只存内存，不落盘。
 // - 本 spike 刻意不做 resourceLoader / systemPrompt override（那是 spike #2），
 //   因此系统提示含 pi 默认内容与 AGENTS.md 上下文，回复偏「编码助手」是预期行为。
 

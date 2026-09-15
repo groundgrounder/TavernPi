@@ -1,4 +1,4 @@
-// story subagent 纯模块层（创作规划 §6.3 两级运行 / 技术路线 §3.3；M4 纯模块形态）。
+// story subagent 纯模块层（两级运行；M4 纯模块形态）。
 //
 // 两级运行：
 //   1. 场景分析（runSceneAnalysis，每轮最前）：产出场景卡——全部 subagent 的调度依据
@@ -45,11 +45,11 @@ const sceneCardSchema = z.object({
 	scene_location_name: z.string().max(60), // 当前场景地点（须已登记）
 	current_story_time: z.string().max(40), // 当前故事时间（须与 clock 一致，防幻觉）
 	time_span_estimate: z.string().max(60), // 本轮时间跨度估计（如「几句话的工夫」）
-	to_time_suggestion: z.string().max(40), // 建议推进至（供 data 时间推进参考，§5.3 流转链路正式化）
+	to_time_suggestion: z.string().max(40), // 建议推进至（供 data 时间推进参考，流转链路正式化）
 	scene_goal: z.string().max(100),
 	tone: z.string().max(40),
 	major_event: z.boolean(), // 全统筹触发依据之一
-	// 输入渠道校验（§10.1 + §8 决策记录「输入渠道校验判定」）：只在 validateInput=true 的轮次由模型判定；
+	// 输入渠道校验（「输入渠道校验判定」）：只在 validateInput=true 的轮次由模型判定；
 	// 缺席视为合法（创造模式不校验、story 关闭无场景卡均走此路）。valid=false → runtime 拒绝非 user 角色输入。
 	input_validity: z
 		.object({
@@ -145,7 +145,7 @@ const SCENE_INSTRUCTIONS = [
 ].join("\n");
 
 /**
- * 输入渠道校验判定指令（§10.1 + §8 决策记录「输入渠道校验判定」）：只在 validateInput=true 时注入。
+ * 输入渠道校验判定指令（「输入渠道校验判定」）：只在 validateInput=true 时注入。
  * 判定标准：只允许 user 角色自身的行动/对话；直接命令 NPC、指定剧情走向/结果、上帝视角陈述 = 非法。
  * 措辞写硬（任务要求）：明确「直接以作者身份命令 NPC 或指定剧情结果 = 非法」，避免「宁可放行」的松弛反向导致漏拒。
  */
@@ -222,9 +222,9 @@ interface SceneUserPromptInput {
 	turnSeq: number;
 	userInput: string;
 	recentNarratives: RecentNarrative[];
-	/** 是否注入输入合法性判定指令（§10.1 + §8 决策记录）。仅生存/冒险的生存模式预设 inputValidation=true 时传 true。 */
+	/** 是否注入输入合法性判定指令。仅生存/冒险的生存模式预设 inputValidation=true 时传 true。 */
 	validateInput?: boolean;
-	/** 是否注入活跃指令小节（§10.1 directives 门控）：仅创造模式传 true；缺省 true（向后兼容，不传=注入）。 */
+	/** 是否注入活跃指令小节（directives 门控）：仅创造模式传 true；缺省 true（向后兼容，不传=注入）。 */
 	directivesAllowed?: boolean;
 }
 
@@ -249,7 +249,7 @@ function buildSceneUserPrompt(storyDb: StoryDb, input: SceneUserPromptInput): st
 		);
 	}
 	parts.push(`## 本轮玩家输入\n${input.userInput}`);
-	// 活跃指令（作者意图）仅创造模式注入（§10.1 directives 门控）：切生存/冒险后存量 active 指令
+	// 活跃指令（作者意图）仅创造模式注入（directives 门控）：切生存/冒险后存量 active 指令
 	// 仍保留在 DB（不撤销）但停止下达；切回创造恢复。缺省 true = 向后兼容（外部直调 runSceneAnalysis 时注入）。
 	if (input.directivesAllowed !== false) {
 		const directives = storyDb.reader.listDirectives("active");
@@ -272,8 +272,8 @@ export interface SceneAnalysisResult {
 }
 
 /** 场景分析（每轮最前）。重试耗尽 → 确定性兜底卡 + fallback:true + warning。
- *  validateInput：注入输入合法性判定指令（§10.1 + §8 决策记录），仅生存/冒险预设传 true。
- *  directivesAllowed：注入活跃指令小节（§10.1 directives 门控），仅创造模式传 true（缺省 true）。 */
+ *  validateInput：注入输入合法性判定指令，仅生存/冒险预设传 true。
+ *  directivesAllowed：注入活跃指令小节（directives 门控），仅创造模式传 true（缺省 true）。 */
 export async function runSceneAnalysis(
 	input: {
 		turnSeq: number;

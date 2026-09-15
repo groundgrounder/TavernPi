@@ -1,5 +1,5 @@
 -- ============================================================
--- 模板：quest-progress 任务进度（创作规划 §5.2 常用表模板）
+-- 模板：quest-progress 任务进度（常用表模板）
 -- 用途：每个任务一行（或多行里程碑），随剧情推进更新。
 --
 -- 抄改步骤同 char-status：把表名里的 PACKNAME 替换成你的包名
@@ -23,6 +23,6 @@ CREATE TABLE IF NOT EXISTS PACKNAME_quest_progress (
   UNIQUE (quest_id)                                -- 每任务一行：quest_id 唯一，seed 幂等键
 );
 
--- 示例种子数据（INSERT OR IGNORE：按 quest_id 幂等，重复执行不产生重复行，§4.1 seed 幂等纪律）：
+-- 示例种子数据（INSERT OR IGNORE：按 quest_id 幂等，重复执行不产生重复行，seed 幂等纪律）：
 INSERT OR IGNORE INTO PACKNAME_quest_progress (quest_id, title, stage, status, summary, updated_turn) VALUES
   ('myworld:royal-tomb', '守陵人委托', 0, 'active', '刚接下委托，需前往王城东侧的陵墓查明异动。', 0);

@@ -1,4 +1,4 @@
-// 章节摘要 compaction（创作规划 §3.0/§3.1）。把被吞并的对话区段 + DB 权威摘要交给 chapter_summary subagent
+// 章节摘要 compaction。把被吞并的对话区段 + DB 权威摘要交给 chapter_summary subagent
 // 生成章节摘要，完全替换 pi 默认摘要（经 session_before_compact 钩子 return {compaction}）。
 // 摘要须保留未解决伏笔 / 在场 NPC 状态与关系变化 / 当前阶段目标——这些 DB 摘要（renderDbSummary）是权威面。
 //
@@ -140,7 +140,7 @@ export function buildChapterSummaryUserPrompt(storyDb: StoryDb, input: ChapterSu
 			: extractSwallowedMessages(input.branchEntries, input.firstKeptEntryId);
 	const parts: string[] = [];
 	parts.push(`## 被吞并对话区段（将被压缩为章节摘要）\n${renderSwallowed(swallowed)}`);
-	// 前情章节摘要（§3.1 迭代 compaction 不丢前情）：有 previousSummary 才注入，指令要求吸收其要点。
+	// 前情章节摘要（迭代 compaction 不丢前情）：有 previousSummary 才注入，指令要求吸收其要点。
 	if (input.previousSummary !== undefined && input.previousSummary.trim() !== "") {
 		parts.push(`## 前情章节摘要（上次 compaction 产物，新摘要必须吸收其要点，不得丢失）\n${input.previousSummary}`);
 	}

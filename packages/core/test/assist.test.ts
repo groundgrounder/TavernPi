@@ -1,4 +1,4 @@
-// 带外顾问 assist（§6.8）单测：工具集按模式装配（冒险无 list_directives、视图过滤——无关 NPC get_npc 不可见）、
+// 带外顾问 assist 单测：工具集按模式装配（冒险无 list_directives、视图过滤——无关 NPC get_npc 不可）、
 // rebuild 后历史清零（sessionFactory 计数断言新建）、提示词角色名按模式解析、工具白名单无写工具、越集 get_npc 不可见。
 
 import assert from "node:assert/strict";

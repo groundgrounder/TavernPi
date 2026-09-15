@@ -1,4 +1,4 @@
-// subagent 运行时（创作规划 §6.0 总则 + 技术路线 §3.3）。
+// subagent 运行时（总则）。
 // 每个 subagent 一轮 = 一个空白 inMemory session + 单输出工具强制结构化输出：
 // 白名单收紧到输出工具（tools 显式 allowlist，避免 noTools:"all" 连 customTools 一起过滤），
 // 输出工具带 constrainedSampling(json_schema, require) 让 provider 侧约束输出形态。

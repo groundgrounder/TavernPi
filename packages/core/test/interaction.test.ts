@@ -1,4 +1,4 @@
-// 轮中交互通道（创作规划 §6.7）单测：broker 语义 + combat 判定规则。确定性无 LLM。
+// 轮中交互通道单测：broker 语义 + combat 判定规则。确定性无 LLM。
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

@@ -1,4 +1,4 @@
-// npc subagent 纯模块层单测（§6.2；stub executor 全程无 LLM）：确定性场景规划、
+// npc subagent 纯模块层单测（stub executor 全程无 LLM）：确定性场景规划、
 // 在场预演并行/重试/降级/防串台、离线批量校验与权威边界结构强制、渲染器。
 
 import assert from "node:assert/strict";
@@ -262,7 +262,7 @@ test("runOnstageRehearsals：npc_id 串台（返回别人的 id）→ 重试 →
 	}
 });
 
-test("runOnstageRehearsals：directives 非空 → 预演 userPrompt 含「作者指令」节（§6.3 下达）", async () => {
+test("runOnstageRehearsals：directives 非空 → 预演 userPrompt 含「作者指令」节（下达）", async () => {
 	const dir = makeTempDir();
 	try {
 		const story = openTempStory(dir);

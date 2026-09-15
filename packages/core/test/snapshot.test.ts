@@ -363,7 +363,7 @@ test("hooks：data 全 failed（M2 合法态，失败轮无快照）→ 空库�
 		const story = openStoryDb(join(dir, "story.db"));
 		story.writer.insertEvent({ turnSeq: 1, summary: "s1" });
 		story.writer.recordTurnLog({ turnSeq: 1, sessionEntryId: "e1", userInput: "u", narrativeText: "n" });
-		// 只有 failed 轮（§6.1：失败轮不拍快照 → snapshots.db 为空属合法），无 ok 轮
+		// 只有 failed 轮（失败轮不拍快照 → snapshots.db 为空属合法），无 ok 轮
 		story.writer.recordDataStatus({ turnSeq: 1, status: "failed", attempts: 3, error: "校验失败" });
 		const snap = openSnapshotsDb(snapshotsDbPath(story.path)); // 空 snapshots.db
 
@@ -380,7 +380,7 @@ test("hooks：data 全 failed（M2 合法态，失败轮无快照）→ 空库�
 		hooks.sessionBeforeTree(bt("e1"), fakeCtx);
 		hooks.sessionTree(tt("e1"), fakeCtx);
 
-		assert.equal(hooks.state.lastRestoreResult?.ok, true, "全 failed → 空库兜底放行（§3.1）");
+		assert.equal(hooks.state.lastRestoreResult?.ok, true, "全 failed → 空库兜底放行");
 		assert.equal(current.reader.listEvents().length, 0, "空库兜底 = 故事初始态");
 		snap.close();
 	} finally {

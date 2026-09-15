@@ -1,4 +1,4 @@
-// M5 故事驱动集成验收（创作规划 §4.0 / §7-M5）：卡包系统自断言脚本。
+// M5 故事驱动集成验收：卡包系统自断言脚本。
 //
 // 六区：
 // A. 加载与校验（确定性，临时目录现建坏包）：断链 refs（包内/跨包）/ zod strict unknown 字段 /
@@ -324,7 +324,7 @@ async function main(): Promise<void> {
 			storyState: dStory.storyState,
 			eventLog: dEventLog,
 			packs: { cache: new PackCache([SHOULING, MINIPACK]), pinned: () => dPinned },
-			// §10.1 模式校验：creation 下 story 关 + stylize 开 → 非法。开 story 并桩掉场景分析
+			// 模式校验：creation 下 story 关 + stylize 开 → 非法。开 story 并桩掉场景分析
 			// （buildFallbackSceneCard = computeScenePlan 等价），保持 stylize 路径可测；npc 仍关（story 开则合法）。
 			story: {
 				enabled: true,

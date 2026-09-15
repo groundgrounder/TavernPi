@@ -1,6 +1,6 @@
 // M0 spike #5：session.navigateTree + session_before_tree / session_tree 钩子。
 //
-// 目的（技术路线 §4 spike 清单第 5 项 / §3.1 快照恢复挂载点 / §3.2 第 6 行）：
+// 目的（spike 清单第 5 项 / 快照恢复挂载点）：
 //   a) 落盘 session（临时目录）制造分支：主线若干轮 → 导航回旧节点后 prompt 出分支 B；
 //   b) 实证 session_before_tree / session_tree 钩子确实触发（顺序 + payload）；
 //   c) 实证 navigateTree 语义：isStreaming 时抛错（先 await 完所有 prompt）；

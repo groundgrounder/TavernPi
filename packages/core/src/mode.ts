@@ -1,4 +1,4 @@
-// 内核级模式预设（创作规划 §10.1 ★信任边界）。
+// 内核级模式预设（★信任边界）。
 //
 // 三模式（creation/survival/adventure）是内核级声明式预设，不是 UI 层的隐藏：TUI 与外部 UI
 // （如 tavern studio）走同一套内核强制执行——subagent 启用集合、切换规则、锁定，均由内核判定，
@@ -13,7 +13,7 @@
 
 export type StoryMode = "creation" | "survival" | "adventure";
 
-/** 精确匹配三值的类型守卫（§10.1 ★信任边界）：拒绝非法字符串形态（如 "Survival"）。
+/** 精确匹配三值的类型守卫（★信任边界）：拒绝非法字符串形态（如 "Survival"）。
  *  供 resolveStoryMode / createStory / setMode 等入口统一校验，非法值构建期报错而非首次消费时的 TypeError。 */
 export function isStoryMode(v: unknown): v is StoryMode {
 	return v === "creation" || v === "survival" || v === "adventure";
@@ -74,7 +74,7 @@ export const MODE_PRESETS: Record<StoryMode, ModePreset> = {
 
 /**
  * 校验 subagent 开关组合是否合法（返回中文违规问题列表；空数组 = 合法）。
- * 规则（创作规划 §10.1）：
+ * 规则：
  * - creation：story/npc/stylize 可关；但 story 可关的前提 = stylize 与 npc 均已关
  *   （审查的主要对象不存在时审查才可关）；data 不可关（runtime 本无 data 开关）。
  * - survival：story/npc 必须开，仅 stylize 可关。

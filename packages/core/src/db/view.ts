@@ -1,4 +1,4 @@
-// 冒险模式 DB 视图过滤查询层（创作规划 §10.1）。只读包装 DbReader，提供两种过滤面：
+// 冒险模式 DB 视图过滤查询层。只读包装 DbReader，提供两种过滤面：
 // - none：全量透传（含 sys_ 前缀内核簿记键），供需要完整数据的调用方；
 // - user-related：玩家相关 NPC 域过滤 + world_state 隐藏 sys_ 内核簿记键，供冒险视图 UI/assist。
 // 本层不写库，只读；NpcComposite 内 traits/memories/relations 随 NPC 可见性整体过滤。

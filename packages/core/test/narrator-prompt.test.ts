@@ -1,4 +1,4 @@
-// renderNarratorPrompt 单测（§4.1 检索式注入接线；确定性，无需模型/网络）：
+// renderNarratorPrompt 单测（检索式注入接线；确定性，无需模型/网络）：
 // packs 缺省空注入 / 命中注入（正文 + refs 摘要行 + injected 标识）/ 未知 pin 警告三通道 /
 // 预算整条裁减 / 上一轮 turn_log narrativeText 参与扫描。
 

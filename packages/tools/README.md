@@ -6,7 +6,7 @@
 2. **templates**：内置 SQL 表模板库（角色状态栏 / 物品栏 / 任务进度），可直接抄改。
 3. **init**：生成一个「最小可过检」的骨架卡包。
 
-相关契约：创作规划 §4（世界包）/ §5.2（变量系统，SQL 是一等创作接口）。
+相关契约：世界包 / 变量系统（SQL 是一等创作接口）。
 
 ```bash
 npm run pack:check -- ./my-world   # 或直接 node packages/tools/src/cli.ts check ./my-world
@@ -47,14 +47,14 @@ my-world/
 │   ├── objects/        # type=object：关键物品
 │   ├── factions/       # type=faction：势力/组织
 │   └── plot/           # type=plot：剧情线/大纲
-├── prompts/            # 可选：覆盖 subagent 提示词（§6.5）
+├── prompts/            # 可选：覆盖 subagent 提示词
 └── db/
     ├── schema.sql      # 本包自定义表（CREATE TABLE，可含初值 INSERT）
     └── seed.sql        # 种子数据（INSERT；重复执行不炸）
 ```
 
 - **纯内容包零代码**：不需要写任何 extension 代码，YAML 条目 + SQL 即完整卡包。
-- `package.json` 的 `name` 被用作命名空间前缀与跨包引用前缀（见 §5）。
+- `package.json` 的 `name` 被用作命名空间前缀与跨包引用前缀（见第 5 节）。
 - `schema.sql` / `seed.sql` 在故事创建时以命名迁移执行（`<包名>_schema` / `<包名>_seed`），幂等。
 
 ---
@@ -107,12 +107,12 @@ INSERT OR IGNORE INTO <包名>_char_status (npc_ref, favor, turn_seq) VALUES ('m
 
 - **不用学**视图、触发器、存储过程、复杂查询。卡包表是「内容本体」——data subagent 只填表，读取渲染与状态界面由内核负责。
 - 所有 `CREATE TABLE` 用 `IF NOT EXISTS`；INSERT 幂等（`INSERT OR IGNORE` 或存在性判断）——卡包 SQL 会被重复执行。
-- 不要在 SQL 里写内嵌注释以外的说明文档。**字段注释就是给 data subagent 的填写说明**（§5.2）：每个字段写清取值语义与范围（`favor: -100~100，初见通常为 0`），语义与结构在同一处维护。
+- 不要在 SQL 里写内嵌注释以外的说明文档。**字段注释就是给 data subagent 的填写说明**：每个字段写清取值语义与范围（`favor: -100~100，初见通常为 0`），语义与结构在同一处维护。
 - 卡包自定义表 M5 不进入 data 变更集（data 只写内核固定表）；自定义表的写入由卡包代码工具或后续里程碑扩展。
 
 ---
 
-## 5. 命名空间前缀规则（§4.0 契约）
+## 5. 命名空间前缀规则
 
 - **表名、world_state 键**必须带「`包名_`」前缀（内核保留表/键白名单除外）。
 - 前缀 = `package.json` 的 `name`，**直接作前缀、不做转换**：name 须匹配 `^[a-z][a-z0-9_]*$`（小写字母开头，仅小写字母/数字/下划线）。这也是加载器的包名校验，不满足即加载失败。
@@ -186,9 +186,9 @@ INSERT OR IGNORE INTO <包名>_char_status (npc_ref, favor, turn_seq) VALUES ('m
 
 | 报错形态 | 含义 | 处理 |
 |---|---|---|
-| `<file>: 未知字段 xxx` | 条目写了 zod schema 之外的多余字段（笔误/拼错） | 删掉或改对字段名（§3 字段表） |
+| `<file>: 未知字段 xxx` | 条目写了 zod schema 之外的多余字段（笔误/拼错） | 删掉或改对字段名（见第 3 节字段表） |
 | `<file>: 引用断链: xxx` | `refs` 或条目内引用的 `type:id` 找不到目标条目 | 补目标条目，或把引用改成已有的 `type:id` / `包名:type:id` |
-| `<file>: 表名缺少包前缀` | `CREATE TABLE` 表名没有 `包名_` 前缀 | 改名加前缀（§5） |
+| `<file>: 表名缺少包前缀` | `CREATE TABLE` 表名没有 `包名_` 前缀 | 改名加前缀（见第 5 节） |
 | `<file>: id 冲突: xxx` | 条目 id（文件名）重复 | 重命名条目文件 |
 | `<file>: 迁移 <包名>_schema 失败: ...` | `schema.sql` 在该包表上有 SQL 错误 | 按 SQL 错误修 `db/schema.sql`；迁移是在干净内存库上从零跑的 |
 | `<file>: 迁移 <包名>_seed 失败: ...` | `seed.sql` 执行失败 | 常见：表没建（放错文件）、INSERT 撞约束、FK 引用不存在的行；修 `db/seed.sql` |

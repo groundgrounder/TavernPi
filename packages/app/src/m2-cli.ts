@@ -1,16 +1,16 @@
-// M2 交互 CLI（人工验收入口，创作规划 §7-M2）：data subagent 叙事循环 + StoryRuntime 编排器。
+// M2 交互 CLI（人工验收入口）：data subagent 叙事循环 + StoryRuntime 编排器。
 //
-// 目的：验收 §6.1 契约——data 每轮自动抽取落库（时间推进与校验）；失败路径（重试/不拍快照/
+// 目的：验收契约——data 每轮自动抽取落库（时间推进与校验）；失败路径（重试/不拍快照/
 // 下轮补齐/连续失败提示）；「10 轮后 DB 正确反映剧情」。
 // 接线（app 层只消费 core API）：
-//   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createStoryRuntime（§10.2 API 面 M2 形态）
+//   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createStoryRuntime（API 面 M2 形态）
 //     ├── 主叙事 AgentSession（零 DB 工具，before_agent_start 每轮注入 DB 摘要）
 //     └── runDataStage（data subagent：submit_changeset 单输出工具 + 重试/补齐/事件流）
-//   eventLog = pipeline-events.jsonl（故事目录内）；settings = ~/.tavernpi/settings.json（§6.6）。
+//   eventLog = pipeline-events.jsonl（故事目录内）；settings = ~/.tavernpi/settings.json。
 //
 // 关键决策（与 m1-cli 一致，详见 core pipeline/runtime.ts 文件头）：
 // - 快照绑定本轮 leaf（最终 assistant entry），与 turn_log 同一 id；
-// - data 成功才拍快照（§6.1：拍摄前提 = 落库成功），失败轮记 data_status.failed、下轮补齐；
+// - data 成功才拍快照（拍摄前提 = 落库成功），失败轮记 data_status.failed、下轮补齐；
 // - 主叙事零工具：启动打印工具白名单（应为空）。
 // - fork 流程：createBranchedSession → forkStoryDb → dispose 旧运行态 → 新故事目录重建
 //   StoryRuntime（settings/prompts/eventLog 重新传入，新目录新 eventLog 文件）。
@@ -127,7 +127,7 @@ function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: 
 	} else if (result.restoredTurnSeq !== undefined) {
 		console.log(`> 恢复成功: turn${result.restoredTurnSeq}（entry ${result.restoredEntryId}）`);
 	} else {
-		console.log("> 恢复成功（空库兜底，§3.1）");
+		console.log("> 恢复成功（空库兜底）");
 	}
 	console.log(`> 当前 clock: ${clock?.current_time ?? "(未初始化)"}，events: ${events.length} 行`);
 }
@@ -161,7 +161,7 @@ function printHelp(): void {
 			"  /help               本帮助",
 			"  空行                退出（不删故事目录，可 --resume 续写）",
 			"",
-			"data subagent（§6.1）：每轮叙事后自动抽取落库；失败会重试并在下轮补齐，不阻塞叙事。",
+			"data subagent：每轮叙事后自动抽取落库；失败会重试并在下轮补齐，不阻塞叙事。",
 			"事件流留痕见故事目录 pipeline-events.jsonl。",
 		].join("\n"),
 	);
@@ -171,7 +171,7 @@ function printTurn(report: TurnResult): void {
 	console.log(`\n========== 第 ${report.turnSeq} 轮 ==========`);
 	console.log("--- 正文 ---");
 	console.log(report.narrativeText);
-	console.log("--- data 落库（§6.1） ---");
+	console.log("--- data 落库 ---");
 	if (report.data.ok) {
 		const a = report.data.applied;
 		console.log(
@@ -179,7 +179,7 @@ function printTurn(report: TurnResult): void {
 		);
 	} else {
 		console.log(`✗ 失败（attempts=${report.data.attempts}）: ${truncate(report.data.error, 300)}`);
-		console.log(`  本轮快照跳过，下轮将补齐（§6.1）`);
+		console.log(`  本轮快照跳过，下轮将补齐`);
 	}
 	console.log(`--- 快照: ${report.snapshotTaken ? "已拍" : "跳过"} ---`);
 	if (report.consecutiveDataFailures > 0) {
@@ -351,10 +351,10 @@ export async function main(argv: readonly string[]): Promise<void> {
 		snapshotsDb: openSnapshotsDb(snapshotsDbPath(dbPath)),
 	};
 
-	// 模型配置（§6.6）与提示词分层（§6.5）：全局层默认启用，包/故事层由后续卡包系统注入。
+	// 模型配置与提示词分层：全局层默认启用，包/故事层由后续卡包系统注入。
 	const { settings, warnings: settingsWarnings } = loadSettings();
 	const prompts: PromptLayerDirs = { globalDir: defaultGlobalPromptsDir() };
-	// ModelRuntime 共享实例（并行纪律：多 subagent session 共享凭证/模型，技术路线 §3.2）。
+	// ModelRuntime 共享实例（并行纪律：多 subagent session 共享凭证/模型）。
 	const modelRuntime = await ModelRuntime.create();
 	const eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"));
 
@@ -379,7 +379,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 		onWarning: (m) => console.warn(`[warn] ${m}`),
 	});
 	console.log(
-		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具，§6.0）`,
+		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具）`,
 	);
 
 	console.log("\n输入行动/对话开始叙事；斜杠命令见 /help；空行退出。");

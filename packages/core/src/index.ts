@@ -1,11 +1,11 @@
-// tavernpi-core 对外导出收敛（创作规划 §10.2 API 承诺面的源头）。
-// M1-P1：故事 DB 层；M1-P2：快照管理器（§3.1 ★承重机制）；M2-P1：提示词分层/subagent 运行时/
-// pipeline 事件流/模型配置最小形态；M2-P2：data subagent（§6.1）+ StoryRuntime 编排器（§10.2）；
-// M3-P2：npc subagent 阶段（§6.2）接入 StoryRuntime；M4-P2：story 阶段（§6.3）+ stylize（§6.4）接入；
+// tavernpi-core 对外导出收敛（API 承诺面的源头）。
+// M1-P1：故事 DB 层；M1-P2：快照管理器（★承重机制）；M2-P1：提示词分层/subagent 运行时/
+// pipeline 事件流/模型配置最小形态；M2-P2：data subagent + StoryRuntime 编排器；
+// M3-P2：npc subagent 阶段接入 StoryRuntime；M4-P2：story 阶段 + stylize 接入；
 // M5：卡包系统；M6-P1：模式内核；M6-P2：章节摘要 compaction+/swipe；M6-P3：assist 带外顾问；
-// M6-P4a：受信任写入/提示词分层管理/卡包代码挂载/多包提示词合并（§10.2承诺面定型）。
+// M6-P4a：受信任写入/提示词分层管理/卡包代码挂载/多包提示词合并（承诺面定型）。
 //
-// 按 §10.2 分组（导出注释）：故事生命周期 / 带模式过滤的 DB 查询（DbView）/ 受信任写入 /
+// 按分组（导出注释）：故事生命周期 / 带模式过滤的 DB 查询（DbView）/ 受信任写入 /
 // 提示词分层管理 / agent 模型配置（settings）/ 模式管理（mode/setMode/MODE_PRESETS）/
 // pipeline 事件流 / 轮中交互通道 / assist。
 
@@ -30,7 +30,7 @@ export { DbWriter } from "./db/writer.ts";
 // db 工具集（pi ToolDefinition）
 export { createDbTools, type DbToolsOptions } from "./db/tools.ts";
 
-// DB 视图过滤（§10.1 冒险模式「与 user 相关」v0 规则）
+// DB 视图过滤（冒险模式「与 user 相关」v0 规则）
 export {
 	buildNpcCardRefIndex,
 	createDbView,
@@ -65,7 +65,7 @@ export {
 // schema 常量（迁移测试/卡包工具可用）
 export { CORE_SCHEMA_SQL, CORE_V2_ALTERS, CORE_V2_SPATIAL_SQL, CORE_V3_DATA_STATUS_SQL } from "./db/schema.ts";
 
-// 快照管理器（§3.1 ★）
+// 快照管理器（★）
 export {
 	openSnapshotsDb,
 	snapshotsDbPath,
@@ -85,7 +85,7 @@ export {
 } from "./snapshot/hooks.ts";
 export { forkStoryDb, type ForkResult } from "./snapshot/fork.ts";
 
-// 轮中交互通道（§6.7）
+// 轮中交互通道
 export {
 	InteractionBroker,
 	InteractionUnavailableError,
@@ -102,7 +102,7 @@ export type {
 	InteractionRequest,
 } from "./interaction/index.ts";
 
-// 提示词分层加载器（§6.5）+ 分层管理 API（§10.2「各层读写与覆盖链查询」）
+// 提示词分层加载器 + 分层管理 API（「各层读写与覆盖链查询」）
 export {
 	assertValidRole,
 	builtinPromptsDir,
@@ -120,7 +120,7 @@ export {
 	type PromptLayerDirs,
 } from "./prompts/loader.ts";
 
-// subagent 运行时（§6.0 总则 / 技术路线 §3.3）
+// subagent 运行时（总则）
 export {
 	runSubagent,
 	SubagentOutputError,
@@ -130,7 +130,7 @@ export {
 	type SubagentUsage,
 } from "./subagent/runtime.ts";
 
-// pipeline 事件流（§10.2 承诺面 M2 起）
+// pipeline 事件流（承诺面 M2 起）
 export {
 	createPipelineEventLog,
 	type PipelineEvent,
@@ -138,7 +138,7 @@ export {
 	type PipelineEventListener,
 } from "./pipeline/events.ts";
 
-// 模型配置最小形态（§6.6）
+// 模型配置最小形态
 export {
 	defaultSettingsPath,
 	loadSettings,
@@ -147,7 +147,7 @@ export {
 	type TavernSettings,
 } from "./settings.ts";
 
-// data subagent 变更集（§6.1）
+// data subagent 变更集
 export {
 	applyChangeset,
 	CHANGELOG_JSON_SCHEMA,
@@ -159,10 +159,10 @@ export {
 	type ChangesetProblem,
 } from "./pipeline/changeset.ts";
 
-// DB 摘要渲染（§5.2）
+// DB 摘要渲染
 export { renderDbSummary } from "./pipeline/db-summary.ts";
 
-// data subagent 编排（§6.1）
+// data subagent 编排
 export {
 	DATA_OUTPUT_TOOL_NAME,
 	runDataStage,
@@ -171,7 +171,7 @@ export {
 	type DataStageOutcome,
 } from "./pipeline/data-stage.ts";
 
-// npc subagent（§6.2：场景规划 / 在场预演 / 离线推演 / 渲染器 / 簿记键）
+// npc subagent（场景规划 / 在场预演 / 离线推演 / 渲染器 / 簿记键）
 // isReservedWorldStateKey 从 changeset 重导出：sys_ 前缀命名空间是 npc 簿记键的权威判定
 //（data 禁写内核保留键，见 changeset.ts），归属 npc 节更贴合其用途。
 export { isReservedWorldStateKey } from "./pipeline/changeset.ts";
@@ -192,7 +192,7 @@ export {
 	type ScenePlan,
 } from "./pipeline/npc-stage.ts";
 
-// story subagent（§6.3：场景分析 / 规则层轻检 / LLM 审查 / 全统筹 / 渲染器）
+// story subagent（场景分析 / 规则层轻检 / LLM 审查 / 全统筹 / 渲染器）
 export {
 	OVERSEE_JSON_SCHEMA,
 	OVERSEE_OUTPUT_TOOL_NAME,
@@ -222,7 +222,7 @@ export {
 	type StoryStageOptions,
 } from "./pipeline/story-stage.ts";
 
-// stylize（§6.4：默认关闭的可选阶段；零事实漂移抽查）
+// stylize（默认关闭的可选阶段；零事实漂移抽查）
 export {
 	STYLIZE_JSON_SCHEMA,
 	STYLIZE_OUTPUT_TOOL_NAME,
@@ -233,7 +233,7 @@ export {
 	type StylizeOutput,
 } from "./pipeline/stylize-stage.ts";
 
-// 章节摘要 compaction（§3.0/§3.1：session_before_compact 钩子生成章节摘要替换默认摘要）
+// 章节摘要 compaction（session_before_compact 钩子生成章节摘要替换默认摘要）
 export {
 	CHAPTER_SUMMARY_INSTRUCTIONS_TEXT,
 	CHAPTER_SUMMARY_JSON_SCHEMA,
@@ -247,7 +247,7 @@ export {
 	type ChapterSummaryOutput,
 } from "./pipeline/chapter-summary.ts";
 
-// 带外顾问（§6.8：会话式、只读、草稿制、无开关；冒险视图走 user-related 过滤）
+// 带外顾问（会话式、只读、草稿制、无开关；冒险视图走 user-related 过滤）
 export {
 	createAssistAdvisor,
 	createAssistTools,
@@ -257,7 +257,7 @@ export {
 	type AssistToolOptions,
 } from "./assist.ts";
 
-// StoryRuntime 编排器（§10.2 API 面）——受信任写入 / 轮中交互 broker / 提示词分层管理 均在此暴露
+// StoryRuntime 编排器（API 面）——受信任写入 / 轮中交互 broker / 提示词分层管理 均在此暴露
 export {
 	computeNextTurnSeq,
 	applyModeSwitch,
@@ -277,7 +277,7 @@ export {
 	type TurnResult,
 } from "./pipeline/runtime.ts";
 
-// 卡包系统（§4 世界包：加载 / 匹配注入 / seed / mtime 缓存热更新；§4.1 M5 定稿）
+// 卡包系统（世界包：加载 / 匹配注入 / seed / mtime 缓存热更新；M5 定稿）
 export { loadPack, loadPacks, KERNEL_TABLE_WHITELIST } from "./pack/loader.ts";
 export { PackCache } from "./pack/cache.ts";
 export {
@@ -301,7 +301,7 @@ export {
 	type WorldPack,
 } from "./pack/types.ts";
 
-// 故事创建（§4.1 M5：createStory——卡包校验 → SQL+seed 迁移 → story.yaml 消费 → 开场白首轮 → story.meta.json）
+// 故事创建（M5：createStory——卡包校验 → SQL+seed 迁移 → story.yaml 消费 → 开场白首轮 → story.meta.json）
 // + story.meta.json 辅助（--resume / 模式解析 / fork 继承共用）
 export {
 	createStory,
@@ -313,7 +313,7 @@ export {
 	type StoryMetaFile,
 } from "./story.ts";
 
-// 内核级模式预设（§10.1 ★信任边界：三模式声明式预设——subagent 启用集合 / 切换规则 / 锁定）
+// 内核级模式预设（★信任边界：三模式声明式预设——subagent 启用集合 / 切换规则 / 锁定）
 export {
 	MODE_PRESETS,
 	assertCanSwitchMode,

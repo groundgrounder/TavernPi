@@ -19,3 +19,6 @@ auth.json
 *.db-journal
 *.db-wal
 *.db-shm
+
+# 本机 agent 工作目录（工作记录/缓存，非项目资产）
+.workbuddy/

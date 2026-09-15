@@ -1,4 +1,4 @@
-// M3 故事驱动集成验收（创作规划 §6.2 / §7-M3）：npc subagent 阶段（在场预演 + 离线推演）自断言脚本。
+// M3 故事驱动集成验收：npc subagent 阶段（在场预演 + 离线推演）自断言脚本。
 //
 // 五区：
 // A. 在场预演 + 多 NPC 并行（真实 LLM，3 轮）：onstage 集合 / rehearsals 形状与 OOC / 系统提示注入
@@ -97,7 +97,7 @@ function stubResult(output: unknown): SubagentResult<unknown> {
 }
 
 /**
- * 场景分析确定性桩（§10.1 模式校验连带修复）：M3 目标本来只测 npc 阶段，但 creation 下 story 可关的
+ * 场景分析确定性桩（模式校验连带修复）：M3 目标本来只测 npc 阶段，但 creation 下 story 可关的
  * 前提是 npc/stylize 均关；为让 npc+story 合法，需开 story 并用桩替代场景分析 LLM。
  * 桩读 DB 产出与 computeScenePlan 等价的场景卡（buildFallbackSceneCard：onstage=同地点、offscreen 空由
  * runtime 的 K 轮确定性兜底补齐），保证 M3 原有断言（在场判定/K 轮触发/权威边界/回溯）语义不变。
@@ -225,7 +225,7 @@ async function newNpcStoryRuntime(
 		sessionManager,
 		storyState,
 		eventLog,
-		// §10.1 模式校验：creation 下 story 可关前提 = npc/stylize 均关；M3 需 npc → 须开 story（桩掉场景分析）。
+		// 模式校验：creation 下 story 可关前提 = npc/stylize 均关；M3 需 npc → 须开 story（桩掉场景分析）。
 		story: { enabled: true, executor: sceneStubExecutor(storyState) },
 		npc: { enabled: true, offscreenAfterTurns: opts.offscreenAfterTurns ?? 99, executor: opts.npcExecutor },
 		dataExecutor: opts.dataExecutor,
@@ -376,7 +376,7 @@ async function main(): Promise<void> {
 		const b1BerloUnchanged = JSON.stringify(npcProfile(b.storyState.storyDb, b.seed.berlo.id)) === JSON.stringify(berloSeedProfile);
 		console.log(`[obs] B1: trigger=${JSON.stringify(b1.npc?.offscreenTriggeredIds)} offscreen 记录=${b.eventRecords.filter((e) => e.role === "npc_offscreen" && e.turnSeq === b1.turnSeq).length}`);
 		checks.push(check("B1: 第 1 轮 offscreenTriggeredIds 为空（不触发不消耗）", b1NoTrigger));
-		checks.push(check("B1: eventLog 无 role=npc_offscreen 记录（§6.2 零消耗契约）", b1NoRecord));
+		checks.push(check("B1: eventLog 无 role=npc_offscreen 记录（零消耗契约）", b1NoRecord));
 		checks.push(check("B1: 贝罗档案无变化（seed 态）", b1BerloUnchanged));
 
 		const b2 = await b.runtime.runTurn(B_TURNS[1]!);

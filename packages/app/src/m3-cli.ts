@@ -1,19 +1,19 @@
-// M3 交互 CLI（人工验收入口，创作规划 §6.2 / §7-M3）：npc subagent 叙事循环 + StoryRuntime 编排器。
+// M3 交互 CLI（人工验收入口）：npc subagent 叙事循环 + StoryRuntime 编排器。
 //
 // 与 m2-cli 的关系：启动参数/命令/LineQueue/fork 重建全同，唯一差异是 createStoryRuntime 传入
-// `npc: { enabled: true }`（§6.2 在场预演 + 离线推演）并每轮打印 npc 阶段报告。
-// 目的：验收 §6.2 契约——在场 NPC 预演产物注入主叙事（隐藏批注），离线 NPC ≥5 轮未推演触发
+// `npc: { enabled: true }`（在场预演 + 离线推演）并每轮打印 npc 阶段报告。
+// 目的：验收契约——在场 NPC 预演产物注入主叙事（隐藏批注），离线 NPC ≥5 轮未推演触发
 // 批量推演，delta 交 data 转写落库（npc 层永不直接写库），sys 簿记键随 data 成功推进。
 // 接线（app 层只消费 core API）：
-//   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createStoryRuntime（§10.2 API 面 + npc 阶段）
+//   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createStoryRuntime（API 面 + npc 阶段）
 //     ├── 主叙事 AgentSession（零 DB 工具，before_agent_start 每轮注入 DB 摘要 + 预演批注）
 //     ├── npc 阶段（场景规划 → 在场预演 ×N 并行 + 离线批量推演 → 主叙事前完成）
 //     └── runDataStage（data subagent：submit_changeset 单输出工具 + 重试/补齐/事件流）
-//   eventLog = pipeline-events.jsonl（故事目录内）；settings = ~/.tavernpi/settings.json（§6.6）。
+//   eventLog = pipeline-events.jsonl（故事目录内）；settings = ~/.tavernpi/settings.json。
 //
 // 关键决策（与 m2-cli 一致，详见 core pipeline/runtime.ts 文件头）：
 // - 快照绑定本轮 leaf（最终 assistant entry），与 turn_log 同一 id；
-// - data 成功才拍快照（§6.1：拍摄前提 = 落库成功），失败轮记 data_status.failed、下轮补齐；
+// - data 成功才拍快照（拍摄前提 = 落库成功），失败轮记 data_status.failed、下轮补齐；
 // - npc 阶段零消耗：不在场/未触发不调用 subagent；单 NPC 预演失败丢弃、离线批失败降级为 []。
 // - fork 流程：createBranchedSession → forkStoryDb → dispose 旧运行态 → 新故事目录重建
 //   StoryRuntime（settings/prompts/eventLog/npc 配置重新传入，新目录新 eventLog 文件）。
@@ -78,7 +78,7 @@ interface CliCtx {
 
 const ZERO_USAGE: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, costTotal: 0 };
 
-/** 场景分析桩（§10.1 模式校验连带修复）：M3 只测 npc，但 creation 下 story 可关前提 = npc/stylize 均关。
+/** 场景分析桩（模式校验连带修复）：M3 只测 npc，但 creation 下 story 可关前提 = npc/stylize 均关。
  *  开 story 时用确定性桩替代场景分析 LLM（buildFallbackSceneCard），story_review 放行。 */
 function storyStubExecutor(storyState: StoryState): (opts: SubagentRunOptions) => Promise<SubagentResult<unknown>> {
 	return async (opts: SubagentRunOptions): Promise<SubagentResult<unknown>> => {
@@ -150,7 +150,7 @@ function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: 
 	} else if (result.restoredTurnSeq !== undefined) {
 		console.log(`> 恢复成功: turn${result.restoredTurnSeq}（entry ${result.restoredEntryId}）`);
 	} else {
-		console.log("> 恢复成功（空库兜底，§3.1）");
+		console.log("> 恢复成功（空库兜底）");
 	}
 	console.log(`> 当前 clock: ${clock?.current_time ?? "(未初始化)"}，events: ${events.length} 行`);
 }
@@ -184,8 +184,8 @@ function printHelp(): void {
 			"  /help               本帮助",
 			"  空行                退出（不删故事目录，可 --resume 续写）",
 			"",
-			"data subagent（§6.1）：每轮叙事后自动抽取落库；失败会重试并在下轮补齐，不阻塞叙事。",
-			"npc subagent（§6.2）：每轮开场前并行预演在场 NPC（意图/情绪/行动/台词，隐藏批注注入主叙事）+",
+			"data subagent：每轮叙事后自动抽取落库；失败会重试并在下轮补齐，不阻塞叙事。",
+			"npc subagent：每轮开场前并行预演在场 NPC（意图/情绪/行动/台词，隐藏批注注入主叙事）+",
 			"  离线批量推演（距上次推演 ≥5 轮的 NPC），delta 交 data 转写落库；npc 层不直接写库。",
 			"事件流留痕见故事目录 pipeline-events.jsonl。",
 		].join("\n"),
@@ -200,10 +200,10 @@ function printTurn(report: TurnResult): void {
 		const onstageIds = report.npc.onstageNpcIds;
 		const offIds = report.npc.offscreenTriggeredIds;
 		console.log(
-			`--- npc 阶段（§6.2） ---\n在场预演: ${onstageIds.length} 个（${onstageIds.length > 0 ? onstageIds.join(", ") : "无"}）| 离线推演: ${offIds.length} 个（${offIds.length > 0 ? `${offIds.join(", ")} → ${report.npc.offscreenDeltas.length} deltas` : "无"}）`,
+			`--- npc 阶段 ---\n在场预演: ${onstageIds.length} 个（${onstageIds.length > 0 ? onstageIds.join(", ") : "无"}）| 离线推演: ${offIds.length} 个（${offIds.length > 0 ? `${offIds.join(", ")} → ${report.npc.offscreenDeltas.length} deltas` : "无"}）`,
 		);
 	}
-	console.log("--- data 落库（§6.1） ---");
+	console.log("--- data 落库 ---");
 	if (report.data.ok) {
 		const a = report.data.applied;
 		console.log(
@@ -211,7 +211,7 @@ function printTurn(report: TurnResult): void {
 		);
 	} else {
 		console.log(`✗ 失败（attempts=${report.data.attempts}）: ${truncate(report.data.error, 300)}`);
-		console.log(`  本轮快照跳过，下轮将补齐（§6.1）`);
+		console.log(`  本轮快照跳过，下轮将补齐`);
 	}
 	console.log(`--- 快照: ${report.snapshotTaken ? "已拍" : "跳过"} ---`);
 	if (report.consecutiveDataFailures > 0) {
@@ -385,10 +385,10 @@ export async function main(argv: readonly string[]): Promise<void> {
 		snapshotsDb: openSnapshotsDb(snapshotsDbPath(dbPath)),
 	};
 
-	// 模型配置（§6.6）与提示词分层（§6.5）：全局层默认启用，包/故事层由后续卡包系统注入。
+	// 模型配置与提示词分层：全局层默认启用，包/故事层由后续卡包系统注入。
 	const { settings, warnings: settingsWarnings } = loadSettings();
 	const prompts: PromptLayerDirs = { globalDir: defaultGlobalPromptsDir() };
-	// ModelRuntime 共享实例（并行纪律：多 subagent session 共享凭证/模型，技术路线 §3.2）。
+	// ModelRuntime 共享实例（并行纪律：多 subagent session 共享凭证/模型）。
 	const modelRuntime = await ModelRuntime.create();
 	const eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"));
 
@@ -415,7 +415,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 		story: { enabled: true, executor: storyStubExecutor(storyState) },
 	});
 	console.log(
-		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具，§6.0）`,
+		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具）`,
 	);
 
 	console.log("\n输入行动/对话开始叙事；斜杠命令见 /help；空行退出。");

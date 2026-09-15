@@ -1,10 +1,10 @@
-// 卡包 SQL 与条目 seed（创作规划 §4.1 M5 定稿 / §8 决策行「卡包 SQL 通道」）。
+// 卡包 SQL 与条目 seed（M5 定稿 /「卡包 SQL 通道」）。
 //
 // schema.sql / seed.sql 以命名 migration 接入（与 core 迁移同 schema_migrations 表追踪，
 // name = `<包名>_schema` / `<包名>_seed`，幂等有序，见 migrate.ts）。SQL 文本在构建
 // migration 时读入（seed 冷：随故事创建定格，不追卡包热更新）。
 //
-// 条目 seed 在 `<包名>_seed` migration 内做（§4.1 条目 seed DB）：
+// 条目 seed 在 `<包名>_seed` migration 内做（条目 seed DB）：
 //   - characters → npcs：card_ref = `包名:条目id`，按 card_ref 查存在性（DbReader.findNpcByCardRef），
 //     已存在即跳过不覆盖（玩家与 data 的演化优先）；v0 只插 name + card_ref + status='alive'，
 //     其余由 data 演化。

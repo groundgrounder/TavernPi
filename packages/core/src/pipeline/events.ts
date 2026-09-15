@@ -1,4 +1,4 @@
-// pipeline 事件流骨架（创作规划 §10.2：各 subagent 的输入/输出/耗时/成本观测；M2 起承诺面）。
+// pipeline 事件流骨架（各 subagent 的输入/输出/耗时/成本观测；M2 起承诺面）。
 // 事件是结构化留痕（独立于叙事文本）：每行一个 JSON 对象（JSONL），
 // record 同步 appendFileSync + 同步通知 listeners。
 //

@@ -1,4 +1,4 @@
-// 冒险模式 DB 视图过滤查询层（创作规划 §10.1）单测。全部确定性，无 LLM。
+// 冒险模式 DB 视图过滤查询层单测。全部确定性，无 LLM。
 // 覆盖：锚定三方并集 / 无关被滤 / relations 两侧校验 / 退化与 warning / world_state sys_ 隐藏 /
 //       世界公开面全量透传 / 越集 getNpc 返回 undefined / filter="none" 全透传 / card_ref 可见性判定。
 

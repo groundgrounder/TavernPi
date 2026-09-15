@@ -1,10 +1,10 @@
-// stylize 纯模块层（创作规划 §6.4；M4 纯模块形态）。
+// stylize 纯模块层（M4 纯模块形态）。
 //
 // 默认关闭的可选阶段；只改文风不动事实；时机 = 审查通过后、data 前（主叙事正文定稿后）。
 // 零事实漂移 = 提示词硬约束 + 规则层实体/数值抽查双保险（stylizeFactCheck）：
 //   ① 数字多重集合（含日期数字）；② DB 实体名出现向量（原文出现的改写后必须仍在、
 //   原文未出现的不得新增）；③ 篇幅比 >1.8 记 drift「篇幅膨胀」。
-// 失败回退原文（applied=false）——turn_log.raw_text 已留痕 stylize 前原文（§6.4 语义）。
+// 失败回退原文（applied=false）——turn_log.raw_text 已留痕 stylize 前原文（语义）。
 // eventLog 逐 attempt 记录 role=stylize；不阻塞 pipeline。
 
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";

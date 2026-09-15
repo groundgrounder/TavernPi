@@ -1,11 +1,11 @@
-// M2 故事驱动集成验收（创作规划 §7-M2 / §6.1 data 契约 / §3.0 回归）：自断言脚本，exit code 正确。
+// M2 故事驱动集成验收（data 契约 / 回归）：自断言脚本，exit code 正确。
 //
 // 三区：
 // A. 基线 10 轮（真实 LLM，narrator + data 全真实）：连续叙事不阻塞、turn_log/time_log/快照
 //    一致性、锚点抽取、db_summary 注入观测、pipeline 事件流留痕。
 // B. 失败路径（dataExecutor 注入，确定性；每场景独立故事目录）：重试成功 / 重试耗尽不拍快照 /
 //    下轮补齐（pendingTurns 注入） / 连续失败提示。
-// C. 回溯一致性（§3.0 M2 形态回归）：navigateTree + hooks 自动恢复 → clock/events 回退；
+// C. 回溯一致性（M2 形态回归）：navigateTree + hooks 自动恢复 → clock/events 回退；
 //    回溯后再前进 turn_seq 续接；空库兜底不误判损伤。
 // D. 回归与冒烟（外部执行，见报告）：npm test / typecheck / m1:accept / m2-cli 管道冒烟。
 //
@@ -399,7 +399,7 @@ async function main(): Promise<void> {
 		console.log(`[obs] B2 data: FAIL attempts=${b2Report.data.attempts} error=${b2Error.slice(0, 120)}`);
 		checks.push(check("B2: 恒垃圾 → data.ok=false、attempts=3", !b2Report.data.ok && b2Report.data.attempts === 3));
 		checks.push(check("B2: 失败不阻塞叙事（narrativeText 非空）", b2Report.narrativeText.trim().length > 0));
-		checks.push(check("B2: snapshotTaken=false（§6.1 不拍快照）", b2Report.snapshotTaken === false));
+		checks.push(check("B2: snapshotTaken=false（不拍快照）", b2Report.snapshotTaken === false));
 		checks.push(check("B2: data_status 该轮 failed", dataStatusOf(b2.storyState, 1)?.status === "failed"));
 		checks.push(check("B2: snapshots 行数持平（0 份）", b2.storyState.snapshotsDb.listSnapshots().length === 0));
 		checks.push(check("B2: turn_log 仍有该轮记录", b2.storyState.storyDb.reader.getTurnLog().length === 1));
@@ -411,7 +411,7 @@ async function main(): Promise<void> {
 		const b3Prompts = b2State.prompts.slice(b3PromptStart);
 		const pendingFragment = b2Report.narrativeText.slice(0, 24);
 		const hasPending = b3Prompts.some((p) => p.includes("待补齐轮次") && p.includes(pendingFragment));
-		checks.push(check("B3: userPrompt 含失败轮叙事文本（§6.1 补齐输入）", hasPending));
+		checks.push(check("B3: userPrompt 含失败轮叙事文本（补齐输入）", hasPending));
 		if (b3Report.data.ok) {
 			checks.push(check("B3: 第 2 轮真实 data ok（attempts=" + b3Report.data.attempts + "）", true));
 			checks.push(check("B3: 失败轮 data_status → compensated", dataStatusOf(b2.storyState, 1)?.status === "compensated"));
@@ -441,7 +441,7 @@ async function main(): Promise<void> {
 		);
 		disposeBundle(b4);
 
-		// ================= C. 回溯一致性（§3.0 M2 形态） =================
+		// ================= C. 回溯一致性（M2 形态） =================
 		console.log("\n===== C. 回溯一致性 =====");
 		// C 用自适应手工 data（确定性快照，避免真实 data 抖动影响回溯断言）；narrator 仍真实。
 		const cState = makeExecutorState({ mode: "garbage-then-valid", garbageKind: "zod", garbageKinds: [] });

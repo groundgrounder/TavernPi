@@ -19,7 +19,7 @@ test("migrate 首次应用 v1~v4，重复调用幂等（无副作用、返回空
 		const second = migrate(db);
 		assert.deepEqual(second, []);
 
-		// v2 后 §5.1 全量表存在（含空间基元）
+		// v2 后全量表存在（含空间基元）
 		const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
 			(r) => r.name,
 		);
@@ -50,7 +50,7 @@ test("migrate 首次应用 v1~v4，重复调用幂等（无副作用、返回空
 		// v4 turn_log.warnings 补列
 		const turnLogCols = (db.prepare("PRAGMA table_info(turn_log)").all() as Array<{ name: string }>).map((c) => c.name);
 		assert.ok(turnLogCols.includes("warnings"), "turn_log.warnings 应存在");
-		// snapshots 不在 story.db（§3.1：独立 snapshots.db）
+		// snapshots 不在 story.db（独立 snapshots.db）
 		assert.ok(!tables.includes("snapshots"), "snapshots 表不应存在于 story.db");
 	} finally {
 		db.close();

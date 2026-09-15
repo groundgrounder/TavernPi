@@ -1,4 +1,4 @@
-// Migration 框架（§5.0 schema 版本化的底座）。
+// Migration 框架（schema 版本化的底座）。
 // core schema 是命名迁移序列（v1 基础 schema → v2 空间基元 → v3 data_status → v4 turn_log.warnings）；
 // 卡包 schema.sql 后续以「注册额外命名 migration」接入，与 core 迁移同表（schema_migrations）追踪，
 // 保证幂等与顺序。既有旧库 open 后原地升后续版本；新库顺序应用直达当前版本。
@@ -34,7 +34,7 @@ function columnExists(db: DatabaseSync, table: string, column: string): boolean 
 	return cols.some((c) => c.name === column);
 }
 
-/** core 内置迁移。v1 = §5.1 基础 schema；v2 = 空间基元；v3 = data_status；v4 = turn_log.warnings（§6.3 留痕）。 */
+/** core 内置迁移。v1 = 基础 schema；v2 = 空间基元；v3 = data_status；v4 = turn_log.warnings（留痕）。 */
 export const CORE_MIGRATIONS: Migration[] = [
 	{ name: "v1_core_schema", up: (db) => db.exec(CORE_SCHEMA_SQL) },
 	{

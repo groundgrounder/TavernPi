@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// tavernpi-pack：卡包校验 / 试跑 / 模板工具链（创作规划 §5.2「工具链提供 schema 校验与试跑」、
-// 技术路线 §7 M5）。受众 = 卡作者：默认输出人类可读中文；--json 输出机器可读结果（编辑器集成）。
+// tavernpi-pack：卡包校验 / 试跑 / 模板工具链（「工具链提供 schema 校验与试跑」、
+// M5）。受众 = 卡作者：默认输出人类可读中文；--json 输出机器可读结果（编辑器集成）。
 //
 // 命令：
 //   tavernpi-pack check [--json] <packDir...>  默认命令（无命令参数时即 check）。对卡包目录：
@@ -8,7 +8,7 @@
 //          id 冲突），失败时逐条打印「file: message」，退出码 1；
 //       2) 干净内存库试跑迁移：core 迁移 + <包名>_schema / <包名>_seed 命名迁移，两遍 migrate 验证幂等；
 //       3) 只读冒烟：列 sqlite_master 中带包前缀的自建表与行数、npcs/locations seed 行数。
-//   tavernpi-pack templates [<id>] [--json]    列出内置 SQL 表模板（§5.2「常用表模板可直接抄改」）；
+//   tavernpi-pack templates [<id>] [--json]    列出内置 SQL 表模板（「常用表模板可直接抄改」）；
 //                                              带 <id> 时打印该模板完整 SQL（供复制）。
 //   tavernpi-pack init <dir>                   生成最小可过检的骨架包。
 //   tavernpi-pack --help / --version
@@ -322,12 +322,12 @@ async function runTemplates(args: string[], json: boolean): Promise<number> {
 				templates: templates.map((t) => ({ id: t.id, title: t.title, description: t.description, file: t.file })),
 			});
 		} else {
-			console.log("内置 SQL 表模板（创作规划 §5.2「常用表模板可直接抄改」）");
+			console.log("内置 SQL 表模板（「常用表模板可直接抄改」）");
 			console.log("");
 			console.log("模板 SQL 里的表名用 PACKNAME 占位：把 PACKNAME 替换成你的包名");
 			console.log("（即 package.json 的 name，须匹配 [a-z][a-z0-9_]*，直接作 SQL 前缀）。");
 			console.log("复制进 db/schema.sql 后按字段注释填写取值语义——字段注释就是");
-			console.log("data subagent 的填写说明（§5.2「注释即说明」）。");
+			console.log("data subagent 的填写说明（「注释即说明」）。");
 			console.log("");
 			for (const t of templates) {
 				console.log(`  ${t.id.padEnd(14)} ${t.title}`);
@@ -456,7 +456,7 @@ function skeletonPackageJson(packName: string): string {
 			version: "0.1.0",
 			private: true,
 			type: "module",
-			pi: {}, // pi manifest（§3.1 核实）：纯内容包无 extensions/skills/prompts/themes，留空即可
+			pi: {}, // pi manifest（核实）：纯内容包无 extensions/skills/prompts/themes，留空即可
 		},
 		null,
 		2,
@@ -464,19 +464,19 @@ function skeletonPackageJson(packName: string): string {
 }
 
 function skeletonStoryYaml(): string {
-	return `# 作品级元数据（创作规划 §4.1）。字段名与 core pack 加载器 storyMetaSchema 一致
+	return `# 作品级元数据。字段名与 core pack 加载器 storyMetaSchema 一致
 #（宽松解析：多余字段会被忽略，但字段名用下面的就不会丢）。
 
 title: 我的世界
-calendar: default        # 历法（§5.3）：default = 现实公历；自定义历法名后续版本支持
+calendar: default        # 历法：default = 现实公历；自定义历法名后续版本支持
 granularity: elastic     # 时间粒度：elastic（弹性时间）/ tick（回合制）/ real（真实历）
 opening: 你在一座山脚下醒来，雾气未散。  # 开场白：故事第一轮的主叙事种子
-defaultStyle: 平实克制的中文叙事     # 默认文风（§6.4，仅供 stylize 阶段消费）
+defaultStyle: 平实克制的中文叙事     # 默认文风（仅供 stylize 阶段消费）
 `;
 }
 
 function skeletonExampleEntry(): string {
-	return `# 条目格式（创作规划 §4.1）：文件名即条目 id（example）。
+	return `# 条目格式：文件名即条目 id（example）。
 # 通用字段: type（= 目录名）/ name / keys / always_on / position / refs —— zod strict，未知字段报错。
 # character 特化字段: identity / personality / voice? / dialogue_examples?。
 # 引用写作 type:id（包内）或 包名:type:id（跨包），断链由加载器校验并报错。
@@ -499,15 +499,15 @@ dialogue_examples: []   # 可选: 1~3 条示范对话
 
 function skeletonSchemaSql(packName: string): string {
 	return `-- ============================================================
--- ${packName} schema.sql —— 卡包自定义表（创作规划 §5.2）
+-- ${packName} schema.sql —— 卡包自定义表
 --
--- 命名空间（§4.0 契约）：所有表名 / world_state 键必须以「${packName}_」前缀开头
+-- 命名空间：所有表名 / world_state 键必须以「${packName}_」前缀开头
 -- （内核保留表/键白名单除外），加载器静态扫描强制，违规即加载失败。
 --
 -- 字段注释 = data subagent 的填写说明：每个字段都要写清取值语义与范围
--- （如 favor: -100~100，初见通常为 0），不要另搞一套说明文件（§5.2「注释即说明」）。
+-- （如 favor: -100~100，初见通常为 0），不要另搞一套说明文件（「注释即说明」）。
 --
--- 常用表模板（可直接抄改，§5.2）：
+-- 常用表模板（可直接抄改）：
 --   tavernpi-pack templates                 # 列出全部模板
 --   tavernpi-pack templates char-status     # 打印模板 SQL（复制后把表名里的 PACKNAME 换成 ${packName}）
 --   内置模板: char-status（角色状态栏）/ inventory（物品栏）/ quest-progress（任务进度）
@@ -538,7 +538,7 @@ function printJson(value: unknown): void {
 }
 
 function printHelp(): void {
-	console.log(`tavernpi-pack ${VERSION} —— 卡包校验 / 试跑 / 模板工具链（创作规划 §5.2）
+	console.log(`tavernpi-pack ${VERSION} —— 卡包校验 / 试跑 / 模板工具链
 
 用法:
   tavernpi-pack check [--json] <packDir...>  校验卡包（默认命令；<packDir> 至少 1 个）

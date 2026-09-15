@@ -1,15 +1,15 @@
-// M6 交互 CLI（人工验收入口，创作规划 §10.1 三模式 + §8 决策记录「输入渠道校验判定」）：模式切换 + 输入校验叙事循环。
+// M6 交互 CLI（人工验收入口，三模式 +「输入渠道校验判定」）：模式切换 + 输入校验叙事循环。
 //
 // 与 m5-cli 的关系：命令/LineQueue/fork 重建全同，差异是内核级模式连通——
 //   新故事经 createStory 传 mode（仅创建时有效）；runtime 模式解析（option → story.meta.json → creation）；
 //   `/mode` 查看/切换模式（catch 非法切换错）；`/plot` 创造模式专属（剧情大纲指令）；
 //   用户输入以 `/! ` 开头 → 去前缀 + force:true（输入渠道校验强制提交，留痕 warning）；
 //   catch InputRejectedError → 打印 reason/suggestion（叙事不产生）；`--resume` 从 meta 恢复 mode。
-// 目的：验收 §10.1 契约——三模式预设/切换规则/adventure 锁定/fork 继承模式；§8 输入渠道校验
+// 目的：验收契约——三模式预设/切换规则/adventure 锁定/fork 继承模式；输入渠道校验
 //   （生存/冒险拒非 user 输入、`/!` 强制提交、创造不校验、/plot 指令）。
 //
 // 接线（app 层只消费 core API）：
-//   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createStoryRuntime（§10.2 API 面 + mode + story/npc/stylize/data）
+//   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createStoryRuntime（API 面 + mode + story/npc/stylize/data）
 // 全部 subagent 阶段默认全开——creation 下 story 开任意组合合法、survival 仅 stylize 可关、adventure 全开，
 //   全开组合在三种模式下均合法（build-time 校验不报错）。
 //
@@ -131,7 +131,7 @@ function truncate(text: string, max: number): string {
 // 呈现层工具（呈现美化：显示宽 / 模式文案 / 树形引导线 / 度量徽章）
 // ---------------------------------------------------------------------------
 
-/** 模式中文名（§10.1 三模式；adventure 追加「已锁定」徽章）。 */
+/** 模式中文名（三模式；adventure 追加「已锁定」徽章）。 */
 const MODE_LABEL: Record<StoryMode, string> = {
 	creation: "创造",
 	survival: "生存",
@@ -324,7 +324,7 @@ function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: 
 	} else if (result.restoredTurnSeq !== undefined) {
 		console.log(`> 恢复成功: turn${result.restoredTurnSeq}（entry ${result.restoredEntryId}）`);
 	} else {
-		console.log("> 恢复成功（空库兜底，§3.1）");
+		console.log("> 恢复成功（空库兜底）");
 	}
 	console.log(`> 当前 clock: ${clock?.current_time ?? "(未初始化)"}，events: ${events.length} 行`);
 }
@@ -396,14 +396,14 @@ function printHelp(): void {
 			"  /mode              查看当前内核级模式（创造 / 生存 / 冒险）",
 			"  /mode <模式>         切换模式（catch 非法切换错；冒险锁定不可切）",
 			"  /plot <文本>         创造模式专属：写入剧情大纲指令（生存/冒险报错）",
-			"  /swipe             基于分支重生成最后一个 user 轮次（旧稿留树，§3.0）",
-			"  /compact           触发章节摘要 compaction（§3.0/§3.1；会话太小友好提示）",
-			"  /assist <文本>       带外顾问（§6.8，只读/草稿制/不进叙事）：创作建议或 RPG 建议",
+			"  /swipe             基于分支重生成最后一个 user 轮次（旧稿留树）",
+			"  /compact           触发章节摘要 compaction（会话太小友好提示）",
+			"  /assist <文本>       带外顾问（只读/草稿制/不进叙事）：创作建议或 RPG 建议",
 			"  /help              本帮助",
 			"  空行               退出（不删故事目录，可 --resume 续写）",
 			"",
-			"模式（§10.1）：--mode 创造|生存|冒险 仅创建时生效；--resume 从 story.meta.json 恢复；提示符为 [模式]>。",
-			"输入校验（§8）：生存/冒险拒非 user 角色输入（命令 NPC/指定剧情结局）→ 打印 reason/suggestion，",
+			"模式：--mode 创造|生存|冒险 仅创建时生效；--resume 从 story.meta.json 恢复；提示符为 [模式]>。",
+			"输入校验：生存/冒险拒非 user 角色输入（命令 NPC/指定剧情结局）→ 打印 reason/suggestion，",
 			"  可用 /! 前缀强制提交（留痕 warning）；创造模式不校验。",
 			"story/npc/stylize/data 阶段全开（all-on 在三种模式下均满足预设）。",
 		].join("\n"),
@@ -468,7 +468,7 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 	oldStoryState.storyDb.close();
 	oldStoryState.snapshotsDb.close();
 
-	// fork 产物继承元数据（§10.1）：复制 story.meta.json——模式与锁定（adventure）随 mode 继承。
+	// fork 产物继承元数据：复制 story.meta.json——模式与锁定（adventure）随 mode 继承。
 	inheritStoryMeta(oldStoryState.storyDir, newStoryDir);
 
 	const newStoryState = {
@@ -553,7 +553,7 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			return undefined;
 		}
 		case "swipe": {
-			// /swipe（§3.0 重骰）：基于分支重生成最后一个 user 轮次，旧稿留树。
+			// /swipe（重骰）：基于分支重生成最后一个 user 轮次，旧稿留树。
 			if (arg !== "") {
 				console.log("用法: /swipe（无参数，重生成最后一个 user 轮次）");
 				return undefined;
@@ -567,7 +567,7 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			return undefined;
 		}
 		case "compact": {
-			// /compact（§3.0/§3.1）：章节摘要 compaction。
+			// /compact：章节摘要 compaction。
 			if (arg !== "") {
 				console.log("用法: /compact（无参数，触发章节摘要 compaction）");
 				return undefined;
@@ -587,7 +587,7 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			return undefined;
 		}
 		case "assist": {
-			// /assist（§6.8）：带外顾问，只读、草稿制、不进叙事流。输出为草稿，由用户决定是否作为输入发出。
+			// /assist：带外顾问，只读、草稿制、不进叙事流。输出为草稿，由用户决定是否作为输入发出。
 			if (arg === "") {
 				console.log("用法: /assist <问题/求助>");
 				return undefined;
@@ -717,7 +717,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 	const { settings, warnings: settingsWarnings } = loadSettings();
 	const prompts: PromptLayerDirs = {
 		globalDir: defaultGlobalPromptsDir(),
-		// §6.5/§10.2 多包提示词合并：传全部包 prompts/ 目录（后包覆盖先包；存在的才被探测）。
+		// 多包提示词合并：传全部包 prompts/ 目录（后包覆盖先包；存在的才被探测）。
 		...(packDirs.length > 0 ? { packDirs } : {}),
 	};
 	const modelRuntime = await ModelRuntime.create();
@@ -751,7 +751,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 		...runtimeExtras(ctx),
 	});
 	console.log(
-		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具，§6.0）`,
+		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具）`,
 	);
 	// 启动横幅：故事标题 + 模式中文名（adventure 追加「已锁定」徽章）。
 	const bannerMeta = readStoryMeta(storyState.storyDir);
@@ -785,7 +785,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 					printTurn(report);
 				} catch (err) {
 					if (err instanceof InputRejectedError) {
-						console.log(`! 输入被拒绝（§8 输入渠道校验）：${err.reason}`);
+						console.log(`! 输入被拒绝（输入渠道校验）：${err.reason}`);
 						console.log(`! 建议改写：${err.suggestion}`);
 						console.log(`! 如确需原样提交，以 /! 开头强制提交（将留痕 warning）。`);
 					} else {

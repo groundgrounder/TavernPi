@@ -2,9 +2,8 @@
 
 故事引擎 harness——把 pi coding agent 的「编码 agent harness」范式平移到互动叙事领域。基于 pi SDK（`@earendil-works/pi-coding-agent`，npm 依赖不 fork）二次创作：一个主叙事 session 执笔，story/npc/data/stylize 四类 subagent 流水线协作，一切长期记忆落 SQLite（**对话历史是草稿，数据库才是事实**）。
 
-- **事实来源**：`创作规划.md`（契约与决策记录）、`技术路线.md`（机制层与验证状态）
 - **当前状态**：M0–M6 全部验收通过（故事 DB / data / npc / story+stylize / 卡包系统 / 模式与体验）
-- **内核对外 API**：`@tavernpi/core`（§10.2 承诺面已定型，CORE_VERSION 0.6.0）
+- **内核对外 API**：`@tavernpi/core`（CORE_VERSION 0.6.0）
 
 ## 快速开始
 
@@ -63,7 +62,7 @@ node packages/tools/src/cli.ts templates           # SQL 表模板库（可抄�
 ```
 packages/
 ├── core/   # @tavernpi/core：turn pipeline 编排 + DB 层 + 快照 + subagent 体系
-│           # + 提示词分层 + 卡包加载 + 模式预设/视图过滤 + assist + 对外 API（§10.2）
+│           # + 提示词分层 + 卡包加载 + 模式预设/视图过滤 + assist + 对外 API
 ├── app/    # CLI（m6:cli 为当前形态）+ 里程碑验收脚本（acceptance/）+ spike 工件
 └── tools/  # @tavernpi/tools：卡包校验/骨架/模板 CLI
 ```
@@ -76,4 +75,4 @@ npm run typecheck     # core + app
 npm run m6:accept     # M6 故事驱动验收（真实 LLM；m1-m5 同理 m1:accept…m5:accept）
 ```
 
-里程碑交付状态与验收证据见 `技术路线.md` §7；架构修改先更新 `创作规划.md` 再改代码。
+里程碑交付状态与验收证据见 `packages/app/acceptance/`（m1–m6 各一个验收脚本）。

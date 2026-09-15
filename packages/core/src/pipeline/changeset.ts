@@ -1,4 +1,4 @@
-// data subagent 变更集（创作规划 §6.1 data 是唯一写者的输出形态）。
+// data subagent 变更集（data 是唯一写者的输出形态）。
 // schema 用 zod v4 定义（字段命名 snake_case 与 DB 对齐），经 z.toJSONSchema() 转为
 // JSON Schema 接入 P1 runSubagent 输出工具的 constrainedSampling。
 //
@@ -79,7 +79,7 @@ const worldStateEntrySchema = z.object({
 	value: z.string().min(1),
 });
 
-/** data subagent 输出形态的 zod schema（§6.1 变更集）。 */
+/** data subagent 输出形态的 zod schema（变更集）。 */
 export const changesetZodSchema = z.object({
 	events: z.array(eventSchema).default([]),
 	time_advance: z
@@ -249,7 +249,7 @@ function parseItemPath(item: string): Array<{ field: string; index?: number }> {
 }
 
 /**
- * 按问题 item 路径剔除冲突项（§6.3 放行轮 strictDrop：硬冲突项不落库只记录，其余照落）。
+ * 按问题 item 路径剔除冲突项（放行轮 strictDrop：硬冲突项不落库只记录，其余照落）。
  * - 顶层字段（time_advance / phase_start / phase_end）：整体剔除；
  * - 数组字段元素（events[i] 等）：按索引剔除，剩余元素重排；
  * - npc_updates[i].<memories|traits|relations>[j]：从该元素内剔除对应子项（父元素本身被剔除时子项剔除作废）。

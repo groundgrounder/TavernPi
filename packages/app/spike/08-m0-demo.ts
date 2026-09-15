@@ -1,4 +1,4 @@
-// M0 demo：技术路线 §4.1 spike 验收单 —— 终端 CLI 循环，单 agent、无 pipeline。
+// M0 demo：spike 验收单 —— 终端 CLI 循环，单 agent、无 pipeline。
 //
 // 启动（override 四件套路线，02 spike 已验证；tools 白名单，03 spike 已验证）：
 // - systemPrompt = packages/core/prompts/narrator.md（systemPromptOverride）+ demo 附加约定（append 槽）；

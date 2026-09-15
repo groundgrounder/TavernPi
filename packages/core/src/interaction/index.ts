@@ -1,4 +1,4 @@
-// 轮中交互通道（创作规划 §6.7）模块导出。
+// 轮中交互通道模块导出。
 
 export {
 	InteractionBroker,

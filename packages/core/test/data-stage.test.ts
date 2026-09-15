@@ -1,8 +1,8 @@
 // data subagent 编排单测（executor 桩，全程无真实 LLM）：一次成功、首败自纠、
 // 恒败耗尽、executor 抛错重试、pendingTurns 注入、eventLog 每次 attempt 记录、
-// offscreenDeltas 注入（§6.2 npc 层产物转写输入；空/缺省不加节）、
-// strictDrop（§6.3 超限放行：语义问题剔除后应用、zod 形状仍重试、缺省 M2 形态不变）、
-// timeSuggestion（§6.3 场景卡时间建议进 userPrompt）。
+// offscreenDeltas 注入（npc 层产物转写输入；空/缺省不加节）、
+// strictDrop（超限放行：语义问题剔除后应用、zod 形状仍重试、缺省 M2 形态不变）、
+// timeSuggestion（场景卡时间建议进 userPrompt）。
 
 import assert from "node:assert/strict";
 import { join } from "node:path";

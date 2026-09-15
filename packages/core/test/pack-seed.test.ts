@@ -1,4 +1,4 @@
-// 卡包 seed 与 migration 接入单测（创作规划 §4.1 条目 seed DB + §8 决策行「卡包 SQL 通道」）：
+// 卡包 seed 与 migration 接入单测（条目 seed DB +「卡包 SQL 通道」）：
 // characters card_ref 幂等不覆盖 / locations parent 父子先种父再种子 / seed.sql 执行 /
 // migration 幂等重跑 / 多包共存（各自前缀表 + 各自条目 seed）。
 

@@ -1,16 +1,16 @@
-// M5 交互 CLI（人工验收入口，创作规划 §4 / §7-M5）：卡包（世界包）叙事循环。
+// M5 交互 CLI（人工验收入口）：卡包（世界包）叙事循环。
 //
 // 与 m4-cli 的关系：命令/LineQueue/fork 重建全同，差异是卡包接线——
-//   新故事经 createStory（§4.1：卡包加载校验 → SQL+条目 seed 迁移 → story.yaml 消费
+//   新故事经 createStory（卡包加载校验 → SQL+条目 seed 迁移 → story.yaml 消费
 //   （历法/粒度写 clock、开场白首轮 + turn_log 0 + 初始快照）→ story.meta.json）；
 //   runtime 传 packs 选项（PackCache 注入热更 + pinned 手动钉 + 预算），
-//   每轮 before_agent_start 经 {{collection_injection}} 注入检索命中条目（§4.1 M5 定稿）。
-// 目的：验收 §4.0 契约——设定集加载与检索式注入（含引用校验、条目 seed DB）、
+//   每轮 before_agent_start 经 {{collection_injection}} 注入检索命中条目（M5 定稿）。
+// 目的：验收契约——设定集加载与检索式注入（含引用校验、条目 seed DB）、
 //   schema/seed 执行、多包共存（命名空间前缀）、story.yaml 消费。
 // 命令增量：`--pack <dir>`（可重复）、`/packs`、`/pin` / `/unpin`、`/reload`。
 //
 // 坑（同 m4-cli）：session.prompt 必须 await 完才能 navigateTree；退出不删故事目录。
-//   packDirs 传全部包 prompts/（§6.5 多包提示词合并，后包覆盖先包）；
+//   packDirs 传全部包 prompts/（多包提示词合并，后包覆盖先包）；
 //   包代码（extensionEntryPaths → additionalExtensionPaths）挂载点见 runtime（M6-P4a）。
 
 import { readFileSync } from "node:fs";
@@ -178,7 +178,7 @@ function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: 
 	} else if (result.restoredTurnSeq !== undefined) {
 		console.log(`> 恢复成功: turn${result.restoredTurnSeq}（entry ${result.restoredEntryId}）`);
 	} else {
-		console.log("> 恢复成功（空库兜底，§3.1）");
+		console.log("> 恢复成功（空库兜底）");
 	}
 	console.log(`> 当前 clock: ${clock?.current_time ?? "(未初始化)"}，events: ${events.length} 行`);
 }
@@ -217,7 +217,7 @@ function printHelp(): void {
 			"  /help              本帮助",
 			"  空行               退出（不删故事目录，可 --resume 续写）",
 			"",
-			"卡包（§4）：--pack <dir> 可重复；新故事经 createStory 校验+seed+story.yaml 消费；",
+			"卡包：--pack <dir> 可重复；新故事经 createStory 校验+seed+story.yaml 消费；",
 			"  检索式注入 = keys 触发 / always_on 常驻 / /pin 手动钉，预算 1500 tokens。",
 			"story/npc/stylize/data 行为同 m4-cli（/help 见 m4）。事件流见 pipeline-events.jsonl。",
 		].join("\n"),
@@ -230,28 +230,28 @@ function printTurn(report: TurnResult): void {
 	console.log(report.narrativeText);
 	if (report.collection) {
 		console.log(
-			`--- 卡包注入（§4.1） ---\n命中: ${report.collection.injected.length > 0 ? report.collection.injected.join(", ") : "（无）"}${report.collection.warnings.length > 0 ? `\n警告: ${report.collection.warnings.join("；")}` : ""}`,
+			`--- 卡包注入 ---\n命中: ${report.collection.injected.length > 0 ? report.collection.injected.join(", ") : "（无）"}${report.collection.warnings.length > 0 ? `\n警告: ${report.collection.warnings.join("；")}` : ""}`,
 		);
 	}
 	if (report.npc) {
 		const onstageIds = report.npc.onstageNpcIds;
 		const offIds = report.npc.offscreenTriggeredIds;
 		console.log(
-			`--- npc 阶段（§6.2） ---\n在场预演: ${onstageIds.length} 个（${onstageIds.length > 0 ? onstageIds.join(", ") : "无"}）| 离线推演: ${offIds.length} 个`,
+			`--- npc 阶段 ---\n在场预演: ${onstageIds.length} 个（${onstageIds.length > 0 ? onstageIds.join(", ") : "无"}）| 离线推演: ${offIds.length} 个`,
 		);
 	}
 	if (report.story) {
 		const s = report.story;
 		console.log(
-			`--- story 阶段（§6.3） ---\n场景卡: ${s.sceneFallback ? "fallback" : "ok"} | 硬冲突: ${s.hardConflicts.length} | 报疑: ${s.suspicions.length} | 重写: ${s.revisions} 次${s.releasedWithWarnings ? " | 超限放行" : ""}`,
+			`--- story 阶段 ---\n场景卡: ${s.sceneFallback ? "fallback" : "ok"} | 硬冲突: ${s.hardConflicts.length} | 报疑: ${s.suspicions.length} | 重写: ${s.revisions} 次${s.releasedWithWarnings ? " | 超限放行" : ""}`,
 		);
 	}
 	if (report.stylize) {
 		console.log(
-			`--- stylize（§6.4） ---\n${report.stylize.applied ? "✓ 已润色" : "✗ 回退原文"}${report.stylize.drift ? `，drift: ${report.stylize.drift.join("; ")}` : ""}`,
+			`--- stylize ---\n${report.stylize.applied ? "✓ 已润色" : "✗ 回退原文"}${report.stylize.drift ? `，drift: ${report.stylize.drift.join("; ")}` : ""}`,
 		);
 	}
-	console.log("--- data 落库（§6.1） ---");
+	console.log("--- data 落库 ---");
 	if (report.data.ok) {
 		const a = report.data.applied;
 		console.log(
@@ -285,7 +285,7 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 	oldStoryState.storyDb.close();
 	oldStoryState.snapshotsDb.close();
 
-	// fork 产物继承元数据（§10.1）：复制 story.meta.json 到新故事目录——模式与锁定（adventure）随 mode 继承。
+	// fork 产物继承元数据：复制 story.meta.json 到新故事目录——模式与锁定（adventure）随 mode 继承。
 	inheritStoryMeta(oldStoryState.storyDir, newStoryDir);
 	// fork 重建 cache（注入热更按当前磁盘包内容）。
 	if (ctx.packDirs.length > 0) ctx.packs = { cache: new PackCache(ctx.packDirs), pinned: () => ctx.pinned };
@@ -491,11 +491,11 @@ export async function main(argv: readonly string[]): Promise<void> {
 	}
 	const sessionId = sessionManager.getSessionId();
 
-	// 模型配置（§6.6）与提示词分层（§6.5）：全局层 + 首包 prompts/ 层（多包提示词层 M6）。
+	// 模型配置与提示词分层：全局层 + 首包 prompts/ 层（多包提示词层 M6）。
 	const { settings, warnings: settingsWarnings } = loadSettings();
 	const prompts: PromptLayerDirs = {
 		globalDir: defaultGlobalPromptsDir(),
-		// §6.5/§10.2 多包提示词合并：传全部包 prompts/ 目录（后包覆盖先包；存在的才被探测）。
+		// 多包提示词合并：传全部包 prompts/ 目录（后包覆盖先包；存在的才被探测）。
 		...(packDirs.length > 0 ? { packDirs } : {}),
 	};
 	const modelRuntime = await ModelRuntime.create();
@@ -539,7 +539,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 		...runtimeExtras(ctx),
 	});
 	console.log(
-		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具，§6.0）`,
+		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具）`,
 	);
 
 	console.log("\n输入行动/对话开始叙事；斜杠命令见 /help；空行退出。");

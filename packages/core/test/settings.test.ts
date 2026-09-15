@@ -1,4 +1,4 @@
-// 模型配置（§6.6）单测：缺文件/坏 JSON/根节点与 models 形态/字段非法形态/正常解析。
+// 模型配置单测：缺文件/坏 JSON/根节点与 models 形态/字段非法形态/正常解析。
 
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";

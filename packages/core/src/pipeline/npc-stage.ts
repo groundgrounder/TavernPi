@@ -1,19 +1,19 @@
-// npc subagent 纯模块层（创作规划 §6.2 两种模式 / 技术路线 §3.3；M3 过渡形态）。
+// npc subagent 纯模块层（两种模式；M3 过渡形态）。
 //
 // 两种模式：
 //   1. 在场预演 ×N 并行（runOnstageRehearsals）：玩家所在位置的每个非 dead NPC 各起一个
 //      inMemory session 预演意图/情绪/行动/台词/unaware_of + OOC 自检，产物注入主叙事（隐藏批注）。
 //   2. 离线推演 ×1（runOffscreenBatch）：其余非 dead NPC 批量单次推演，delta 是**结构化产物**，
-//      交 data subagent 转写落库（单写者规则不破，§6.1——npc 层永不直接写库）。
+//      交 data subagent 转写落库（单写者规则不破，——npc 层永不直接写库）。
 //
-// M3 过渡形态说明：story 场景分析（§6.3）M4 才上线，故在场判定与离线触发器是**确定性**的：
+// M3 过渡形态说明：story 场景分析 M4 才上线，故在场判定与离线触发器是**确定性**的：
 //   在场 = current_location == 玩家当前 location_id（reader.getPlayerLocation）；玩家未定位 → 空在场。
 //   离线触发 = world_state 键 sys_npc_offscreen_last_turn:<id> 距上次推演 ≥ N 轮（默认 5）；
 //   时间跨度触发器需历法换算，M4 随 story 场景分析定案（此处注释留痕）。
 //   「玩家进入其区域」触发在 M3 由在场判定自然覆盖（玩家到位即同地点在场）。
 //
 // 权威边界：离线 schema 结构上排除 status:"dead"（场外致死=背着玩家剧变）；提示词再禁止
-// 「制造直接影响玩家的既成事实」——结构强制 + 提示词双保险（§6.2 权威边界）。
+// 「制造直接影响玩家的既成事实」——结构强制 + 提示词双保险（权威边界）。
 //
 // 容错：单 NPC 预演失败（重试耗尽）→ 丢弃该批注（主叙事无该批注自由发挥），不抛、不阻塞；
 // 离线批失败 → 返回 [] + warning 记录。eventLog 逐 attempt 记录 role=npc_onstage / npc_offscreen。
@@ -77,7 +77,7 @@ const offscreenDeltaSchema = z.object({
 		)
 		.max(3)
 		.optional(),
-	status: z.enum(["alive", "absent"]).optional(), // ← 结构排除 dead：场外致死=背着玩家剧变（§6.2 权威边界）
+	status: z.enum(["alive", "absent"]).optional(), // ← 结构排除 dead：场外致死=背着玩家剧变（权威边界）
 	relations: z
 		.array(
 			z.object({
@@ -180,7 +180,7 @@ export interface NpcStageOptions {
 	maxAttempts?: number;
 	/** 缺省 runSubagent；测试/验收故障注入通道。 */
 	executor?: (opts: SubagentRunOptions) => Promise<SubagentResult<unknown>>;
-	/** 活跃作者指令（§6.3 场景分析 → npc 下达；剧本要求，预演须优先遵循但仍过 OOC 自检）。 */
+	/** 活跃作者指令（场景分析 → npc 下达；剧本要求，预演须优先遵循但仍过 OOC 自检）。 */
 	directives?: string[];
 }
 

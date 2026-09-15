@@ -1,4 +1,4 @@
-// 故事创建 API（创作规划 §7 M5 / §4.1：createStory 故事创建：卡包加载校验 → 建故事目录 →
+// 故事创建 API（M5：createStory 故事创建：卡包加载校验 → 建故事目录 →
 // openStoryDb/openSnapshotsDb → 卡包 SQL+条目 seed 迁移 → story.yaml 消费（历法/粒度写 clock、
 // 开场白首轮 assistant + turn_log 0 + 初始快照）→ story.meta.json）。
 //
@@ -8,9 +8,9 @@
 // 卡包迁移调用形式沿 packages/tools/src/cli.ts：migrate(db) 已含 core（openStoryDb 已跑），
 // 这里逐包 migrate(db, [m]) 应用 <包名>_schema / <包名>_seed（schema_migrations 追踪，幂等有序）。
 //
-// TODO(M6)：包代码接线——WorldPack.extensionEntryPaths → createAgentSession 的
-// additionalExtensionPaths（技术路线 §3.1「代码包 extension 经 SDK 委托 pi loader 执行」）；
-// 本 lane（M5）只接注入层，代码包挂载点待 M6 模式设计定案（创作规划 §4.1 加载形态）。
+// 卡包代码挂载（加载形态 / M6-P4a）：createStory 只把 WorldPack.extensionEntryPaths 透传进
+// story.meta.json（--resume 恢复载体）；实际加载（additionalExtensionPaths 委托 pi loader）发生在
+// runtime 侧，挂到主叙事 session（见 pipeline/runtime.ts 的代码包挂载段）。
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -33,7 +33,7 @@ export interface CreateStoryOptions {
 	cwd: string;
 	/** 故事标题（覆盖 story.yaml title，写 story.meta.json）。 */
 	title?: string;
-	/** 内核级模式预设（§10.1 ★信任边界）；缺省 "creation"。adventure 创建时选定后锁定。 */
+	/** 内核级模式预设（★信任边界）；缺省 "creation"。adventure 创建时选定后锁定。 */
 	mode?: StoryMode;
 }
 
@@ -42,7 +42,7 @@ export interface StoryMetaFile {
 	title?: string;
 	packs: Array<{ name: string; dir: string; version?: string; extensionEntryPaths?: string[] }>;
 	defaultStyle?: string;
-	/** 内核级模式（§10.1）；adventure 由其派生 locked，随 meta 持久化并 fork/clone 继承。 */
+	/** 内核级模式；adventure 由其派生 locked，随 meta 持久化并 fork/clone 继承。 */
 	mode?: StoryMode;
 	createdAt: string;
 }
@@ -65,7 +65,7 @@ export function writeStoryMeta(storyDir: string, meta: StoryMetaFile): void {
 }
 
 /**
- * fork/clone 时继承原故事元数据：复制 story.meta.json 到新故事目录（§10.1 fork 产物继承模式与锁定）。
+ * fork/clone 时继承原故事元数据：复制 story.meta.json 到新故事目录（fork 产物继承模式与锁定）。
  * 模式与锁定随 mode 字段天然继承（adventure 由 mode 派生，无需单独复制锁标记）。
  * 源无 meta（非 createStory 产物）→ 不写（目标无 meta = 无模式，缺省 creation）。
  */
@@ -91,7 +91,7 @@ const STORY_META_FIELDS = ["title", "calendar", "granularity", "opening", "defau
  * 加载失败（PackLoadError）在创建任何文件之前抛出（fail fast，不留下半成品故事目录）。
  */
 export async function createStory(opts: CreateStoryOptions): Promise<CreateStoryResult> {
-	// 入口校验模式（§10.1 ★信任边界）：非法值（如 "Survival"）建故事即报错，避免后续消费才 TypeError。
+	// 入口校验模式（★信任边界）：非法值（如 "Survival"）建故事即报错，避免后续消费才 TypeError。
 	if (opts.mode !== undefined && !isStoryMode(opts.mode)) {
 		throw new Error(`非法模式值: ${JSON.stringify(opts.mode)}（应为 creation|survival|adventure）`);
 	}
@@ -116,7 +116,7 @@ export async function createStory(opts: CreateStoryOptions): Promise<CreateStory
 			migrate(storyDb.rawDb, [m]);
 		}
 
-		// 5) story.yaml 消费：历法/粒度写 clock 初值（§5.3；多包时按包序取先定义者）
+		// 5) story.yaml 消费：历法/粒度写 clock 初值（多包时按包序取先定义者）
 		const story = mergeStoryMeta(packs);
 		if (story.calendar !== undefined || story.granularity !== undefined) {
 			const clock = storyDb.reader.getClock() ?? DEFAULT_STORY_CLOCK;
@@ -127,9 +127,9 @@ export async function createStory(opts: CreateStoryOptions): Promise<CreateStory
 			});
 		}
 
-		// 6) 开场白（§4.1）：首轮 assistant 消息（session 树根）+ turn_log(turnSeq=0) + 初始快照。
+		// 6) 开场白：首轮 assistant 消息（session 树根）+ turn_log(turnSeq=0) + 初始快照。
 		//    初始快照绑定 opening entry——导航到首条 user 消息时 newLeaf = opening entry，
-		//    祖先链命中该快照 → 恢复到「开场白后」初始态（§3.1 首 user 空库兜底的替代：有开场白的
+		//    祖先链命中该快照 → 恢复到「开场白后」初始态（首 user 空库兜底的替代：有开场白的
 		//    故事其「初始态」就是开场白后的世界，不该清空 seed）。
 		if (story.opening !== undefined && story.opening.trim() !== "") {
 			const opening = story.opening.trim();
@@ -143,7 +143,7 @@ export async function createStory(opts: CreateStoryOptions): Promise<CreateStory
 			await takeSnapshot(storyDb, { turnSeq: 0, sessionEntryId: openingEntryId });
 		}
 
-		// 7) 故事元数据（--resume 恢复 packDirs / stylize defaultStyle / mode 的载体；§10.1 模式缺省 creation）
+		// 7) 故事元数据（--resume 恢复 packDirs / stylize defaultStyle / mode 的载体；模式缺省 creation）
 		const meta: StoryMetaFile = {
 			...(opts.title !== undefined
 				? { title: opts.title }
@@ -154,7 +154,7 @@ export async function createStory(opts: CreateStoryOptions): Promise<CreateStory
 				name: p.name,
 				dir: p.dir,
 				...readPackVersion(p.dir),
-				// 代码挂载（§4.1/M6-P4a）：extensionEntryPaths 透传进 meta，--resume 可恢复。
+				// 代码挂载（M6-P4a）：extensionEntryPaths 透传进 meta，--resume 可恢复。
 				...(p.extensionEntryPaths.length > 0 ? { extensionEntryPaths: p.extensionEntryPaths } : {}),
 			})),
 			...(story.defaultStyle !== undefined ? { defaultStyle: story.defaultStyle } : {}),

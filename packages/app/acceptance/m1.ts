@@ -1,16 +1,16 @@
-// M1 故事驱动集成验收（创作规划 §7-M1 / §3.0 契约）：自断言脚本，exit code 正确。
+// M1 故事驱动集成验收（契约）：自断言脚本，exit code 正确。
 //
 // 三场景（快照绑定 = 本轮 assistant leaf，与 turn_log 同一 id；Reconciliation 已裁决）：
 // 1. 回溯一致：固定 3 轮输入（每轮强引导模型 write_event + advance_clock）→ navigateTree 回
 //    第 2 轮 user entry u2 → DB/clock/turn_log 回到第 1 轮末参考态（重做第 2 轮的一致状态）；
 //    再 navigateTree 回第 1 轮 user entry u1 → 链上无快照 → 空库兜底 = 故事初始态。
 // 2. 回溯后再前进：navigateTree 到第 3 轮 assistant leaf a3 → DB 回到第 3 轮后状态，
-//    snapshots.db 行数不变（晚于目标的快照保留，§3.1）。
+//    snapshots.db 行数不变（晚于目标的快照保留）。
 // 3. fork 独立：从第 2 轮末 assistant leaf（a2）fork（clone/at 语义，分支内容含到 a2 为止）→
 //    新 sessionId ≠ 旧；新故事 story.db == 第 2 轮后状态、新 snapshots.db 仅 1 份且绑定 a2；
 //    在新故事再跑 1 轮 → 旧故事两库逐行不变、新故事含新事件。
 //
-// 复用 m1-cli.ts 的 buildM1Runtime / runM1Turn / navigateToEntry（CLI 即 API 参照实现，§10.2）。
+// 复用 m1-cli.ts 的 buildM1Runtime / runM1Turn / navigateToEntry（CLI 即 API 参照实现）。
 // 需要 auth.json（M0 已配）；模型每轮不调工具 = FAIL（检查表风格，参照 M0 demo printChecklist）。
 //
 // 运行：npm run m1:accept（或 node packages/app/acceptance/m1.ts）。结束时清理临时目录。

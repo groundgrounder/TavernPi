@@ -1,4 +1,4 @@
-// story subagent 纯模块层单测（§6.3；stub executor 无 LLM）：场景卡校验、场景分析成功/重试/降级、
+// story subagent 纯模块层单测（stub executor 无 LLM）：场景卡校验、场景分析成功/重试/降级、
 // 规则层六条断言、审查/统筹 runner、渲染器。
 
 import assert from "node:assert/strict";

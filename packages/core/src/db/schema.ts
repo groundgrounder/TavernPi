@@ -1,5 +1,5 @@
-// 核心 schema（创作规划 §5.1 全量，严格按文档字段）。
-// snapshots 表不在此处 —— §3.1：快照存独立 snapshots.db（M1-P2）。
+// 核心 schema（全量，严格按文档字段）。
+// snapshots 表不在此处 —— 快照存独立 snapshots.db（M1-P2）。
 // 所有 CREATE TABLE 用 IF NOT EXISTS，保证迁移崩溃后可幂等重跑。
 // 「待 M2 校准」标注处 = 字段取值词汇/语义未在规划定案，由 M2 data subagent 契约校准。
 // v1 = 基础 schema（M1 已交付，已被旧故事库记录在 schema_migrations）；空间基元在 v2
@@ -7,7 +7,7 @@
 // 新库 v1→v2 顺序应用直达当前版本。
 
 export const CORE_SCHEMA_SQL = `
--- 时间（§5.1）
+-- 时间
 -- clock: 单例当前值，历史在 time_log；不带 turn_seq，是「所有写入带 turn_seq」原则的显式例外
 -- "current_time" 加引号：current_time 是 SQLite 关键字（CURRENT_TIME），裸引用会被解析为当前时刻
 CREATE TABLE IF NOT EXISTS clock (
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS time_log (
 );
 CREATE INDEX IF NOT EXISTS idx_time_log_turn_seq ON time_log (turn_seq);
 
--- 叙事世界（§5.1）
+-- 叙事世界
 -- events.type 取值词汇未定案（待 M2 校准），暂默认 'event' 自由文本
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,14 +51,14 @@ CREATE TABLE IF NOT EXISTS phases (
   status TEXT NOT NULL DEFAULT 'active'
 );
 
--- world_state: 天气、经济等键值（卡包命名空间前缀在加载层强制，见 §4.0）
+-- world_state: 天气、经济等键值（卡包命名空间前缀在加载层强制）
 CREATE TABLE IF NOT EXISTS world_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
   turn_seq INTEGER NOT NULL
 );
 
--- NPC（§5.1）。npcs 表本身无 turn_seq 列（状态覆盖型数据）
+-- NPC。npcs 表本身无 turn_seq 列（状态覆盖型数据）
 -- npcs.status: alive/dead/absent... 开放集合，待 M2 校准
 CREATE TABLE IF NOT EXISTS npcs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS npc_memories (
 );
 CREATE INDEX IF NOT EXISTS idx_npc_memories_npc ON npc_memories (npc_id);
 
--- npc_relations: 关系/好感。disposition 参考 §5.2 favor 示例（-100~100，INTEGER）
+-- npc_relations: 关系/好感。disposition 参考 favor 示例（-100~100，INTEGER）
 CREATE TABLE IF NOT EXISTS npc_relations (
   npc_a INTEGER NOT NULL REFERENCES npcs(id),
   npc_b INTEGER NOT NULL REFERENCES npcs(id),
@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS npc_relations (
   PRIMARY KEY (npc_a, npc_b, turn_seq)
 );
 
--- 一致性（§5.1）
+-- 一致性
 -- turn_log: 每轮一行（PK turn_seq）。raw_text = stylize 前原文（未启用则同 narrative_text）
 CREATE TABLE IF NOT EXISTS turn_log (
   turn_seq INTEGER PRIMARY KEY,
@@ -119,12 +119,12 @@ CREATE TABLE IF NOT EXISTS directives (
 `;
 
 /**
- * v2「spatial-primitives」（创作规划 §5.1 空间基元 / §8 决策行）——新表部分。
+ * v2「spatial-primitives」（空间基元）——新表部分。
  * 最小内核基元：locations 注册表 + 玩家位置（world_state 约定键 player_location）+
  * location_log；完整地图拓扑/移动规则由卡包 SQL 自定义，内核不强制。
  */
 export const CORE_V2_SPATIAL_SQL = `
--- ---------- 空间基元（§5.1 / §8 决策行） ----------
+-- ---------- 空间基元 ----------
 -- locations: 地点注册表。parent_id 表达包含关系（如 王城>庭院），不构成完整拓扑，内核不校验连通性。
 CREATE TABLE IF NOT EXISTS locations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS locations (
   detail TEXT                            -- 地点描述（可空）
 );
 
--- location_log: 位置变更记录，镜像 time_log（§5.1）。
+-- location_log: 位置变更记录，镜像 time_log。
 -- subject 约定 = 'player'（玩家）或 'npc:<id>'（NPC）；from = 移动前位置，to = 移动后位置。
 CREATE TABLE IF NOT EXISTS location_log (
   turn_seq INTEGER NOT NULL,             -- 变更发生的轮次
@@ -164,12 +164,12 @@ export const CORE_V2_ALTERS: ReadonlyArray<{ table: string; column: string; sql:
 ];
 
 /**
- * v3「data-status」（§6.1 失败路径持久化）——新表部分。
+ * v3「data-status」（失败路径持久化）——新表部分。
  * data subagent 每轮落库状态：ok / failed（本轮失败待补）/ compensated（后续轮补齐）。
  * 快照 guard（snapshot/hooks.ts）用它在「有成功落库轮却无快照」与「全 failed 合法态」之间裁决。
  */
 export const CORE_V3_DATA_STATUS_SQL = `
--- ---------- data subagent 落库状态（§6.1 / §7 M2） ----------
+-- ---------- data subagent 落库状态（M2） ----------
 -- turn_seq PK：每轮一行。attempts = 该轮落库尝试次数；error = 失败原因摘要（成功为 NULL）。
 -- 约束用 CHECK 封闭 status 取值（防手写 SQL 绕过类型层）。
 CREATE TABLE IF NOT EXISTS data_status (
@@ -181,7 +181,7 @@ CREATE TABLE IF NOT EXISTS data_status (
 `;
 
 /**
- * v4「turn-log-warnings」（§6.3 契约「留痕（turn_log warning）」落地）——旧表补列。
+ * v4「turn-log-warnings」（契约「留痕（turn_log warning）」落地）——旧表补列。
  * 轻检在 recordTurnLog 之后运行（ruleChecks/review 在主叙事后），警告后补写；可空。
  * 走 v2 ALTER 先例：列存在性守卫幂等（migrate.ts 内处理）。
  */

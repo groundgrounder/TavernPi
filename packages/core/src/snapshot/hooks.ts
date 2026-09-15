@@ -1,4 +1,4 @@
-// pi 钩子薄适配层（§3.1 快照恢复挂载点，设计前提 #1/#2）。
+// pi 钩子薄适配层（快照恢复挂载点，设计前提 #1/#2）。
 // 分工：
 //   session_before_tree（支持 cancel）：定位目标 entry 祖先链 + 校验快照存在性，
 //     找不到快照 → 空库兜底（仅限无历史的新故事，见下）或判失败。此阶段不 cancel，
@@ -85,12 +85,12 @@ export function createSnapshotHooks(options: SnapshotHooksOptions): SnapshotHook
 			return;
 		}
 
-		// 祖先链无快照。区分三种语义（§3.1 + M1-P2 gate m3 + M2 修订）：
+		// 祖先链无快照。区分三种语义（M1-P2 gate m3 + M2 修订）：
 		// - 快照库非空但本链无快照（如导航到首个 user 条目 u1，链上只有 [u1, root]）：
 		//   正常「重做开头」语义——空库兜底 = 故事初始态（reconciliation 裁决）；
 		// - 故事已有历史（turn_log 非空）且 snapshots.db 全空：再分两种——
 		//   · data_status 存在 status=ok 的轮（有成功落库轮却无任何快照）= 外部损伤，拒绝静默擦空库；
-		//   · data_status 全 failed/空（M2 合法态：data 失败轮不拍快照，§6.1）= 放行空库兜底。
+		//   · data_status 全 failed/空（M2 合法态：data 失败轮不拍快照）= 放行空库兜底。
 		const turnLogCount = options.getStoryDb().reader.getTurnLog().length;
 		const snapshotCount = options.snapshotsDb.listSnapshots().length;
 		if (turnLogCount > 0 && snapshotCount === 0) {
@@ -108,8 +108,8 @@ export function createSnapshotHooks(options: SnapshotHooksOptions): SnapshotHook
 		const failedPending = options.getStoryDb().reader.listDataStatus().filter((r) => r.status === "failed").length;
 		const message =
 			failedPending > 0
-				? `未找到 entry ${targetId} 祖先链上的快照，本次导航恢复走空库兜底（§3.1；data_status 有 ${failedPending} 轮 failed，属合法态，§6.1）`
-				: `未找到 entry ${targetId} 祖先链上的快照，本次导航恢复走空库兜底（§3.1）`;
+				? `未找到 entry ${targetId} 祖先链上的快照，本次导航恢复走空库兜底（data_status 有 ${failedPending} 轮 failed，属合法态）`
+				: `未找到 entry ${targetId} 祖先链上的快照，本次导航恢复走空库兜底`;
 		pushWarning(message);
 	};
 
@@ -142,7 +142,7 @@ export function createSnapshotHooks(options: SnapshotHooksOptions): SnapshotHook
 					: { ok: true };
 		} catch (error) {
 			// 为什么 try/catch 内自吞并落状态：session_tree handler 异常会被 pi 的 emit()
-			// 吞掉（技术路线 §3.2 实证），异常传播不可靠。恢复失败必须显式写入
+			// 吞掉（实证），异常传播不可靠。恢复失败必须显式写入
 			// lastRestoreResult 供上层 UI 警示；rename 前旧库文件未被触碰。
 			const message = error instanceof Error ? error.message : String(error);
 			state.lastRestoreResult = { ok: false, error: message };

@@ -1,16 +1,16 @@
-// StoryRuntime 编排器（创作规划 §10.2 对外 API 面；§7 M3/M4 验收的运行时核心）。
+// StoryRuntime 编排器（对外 API 面；M3/M4 验收的运行时核心）。
 // 接线（app/CLI 只消费 core API）：
 //   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createSnapshotHooks（导航原子恢复）
 //   ↔ 主叙事 AgentSession（零工具 + before_agent_start 每轮注入 DB 摘要 + 预演/场景卡/统筹/打回批注
-//      + 卡包检索注入 {{collection_injection}}，§4.1 M5）
-//   ↔ npc 阶段（§6.2：场景规划 → 在场预演 ×N 并行 + 离线批量推演 → 主叙事 → data）
-//   ↔ story 阶段（§6.3：场景分析最前 → 轻检/打回循环 → 全统筹）
-//   ↔ stylize（§6.4：可选，审查通过后、data 前；只改文风不动事实）
-//   ↔ runDataStage（data subagent：抽取落库，唯一写者，§6.1）
+//      + 卡包检索注入 {{collection_injection}}）
+//   ↔ npc 阶段（场景规划 → 在场预演 ×N 并行 + 离线批量推演 → 主叙事 → data）
+//   ↔ story 阶段（场景分析最前 → 轻检/打回循环 → 全统筹）
+//   ↔ stylize（可选，审查通过后、data 前；只改文风不动事实）
+//   ↔ runDataStage（data subagent：抽取落库，唯一写者）
 //     预演产物注入主叙事隐藏批注，离线 delta 交 data 转写落库——npc 层永不直接写库，
 //     只由编排器在 data.ok 后直写 sys_ 簿记键（同 clock 例外精神）。
 //
-// M5 卡包接线（§4.1）：StoryRuntimeOptions.packs 缺省 undefined = M2–M4 形态（无注入）；
+// M5 卡包接线：StoryRuntimeOptions.packs 缺省 undefined = M2–M4 形态（无注入）；
 // 提供时每轮 before_agent_start 经 renderNarratorPrompt 注入检索式命中条目（system 前部 / recent 后部），
 // cache 回退/预算裁减/未知钉警告走 onWarning + 事件流，TurnResult.collection 留痕本轮注入。
 //
@@ -19,13 +19,13 @@
 //    导航 u_N → newLeaf = a_{N-1} → 命中 a_{N-1} 快照（第 N-1 轮末）；导航 a_N → 命中自身快照。
 //    user-entry 绑定会恢复出「第 N 轮结束后」，重做时事件会双重落库 —— 故绑定 assistant leaf。
 // 2. 主叙事零 DB 工具：customTools=[] + tools=[]（严格白名单空数组）；上下文全由编排器注入
-//    （§6.0），DB 摘要在 before_agent_start 每轮现算（getter 读当前 storyDb 实例，恢复/回溯后
+//    DB 摘要在 before_agent_start 每轮现算（getter 读当前 storyDb 实例，恢复/回溯后
 //    自然准确）。构建后断言 getActiveToolNames() 为空；非空则回退 noTools:"builtin" 重建。
-// 3. data 阶段（§6.1）：成功 → recordDataStatus(ok) + markFailedTurnsCompensated + 拍快照；
+// 3. data 阶段：成功 → recordDataStatus(ok) + markFailedTurnsCompensated + 拍快照；
 //    失败 → recordDataStatus(failed)、**不拍快照**（拍摄前提 = 落库成功），未落库内容下轮补齐；
 //    连续失败 ≥ threshold 时 onWarning 明确提示用户。
 // 4. turnSeq 从 turn_log 最大 +1（core 内 computeNextTurnSeq，与 m1-cli 同源）。
-// 5. 打回重写（§6.3 轻检）：navigateTree(userEntryId) 会触发快照钩子恢复到第 N-1 轮末快照——
+// 5. 打回重写（轻检）：navigateTree(userEntryId) 会触发快照钩子恢复到第 N-1 轮末快照——
 //    本轮 data 尚未运行（语义无害）；恢复替换 storyDb 实例，故重写循环内所有 DB 读取都必须
 //    经 storyState.storyDb 属性在调用时现取（story-stage 的 options.storyDb 逐调用注入当前实例）。
 // 6. userEntryId 从最终 leaf 沿 parentId 上溯取第一个 user entry（findUserEntryOnBranch）——
@@ -123,7 +123,7 @@ export function computeNextTurnSeq(storyDb: StoryDb): number {
 }
 
 // ---------------------------------------------------------------------------
-// 轮中交互 broker 访问器（§6.7 + §10.2）：主叙事 session 是唯一宿主——runtime 创建时注册当前 broker，
+// 轮中交互 broker 访问器：主叙事 session 是唯一宿主——runtime 创建时注册当前 broker，
 // 卡包 extension 代码 import tavernpi-core 的 getInteractionBroker() 取当前 runtime 的 broker 调 request。
 // dispose 时若仍是最新注册则清除。
 // ---------------------------------------------------------------------------
@@ -149,7 +149,7 @@ function clearRuntimeBroker(broker: InteractionBroker): void {
 // 主叙事系统提示渲染（before_agent_start 处理函数体；独立导出便于单测确定性断言，无需模型/网络）
 // ---------------------------------------------------------------------------
 
-/** 主叙事系统提示渲染依赖（§4.1 检索式注入 + §6.0 上下文全注入）。 */
+/** 主叙事系统提示渲染依赖（检索式注入 + 上下文全注入）。 */
 export interface NarratorPromptDeps {
 	/** narrator 模板（含 {{db_summary}}/{{collection_injection}} 等占位符）。 */
 	template: string;
@@ -181,7 +181,7 @@ export interface NarratorPromptResult {
 /**
  * 渲染当轮主叙事系统提示。before_agent_start 钩子体——独立函数便于单测确定性断言
  * （packs 注入/警告上抛无需真实模型与网络）。
- * 卡包注入（§4.1）：cache.getPacks() 取当前 packs → buildCollectionInjection
+ * 卡包注入：cache.getPacks() 取当前 packs → buildCollectionInjection
  * （input + 上一轮 turn_log narrativeText 作为扫描文本；pinned 经 getter 每轮现取）→
  * systemText 在前、recentText 在后拼入 {{collection_injection}}；cache 回退 / 预算裁减 /
  * 未知钉警告走 onWarning + pipeline 事件流（role="pack"）。
@@ -209,7 +209,7 @@ export function renderNarratorPrompt(deps: NarratorPromptDeps): NarratorPromptRe
 		collectionText = parts.length > 0 ? parts.join("\n\n") : "（本轮无注入条目）";
 	}
 
-	// 注入警告（缓存回退 / 预算裁减 / 未知钉）走 onWarning + pipeline 事件流（§4.1）
+	// 注入警告（缓存回退 / 预算裁减 / 未知钉）走 onWarning + pipeline 事件流
 	for (const warning of warnings) {
 		deps.onWarning?.(`[卡包] ${warning}`);
 		deps.eventLog?.record({
@@ -236,7 +236,7 @@ export function renderNarratorPrompt(deps: NarratorPromptDeps): NarratorPromptRe
 	return { rendered, collectionInjected: injected, collectionWarnings: warnings };
 }
 
-/** story.meta.json 的 defaultStyle（世界包文风，§6.4 stylize 缺省 hint）；读不到返回 undefined。 */
+/** story.meta.json 的 defaultStyle（世界包文风，stylize 缺省 hint）；读不到返回 undefined。 */
 function readStoryMetaDefaultStyle(storyDir: string): string | undefined {
 	try {
 		const meta = JSON.parse(readFileSync(join(storyDir, "story.meta.json"), "utf8")) as { defaultStyle?: unknown };
@@ -246,7 +246,7 @@ function readStoryMetaDefaultStyle(storyDir: string): string | undefined {
 	}
 }
 
-/** 收集卡包代码挂载入口（§4.1/M6-P4a）：story.meta.json packs[].extensionEntryPaths 展平；无则空数组。 */
+/** 收集卡包代码挂载入口（M6-P4a）：story.meta.json packs[].extensionEntryPaths 展平；无则空数组。 */
 function collectCodePackEntryPaths(storyDir: string): string[] {
 	try {
 		const meta = JSON.parse(readFileSync(join(storyDir, "story.meta.json"), "utf8")) as {
@@ -259,7 +259,7 @@ function collectCodePackEntryPaths(storyDir: string): string[] {
 }
 
 /**
- * 从最终 leaf 沿 parentId 上溯找第一个 user entry（§6.3 打回重写后原 u_N 与新 u_N' 同 parentId，
+ * 从最终 leaf 沿 parentId 上溯找第一个 user entry（打回重写后原 u_N 与新 u_N' 同 parentId，
  * find-first 会误中旧稿；本函数从最终 leaf 出发，命中新稿所在分支的 user entry）。找不到返回 null。
  */
 export function findUserEntryOnBranch(
@@ -337,7 +337,7 @@ function countConsecutiveFailures(storyDb: StoryDb): number {
 	return count;
 }
 
-/** 近期叙事窗口（turn_log 后 N 条）——场景分析/全统筹的输入（§6.3）。 */
+/** 近期叙事窗口（turn_log 后 N 条）——场景分析/全统筹的输入。 */
 function recentNarratives(storyDb: StoryDb, n: number): Array<{ turnSeq: number; userInput: string; narrativeText: string }> {
 	return storyDb.reader.getTurnLog().slice(-n).map((t) => ({
 		turnSeq: t.turn_seq,
@@ -369,7 +369,7 @@ export interface StoryState {
 	snapshotsDb: SnapshotsDb;
 }
 
-/** npc subagent 阶段运行时选项（§6.2）。enabled 缺省 false——M2/M3 路径（npc 关闭）零改动。 */
+/** npc subagent 阶段运行时选项。enabled 缺省 false——M2/M3 路径（npc 关闭）零改动。 */
 export interface NpcStageRuntimeOptions {
 	enabled: boolean;
 	/** 离线推演触发阈值：距上次推演 ≥ N 轮触发（默认 5）。 */
@@ -380,10 +380,10 @@ export interface NpcStageRuntimeOptions {
 	executor?: NpcStageOptions["executor"];
 }
 
-/** story subagent 阶段运行时选项（§6.3）。enabled 缺省 false——M2/M3 路径（story 关闭）零改动。 */
+/** story subagent 阶段运行时选项。enabled 缺省 false——M2/M3 路径（story 关闭）零改动。 */
 export interface StoryStageRuntimeOptions {
 	enabled: boolean;
-	/** 打回重写上限（默认 1 = 最多 2 稿，§6.3「上限 1–2 次」）；超限放行（strictDrop）。 */
+	/** 打回重写上限（默认 1 = 最多 2 稿，「上限 1–2 次」）；超限放行（strictDrop）。 */
 	maxRevisions?: number;
 	/** 全统筹轮期间隔（默认 10；sceneCard.major_event 也触发）。 */
 	overseeEveryTurns?: number;
@@ -393,7 +393,7 @@ export interface StoryStageRuntimeOptions {
 	executor?: StoryStageOptions["executor"];
 }
 
-/** stylize 阶段运行时选项（§6.4）。enabled 缺省 false（默认关闭）。 */
+/** stylize 阶段运行时选项。enabled 缺省 false（默认关闭）。 */
 export interface StylizeRuntimeOptions {
 	enabled: boolean;
 	/** 文风目标（世界包文风字段 M5 接入；现为故事级覆盖）。 */
@@ -408,7 +408,7 @@ export interface StoryRuntimeOptions {
 	cwd: string;
 	sessionManager: SessionManager;
 	storyState: StoryState;
-	/** 内核级模式预设（§10.1 ★信任边界）。解析顺序：显式 option → story.meta.json（storyDir 内）→ "creation"。
+	/** 内核级模式预设（★信任边界）。解析顺序：显式 option → story.meta.json（storyDir 内）→ "creation"。
 	 *  若 meta 记录 adventure 而 option 传了别的值 → 抛错（锁不可绕）。 */
 	mode?: StoryMode;
 	settings?: TavernSettings;
@@ -422,13 +422,13 @@ export interface StoryRuntimeOptions {
 	failureWarningThreshold?: number;
 	/** data 执行器注入（验收故障注入）。 */
 	dataExecutor?: DataStageOptions["executor"];
-	/** npc subagent 阶段（§6.2）。缺省关闭（M2 形态不变）。 */
+	/** npc subagent 阶段。缺省关闭（M2 形态不变）。 */
 	npc?: NpcStageRuntimeOptions;
-	/** story subagent 阶段（§6.3）。缺省关闭（M3 形态不变）。 */
+	/** story subagent 阶段。缺省关闭（M3 形态不变）。 */
 	story?: StoryStageRuntimeOptions;
-	/** stylize 阶段（§6.4）。缺省关闭。 */
+	/** stylize 阶段。缺省关闭。 */
 	stylize?: StylizeRuntimeOptions;
-	/** 卡包检索注入（§4.1 M5；缺省 = M2–M4 形态，无注入，占位符渲染「（无世界包注入）」）。 */
+	/** 卡包检索注入（M5；缺省 = M2–M4 形态，无注入，占位符渲染「（无世界包注入）」）。 */
 	packs?: {
 		/** 设定集热更新缓存（getPacks：mtime 变化重载，失败回退上次成功快照 + warning）。 */
 		cache: PackCache;
@@ -437,19 +437,19 @@ export interface StoryRuntimeOptions {
 		/** token 预算（默认 1500，可按故事覆盖）。 */
 		budgetTokens?: number;
 	};
-	/** 系统提示渲染完成回调（§10.2 pipeline 可观测性）：before_agent_start 每次注入后调用，
+	/** 系统提示渲染完成回调（pipeline 可观测性）：before_agent_start 每次注入后调用，
 	 *  参数为渲染好的当轮系统提示全文（含 db_summary 与当轮预演/场景卡/统筹/打回批注）。观测钩子，不影响渲染语义。 */
 	onSystemPromptRender?: (rendered: string) => void;
-	/** 主叙事 session 的 pi SettingsManager（§3.0/§3.1 compaction 触发参数：keepRecentTokens 等）。
+	/** 主叙事 session 的 pi SettingsManager（compaction 触发参数：keepRecentTokens 等）。
 	 *  缺省走 createAgentSession 默认（~/.pi/agent 全局设置）；测试/验收可传 SettingsManager.inMemory 注入小 keepRecentTokens。 */
 	settingsManager?: SettingsManager;
-	/** 章节摘要 compaction subagent 选项（§3.0/§3.1）：缺省走真实 runSubagent。executor 供测试故障注入。 */
+	/** 章节摘要 compaction subagent 选项：缺省走真实 runSubagent。executor 供测试故障注入。 */
 	chapterSummary?: {
 		executor?: (opts: SubagentRunOptions) => Promise<SubagentResult<unknown>>;
 		/** 重试上限（默认 2）。 */
 		maxAttempts?: number;
 	};
-	/** 带外顾问（§6.8）选项：model 缺省走 settings.models.assist 或 pi 默认；sessionFactory 供测试/故障注入。
+	/** 带外顾问选项：model 缺省走 settings.models.assist 或 pi 默认；sessionFactory 供测试/故障注入。
 	 *  assist 会话懒创建（不找它即零开销），无开关。 */
 	assist?: {
 		model?: NonNullable<CreateAgentSessionOptions["model"]>;
@@ -466,14 +466,14 @@ export interface TurnResult {
 	data: DataStageOutcome;
 	snapshotTaken: boolean;
 	consecutiveDataFailures: number;
-	/** npc 阶段报告（§6.2；npc 关闭时缺省）。 */
+	/** npc 阶段报告（npc 关闭时缺省）。 */
 	npc?: {
 		onstageNpcIds: number[];
 		rehearsals: NpcRehearsal[];
 		offscreenTriggeredIds: number[];
 		offscreenDeltas: OffscreenDelta[];
 	};
-	/** story 阶段报告（§6.3；story 关闭时缺省）。 */
+	/** story 阶段报告（story 关闭时缺省）。 */
 	story?: {
 		sceneCard: SceneCard;
 		sceneFallback: boolean;
@@ -485,15 +485,15 @@ export interface TurnResult {
 		/** 超限放行（重写仍冲突 → 放行，冲突留 turn_log.warnings + data strictDrop）。 */
 		releasedWithWarnings: boolean;
 	};
-	/** stylize 报告（§6.4；stylize 关闭时缺省）。 */
+	/** stylize 报告（stylize 关闭时缺省）。 */
 	stylize?: { applied: boolean; drift?: string[] };
-	/** 全统筹批注（§6.3；本轮触发则为 note，未触发字段缺省，触发但失败为 null）。 */
+	/** 全统筹批注（本轮触发则为 note，未触发字段缺省，触发但失败为 null）。 */
 	oversee?: OverseeNote | null;
-	/** 卡包检索注入报告（§4.1；packs 缺省时无此字段）。 */
+	/** 卡包检索注入报告（packs 缺省时无此字段）。 */
 	collection?: { injected: string[]; warnings: string[] };
 }
 
-/** 提示词分层管理（§10.2「各层读写与覆盖链查询」），绑定当前 runtime 的层目录。 */
+/** 提示词分层管理（「各层读写与覆盖链查询」），绑定当前 runtime 的层目录。 */
 export interface RuntimePrompts {
 	/** 当前 runtime 生效的提示词层目录。 */
 	dirs: PromptLayerDirs;
@@ -511,30 +511,30 @@ export interface StoryRuntime {
 	storyState: StoryState;
 	hooks: SnapshotHooks;
 	readonly mode: StoryMode;
-	/** 带外顾问（§6.8）：会话式、只读、草稿制、无开关；不进叙事流。回溯/前进/fork 已由 session_tree 钩子同步重建。 */
+	/** 带外顾问：会话式、只读、草稿制、无开关；不进叙事流。回溯/前进/fork 已由 session_tree 钩子同步重建。 */
 	assist: AssistAdvisor;
-	/** 受信任写入（§6.1 写者例外 + §10.2承诺面）：pipeline 外唯一合法写路径（编辑器直改场景）。
+	/** 受信任写入（写者例外 + 承诺面）：pipeline 外唯一合法写路径（编辑器直改场景）。
 	 *  复用 changeset zod schema + 语义校验 + applyChangeset；校验失败 → 抛中文错列全部问题、不落库。 */
 	trustedWrite(changeset: Changeset): Promise<{ summary: ApplySummary; turnSeq: number; snapshotTaken: boolean }>;
-	/** 轮中交互 broker（§6.7）：主叙事 session 卡包自定义工具经 getInteractionBroker() 取当前 broker 调 request。 */
+	/** 轮中交互 broker：主叙事 session 卡包自定义工具经 getInteractionBroker() 取当前 broker 调 request。 */
 	interaction: InteractionBroker;
-	/** 提示词分层管理（§10.2「各层读写与覆盖链查询」），绑定当前 runtime 的层目录。 */
+	/** 提示词分层管理（「各层读写与覆盖链查询」），绑定当前 runtime 的层目录。 */
 	prompts: RuntimePrompts;
-	/** 切换模式（§10.1）：断言可切换、校验当前 subagent 开关符合目标预设、写回 story.meta.json、更新内部状态。
+	/** 切换模式：断言可切换、校验当前 subagent 开关符合目标预设、写回 story.meta.json、更新内部状态。
 	 *  adventure 锁定不可切换（含切出）；违规抛中文 Error（列需先重开项，不自动改）。 */
 	setMode(next: StoryMode): void;
-	/** 跑一轮叙事。opts.force = /! 前缀（输入渠道校验强制提交，留痕 warning；§10.1 + §8 决策记录）。
+	/** 跑一轮叙事。opts.force = /! 前缀（输入渠道校验强制提交，留痕 warning）。
 	 *  skipInputValidation 为内部选项（swipe 重放历史已接受输入时跳过校验），不经公开签名。 */
 	runTurn(input: string, opts?: { force?: boolean }): Promise<TurnResult>;
-	/** /swipe（§3.0 重骰）：基于分支重生成最后一个 user 轮次的响应，旧稿留树。 */
+	/** /swipe（重骰）：基于分支重生成最后一个 user 轮次的响应，旧稿留树。 */
 	swipe(): Promise<TurnResult>;
 	dispose(): void;
 }
 
 /**
- * 解析运行时生效模式（§10.1 ★信任边界）。优先级：显式 option → story.meta.json（storyDir 内）→ "creation"。
+ * 解析运行时生效模式（★信任边界）。优先级：显式 option → story.meta.json（storyDir 内）→ "creation"。
  * 【adventure 锁】meta 记录 adventure 而 option 传了别的值 → 抛错（锁不可绕；中途不进出的契约）。
- * 【升级守卫】meta 存在且非 adventure、option = adventure → 抛错（冒险只能在故事创建时选定，§10.1；不可把已存在的故事升级为冒险）。
+ * 【升级守卫】meta 存在且非 adventure、option = adventure → 抛错（冒险只能在故事创建时选定；不可把已存在的故事升级为冒险）。
  * 【无 meta 升级拒】meta 缺失（非 createStory 产物）+ option = adventure → 抛错（无法确认曾以冒险创建）。
  * 【合法性】非法模式值（option 或 meta.mode，如 "Survival"）→ 抛错（不回落；避免首次 runTurn 在 MODE_PRESETS[mode] 抛 TypeError）。
  */
@@ -562,7 +562,7 @@ export function resolveStoryMode(optsMode: StoryMode | undefined, storyDir: stri
 }
 
 /**
- * 输入渠道校验错误（§10.1 + §8 决策记录「输入渠道校验判定」）：生存/冒险拒绝非 user 角色行为的输入
+ * 输入渠道校验错误（「输入渠道校验判定」）：生存/冒险拒绝非 user 角色行为的输入
  * （命令 NPC、指定剧情结果、上帝视角陈述）。携带 reason（非法原因）与 suggestion（改写建议）字段；
  * 用户可改写成合法输入，或经 `/!` 前缀强制提交（留痕 warning，见 runTurn force 路径）。
  */
@@ -578,7 +578,7 @@ export class InputRejectedError extends Error {
 }
 
 /**
- * 输入渠道校验判定（§10.1 + §8 决策记录；纯函数无副作用）：返回是否拒绝 + 原因/建议。
+ * 输入渠道校验判定（纯函数无副作用）：返回是否拒绝 + 原因/建议。
  * 规则：只对模式预设 inputValidation=true（生存/冒险）且场景卡存在生效；creation（inputValidation=false）
  * 或场景卡缺席（story 关闭）不校验。场景卡 input_validity 缺席或 valid=true → 放行。
  * force=true（/! 前缀）→ 不拒绝（放行留痕）。驳回时返回 reason/suggestion 供 InputRejectedError 消费。
@@ -601,7 +601,7 @@ export function computeInputValidityAction(
 }
 
 /**
- * 切换模式（§10.1）：断言可切换、校验当前 subagent 开关符合目标模式预设、写回 story.meta.json、返回新模式。
+ * 切换模式：断言可切换、校验当前 subagent 开关符合目标模式预设、写回 story.meta.json、返回新模式。
  * 不自动改 subagent 开关——违规抛中文 Error 列出需先重开的项。adventure 锁定（含切出）一律拒绝。
  */
 export function applyModeSwitch(
@@ -626,7 +626,7 @@ export function applyModeSwitch(
 export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<StoryRuntime> {
 	const { cwd, sessionManager, storyState, settings, modelRuntime, prompts, eventLog, onWarning } = opts;
 
-	// ---- 模式解析（§10.1 ★信任边界）：显式 option → story.meta.json → "creation"；adventure 锁不可绕 ----
+	// ---- 模式解析（★信任边界）：显式 option → story.meta.json → "creation"；adventure 锁不可绕 ----
 	let mode: StoryMode = resolveStoryMode(opts.mode, storyState.storyDir);
 	const maxDataAttempts = opts.maxDataAttempts ?? 3;
 	const failureWarningThreshold = opts.failureWarningThreshold ?? 3;
@@ -644,7 +644,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 	if (modeProblems.length > 0) {
 		throw new Error(`subagent 开关与故事模式（${mode}）冲突：\n- ${modeProblems.join("\n- ")}`);
 	}
-	// stylize.styleHint 缺省值：未显式传入时读 story.meta.json 的 defaultStyle（§6.4 世界包文风）。
+	// stylize.styleHint 缺省值：未显式传入时读 story.meta.json 的 defaultStyle（世界包文风）。
 	if (stylizeOpts.styleHint === undefined) {
 		stylizeOpts.styleHint = readStoryMetaDefaultStyle(storyState.storyDir);
 	}
@@ -659,7 +659,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		onWarning,
 	});
 
-	// 运行时提示词目录（含 storyDir 故事层）：活管线与管理 API 共用（§10.2；story 级覆盖下轮生效——
+	// 运行时提示词目录（含 storyDir 故事层）：活管线与管理 API 共用（story 级覆盖下轮生效——
 	// narrator 模板每轮现载、subagent 逐调用现载）。
 	const runtimePromptDirs: PromptLayerDirs = { ...prompts, storyDir: storyState.storyDir };
 	// 主叙事提示词模板：before_agent_start 每轮现载（占位符同轮现算注入；story 层覆盖下轮生效）。
@@ -669,13 +669,13 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 	const npcModel = resolveRoleModel(settings, "npc", modelRuntime, onWarning);
 	const storyModel = resolveRoleModel(settings, "story", modelRuntime, onWarning);
 	const stylizeModel = resolveRoleModel(settings, "stylize", modelRuntime, onWarning);
-	// 章节摘要 compaction subagent（§3.0/§3.1）：模型配置 settings.models.chapter_summary；缺省走 pi 默认模型。
+	// 章节摘要 compaction subagent：模型配置 settings.models.chapter_summary；缺省走 pi 默认模型。
 	// 提示词由 runChapterSummary 内部 loadPrompt("chapter_summary") 加载，此处只解析模型。
 	const chapterSummaryModel = resolveRoleModel(settings, "chapter_summary", modelRuntime, onWarning);
-	// 带外顾问（§6.8）：模型配置 settings.models.assist；缺省走 pi 默认。assist 会话懒创建，不找它即零开销。
+	// 带外顾问：模型配置 settings.models.assist；缺省走 pi 默认。assist 会话懒创建，不找它即零开销。
 	const assistModel = resolveRoleModel(settings, "assist", modelRuntime, onWarning);
 
-	// 带外顾问（§6.8）：只读、草稿制、无开关；mode 经 getter（setMode 后 rebuild 用新人格）
+	// 带外顾问：只读、草稿制、无开关；mode 经 getter（setMode 后 rebuild 用新人格）
 	// storyDb 经 getter（快照恢复替换实例后工具始终访问当前库）；seopts.assist.model 可覆盖模型。
 	const assist = createAssistAdvisor({
 		storyDb: () => storyState.storyDb,
@@ -704,10 +704,10 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 	let pendingSceneCard: SceneCard | undefined;
 	let pendingOverseeNote: string | undefined;
 	let pendingRevision: string | undefined;
-	// 输入渠道校验 /! 强制留痕（§8）：内存记录「最近一次拒绝」（输入文本 + reason），不落库（零痕迹语义不破）。
+	// 输入渠道校验 /! 强制留痕：内存记录「最近一次拒绝」（输入文本 + reason），不落库（零痕迹语义不破）。
 	// force=true 且输入匹配该记录时无条件留痕，即使第二次场景分析判合法（审计痕迹不丢）。
 	let lastRejectedInput: { input: string; reason: string } | undefined;
-	// 卡包检索注入输入/报告（§4.1）：输入由 runTurn 置入（重写循环保持同一输入）；报告在
+	// 卡包检索注入输入/报告：输入由 runTurn 置入（重写循环保持同一输入）；报告在
 	// before_agent_start 每次渲染后暂存，供 TurnResult.collection（最后一次 prompt 的注入结果）。
 	let pendingCollectionInput: string | undefined;
 	let pendingCollectionTurnSeq = 0;
@@ -720,11 +720,11 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			});
 			pi.on("session_tree", async (event, ctx) => {
 				hooks.sessionTree(event, ctx);
-				// 带外顾问（§6.8）：回溯/前进触发 session_tree；快照恢复（setStoryDb）已完成后重建 assist 会话，
+				// 带外顾问：回溯/前进触发 session_tree；快照恢复（setStoryDb）已完成后重建 assist 会话，
 				// 记忆不得包含被回滚掉的剧情。fork/故事重载天然经新 runtime 重建。
 				await assist.rebuild();
 			});
-			// 章节摘要 compaction（§3.0/§3.1）：session_before_compact 触发时用 chapter_summary subagent
+			// 章节摘要 compaction：session_before_compact 触发时用 chapter_summary subagent
 			// 生成章节摘要（完全替换 pi 默认摘要）。返回 undefined（失败回退默认摘要）绝不阻塞 compaction。
 			pi.on("session_before_compact", async (event) => {
 				const prep = event.preparation;
@@ -732,7 +732,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 					{
 						branchEntries: event.branchEntries,
 						firstKeptEntryId: prep.firstKeptEntryId,
-						// 迭代 compaction（§3.1）：把上次章节摘要（previousSummary）与 SDK 精确吞并集
+						// 迭代 compaction：把上次章节摘要（previousSummary）与 SDK 精确吞并集
 						// （messagesToSummarize + turnPrefixMessages）一并交给 chapter_summary——新摘要吸收前情要点，
 						// 避免前置章节摘要 S1 从活上下文消失导致伏笔丢失。
 						previousSummary: prep.previousSummary,
@@ -765,8 +765,8 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			// 每轮注入通道：before_agent_start 每次 prompt 触发一次，整串替换当轮系统提示。
 			// 渲染逻辑收敛在 renderNarratorPrompt（独立导出，单测确定性覆盖）：
 			// renderPlaceholders 只替换已知占位符，其余模板原样保留。
-			// onSystemPromptRender：渲染完成回调（§10.2 可观测性），供验收/观测钩子读取注入内容。
-			// 卡包检索注入（§4.1）：packs 提供时每轮 cache.getPacks() + buildCollectionInjection，
+			// onSystemPromptRender：渲染完成回调（可观测性），供验收/观测钩子读取注入内容。
+			// 卡包检索注入：packs 提供时每轮 cache.getPacks() + buildCollectionInjection，
 			// 注入报告暂存 pendingCollectionReport，供 TurnResult.collection（最后一次 prompt 的结果）。
 			pi.on("before_agent_start", () => {
 				const result = renderNarratorPrompt({
@@ -794,7 +794,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		},
 	];
 
-	// 卡包代码挂载（§4.1/M6-P4a）：主叙事 session 是宿主——story.meta.json packs[].extensionEntryPaths
+	// 卡包代码挂载（M6-P4a）：主叙事 session 是宿主——story.meta.json packs[].extensionEntryPaths
 	// 经 additionalExtensionPaths 委托 pi loader 加载卡包 extension（工具注册进主叙事 session）。
 	const codePackEntryPaths = collectCodePackEntryPaths(storyState.storyDir);
 	const loader = new DefaultResourceLoader({
@@ -819,7 +819,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		? loader.getExtensions().extensions.flatMap((e) => [...e.tools.keys()])
 		: [];
 
-	// 零工具会话（无代码包时 tools:[]）：tools 是严格白名单——卡包工具注入主叙事（§6.0 禁的是 DB 工具，非全部工具）。
+	// 零工具会话（无代码包时 tools:[]）：tools 是严格白名单——卡包工具注入主叙事（禁的是 DB 工具，非全部工具）。
 	// 构建后断言活动工具集 = 卡包工具集（无内置/DB 工具混入）；无代码包零工具 → 回退 noTools:"builtin" 对齐旧行为。
 	const sessionOptions: CreateAgentSessionOptions = {
 		cwd,
@@ -852,11 +852,11 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		console.warn(`[warn] ${created.modelFallbackMessage}`);
 	}
 
-	// 轮中交互 broker（§6.7）：主叙事 session 是唯一宿主——注册当前 runtime broker，卡包工具经 getInteractionBroker() 取用。
+	// 轮中交互 broker：主叙事 session 是唯一宿主——注册当前 runtime broker，卡包工具经 getInteractionBroker() 取用。
 	const interaction = new InteractionBroker();
 	registerRuntimeBroker(interaction);
 
-	// 私有 runTurn 主体（§10.2 API 面收口）：skipInputValidation 是内部选项（swipe 重放历史已接受输入故跳过校验），
+	// 私有 runTurn 主体（API 面收口）：skipInputValidation 是内部选项（swipe 重放历史已接受输入故跳过校验），
 	// 不进公开签名（对比 force 有留痕；skipInputValidation 是无痕旁路，不对外暴露）。
 	const runTurnInternal = async (input: string, turnOpts?: { force?: boolean; skipInputValidation?: boolean }): Promise<TurnResult> => {
 		if (session.isStreaming) {
@@ -865,7 +865,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		const turnSeq = computeNextTurnSeq(storyState.storyDb);
 		const startedAt = Date.now();
 
-		// 卡包检索注入输入（§4.1）：runTurn 置入，before_agent_start 经 renderNarratorPrompt 消费；
+		// 卡包检索注入输入：runTurn 置入，before_agent_start 经 renderNarratorPrompt 消费；
 		// 打回重写循环保持同一输入（注入扫描文本不变）。
 		pendingCollectionInput = input;
 		pendingCollectionTurnSeq = turnSeq;
@@ -890,7 +890,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			pendingSceneCard = analysis.card;
 		}
 
-		// ---- 输入渠道校验（§10.1 + §8 决策记录「输入渠道校验判定」）----
+		// ---- 输入渠道校验（「输入渠道校验判定」）----
 		// 只在模式预设 inputValidation=true（生存/冒险）且 story 开启时生效（story 关闭无场景分析 → 无校验；
 		// inputValidation 模式强制 story 开，故 story 关闭必然是中立的创造降级形态，自洽）。创造模式只看字段不拦截。
 		let forcedInputWarning: string | undefined;
@@ -921,7 +921,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			}
 		}
 
-		// ---- npc 阶段（§6.2）：场景卡驱动在场/离线名单；story 关闭时维持 M3 确定性判定 ----
+		// ---- npc 阶段：场景卡驱动在场/离线名单；story 关闭时维持 M3 确定性判定 ----
 		let npcReport: TurnResult["npc"];
 		if (npcOpts.enabled) {
 			const allNpcs = storyState.storyDb.reader.listNpcs();
@@ -993,7 +993,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		let releasedWithWarnings = false;
 
 		try {
-			// ---- 主叙事（§6.3 轻检/打回循环；story 关闭时保持 M3 单 prompt 形态）----
+			// ---- 主叙事（轻检/打回循环；story 关闭时保持 M3 单 prompt 形态）----
 			let promptStart = session.state.messages.length;
 			await session.prompt(input);
 			let leafId = sessionManager.getLeafId();
@@ -1025,7 +1025,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 					}
 					if (revisionBasis.length === 0) break; // 轻检通过
 					if (revisions >= maxRevisions) {
-						// 超限放行：冲突留 turn_log.warnings + data strictDrop（§6.3）
+						// 超限放行：冲突留 turn_log.warnings + data strictDrop
 						releasedWithWarnings = true;
 						break;
 					}
@@ -1056,7 +1056,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			pendingRevision = undefined;
 			pendingOverseeNote = undefined;
 
-			// ---- stylize（§6.4，默认关闭；轻检通过/放行后、data 前）----
+			// ---- stylize（默认关闭；轻检通过/放行后、data 前）----
 			let finalText = narrativeText;
 			let stylizeReport: TurnResult["stylize"];
 			if (stylizeOpts.enabled) {
@@ -1093,7 +1093,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				warnings: releasedWarningsText,
 			});
 
-			// 输入强制提交留痕（§8 决策记录）：与 M4 超限放行 warning 并存时合并追加。
+			// 输入强制提交留痕：与 M4 超限放行 warning 并存时合并追加。
 			if (forcedInputWarning !== undefined) {
 				const existingWarnings = storyState.storyDb.reader.getTurnLog(turnSeq)[0]?.warnings;
 				const mergedWarnings = existingWarnings
@@ -1102,8 +1102,8 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				storyState.storyDb.writer.setTurnLogWarnings(turnSeq, mergedWarnings);
 			}
 
-			// ---- data 阶段：抽取落库（唯一写者，§6.1）。narrativeText = 最终文本；
-			//      timeSuggestion = 场景卡时间建议（§6.3 → §5.3）；strictDrop = 超限放行轮 ----
+			// ---- data 阶段：抽取落库（唯一写者）。narrativeText = 最终文本；
+			//      timeSuggestion = 场景卡时间建议；strictDrop = 超限放行轮 ----
 			const data = await runDataStage({
 				storyDb: storyState.storyDb,
 				input: {
@@ -1130,9 +1130,9 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			let snapshotTaken = false;
 			if (data.ok) {
 				storyState.storyDb.writer.recordDataStatus({ turnSeq, status: "ok", attempts: data.attempts });
-				// 本轮落库成功 → 此前失败的待补轮一并视作已补齐（§6.1 下轮补齐语义）。
+				// 本轮落库成功 → 此前失败的待补轮一并视作已补齐（下轮补齐语义）。
 				storyState.storyDb.writer.markFailedTurnsCompensated();
-				// sys 键簿记（§6.2 内核簿记，编排器直写，同 clock 例外精神）：data 成功才对每个
+				// sys 键簿记（内核簿记，编排器直写，同 clock 例外精神）：data 成功才对每个
 				// offscreenTriggered NPC 更新离线推演 last-turn 键（快照前写入，随快照持久化）；
 				// data 失败不更新 → 下轮自然重触发、delta 重算。
 				for (const npcId of npcReport?.offscreenTriggeredIds ?? []) {
@@ -1145,7 +1145,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				await takeSnapshot(storyState.storyDb, { turnSeq, sessionEntryId: leafId });
 				snapshotTaken = true;
 			} else {
-				// §6.1：data 失败不拍快照（拍摄前提 = 落库成功），叙事照常呈现。
+				// data 失败不拍快照（拍摄前提 = 落库成功），叙事照常呈现。
 				storyState.storyDb.writer.recordDataStatus({
 					turnSeq,
 					status: "failed",
@@ -1157,11 +1157,11 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			const consecutiveDataFailures = countConsecutiveFailures(storyState.storyDb);
 			if (consecutiveDataFailures >= failureWarningThreshold) {
 				onWarning?.(
-					`data 落库已连续失败 ${consecutiveDataFailures} 轮（阈值 ${failureWarningThreshold}）——本轮及此前失败的叙事事实尚未入库，请留意；下轮将继续尝试补齐（§6.1）`,
+					`data 落库已连续失败 ${consecutiveDataFailures} 轮（阈值 ${failureWarningThreshold}）——本轮及此前失败的叙事事实尚未入库，请留意；下轮将继续尝试补齐`,
 				);
 			}
 
-			// ---- 全统筹（§6.3 步骤 8：data+快照之后，不阻塞落库；data 失败照跑，统筹不依赖落库成功）----
+			// ---- 全统筹（步骤 8：data+快照之后，不阻塞落库；data 失败照跑，统筹不依赖落库成功）----
 			let overseeNote: OverseeNote | null | undefined;
 			if (storyOpts.enabled && sceneCard) {
 				const shouldOversee =
@@ -1219,10 +1219,10 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		}
 	};
 
-	// 公开 runTurn（§10.2）：只暴露 force（/! 留痕）；skipInputValidation 为内部选项，不进公开签名。
+	// 公开 runTurn：只暴露 force（! 留痕）；skipInputValidation 为内部选项，不进公开签名。
 	const runTurn = async (input: string, opts?: { force?: boolean }): Promise<TurnResult> => runTurnInternal(input, opts);
 
-	// 提示词分层管理（§10.2「各层读写与覆盖链查询」）：绑定当前 runtime 层目录 + story 覆盖写。
+	// 提示词分层管理（「各层读写与覆盖链查询」）：绑定当前 runtime 层目录 + story 覆盖写。
 	// runtimePromptDirs 定义于构建期前部（活管线共用）；story 级覆盖下轮生效。
 
 	return {
@@ -1247,11 +1247,11 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				throw new Error(`非法模式值: ${JSON.stringify(next)}（应为 creation|survival|adventure）`);
 			}
 			mode = applyModeSwitch(mode, next, subagentFlags, storyState.storyDir);
-			// 三模式人格（§6.8）：模式切换后重建 assist 会话，下次 chat 用新人格/视图。
+			// 三模式人格：模式切换后重建 assist 会话，下次 chat 用新人格/视图。
 			void assist.rebuild();
 		},
 		runTurn,
-		// 受信任写入（§6.1 写者例外 + §10.2承诺面）：校验失败抛中文错列全部问题、零落库；
+		// 受信任写入（写者例外 + 承诺面）：校验失败抛中文错列全部问题、零落库；
 		// turnSeq 取 turn_log 最大（无轮次取 0）；写后 takeSnapshot 绑定当前 leaf（快照绑定语义与轮末一致）。
 		async trustedWrite(changeset: Changeset): Promise<{ summary: ApplySummary; turnSeq: number; snapshotTaken: boolean }> {
 			if (session.isStreaming) {
@@ -1281,9 +1281,9 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			});
 			return { summary, turnSeq, snapshotTaken };
 		},
-		// /swipe（§3.0 重骰）：基于分支重生成最后一个 user 轮次的响应，旧稿留树。
+		// /swipe（重骰）：基于分支重生成最后一个 user 轮次的响应，旧稿留树。
 		// 找到当前分支最后一个 user message（getBranch）；取其输入文本；navigateTree(u_N) 前查
-		// rewriteHasSnapshot 同款守卫（§3.1：有快照走导航恢复、无快照跳过导航直接重写——首轮/无快照不误清库）；
+		// rewriteHasSnapshot 同款守卫（有快照走导航恢复、无快照跳过导航直接重写——首轮/无快照不误清库）；
 		// 然后以同一输入重放完整 pipeline（runTurn，skipInputValidation=true：重放的是历史已接受输入，不再过输入校验）。
 		async swipe(): Promise<TurnResult> {
 			if (session.isStreaming) {
@@ -1301,7 +1301,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			if (input.trim() === "") {
 				throw new Error("最后一个 user 轮次输入为空，无法重新生成");
 			}
-			// 快照守卫（§3.1）：target 是 user 消息 u_N → newLeaf = parentId（N-1 轮末），快照钩子恢复 DB 到 N-1 末；
+			// 快照守卫：target 是 user 消息 u_N → newLeaf = parentId（N-1 轮末），快照钩子恢复 DB 到 N-1 末；
 			// 无快照（如首轮 u1）跳过导航直接重写（旧稿留在上下文，语义偏差可接受，绝不误清库）。
 			const rewriteHasSnapshot =
 				storyState.snapshotsDb.findNearestSnapshot(buildAncestorChain(sessionManager.getEntries(), lastUser.id)) !== undefined;
@@ -1313,9 +1313,9 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		},
 		dispose: () => {
 			session.dispose();
-			// 级联释放带外顾问（§6.8）inMemory 会话资源。
+			// 级联释放带外顾问 inMemory 会话资源。
 			assist.dispose();
-			// 清除轮中交互 broker 注册（§6.7）：仅当仍指向本实例。
+			// 清除轮中交互 broker 注册：仅当仍指向本实例。
 			clearRuntimeBroker(interaction);
 		},
 	};

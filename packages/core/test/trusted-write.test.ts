@@ -1,4 +1,4 @@
-// 受信任写入（§6.1 写者例外）+ 轮中交互 broker accessor（§6.7）+ runtime 提示词分层管理（§10.2）单测。
+// 受信任写入（写者例外）+ 轮中交互 broker accessor + runtime 提示词分层管理单测。
 // 离线（stub session，无真实 LLM）：valid 写入落库+快照；invalid 拒绝零落库；broker 注册/清除；prompts 覆盖链绑定。
 
 import assert from "node:assert/strict";

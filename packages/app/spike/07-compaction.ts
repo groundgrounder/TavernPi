@@ -1,7 +1,7 @@
 // M0 spike #7：compaction 定制——session_before_compact 返回自定义 CompactionResult
 // 完全替换默认摘要。
 //
-// 目的（技术路线 §4 spike 清单第 7 项 / §3.1 第 3 行）：
+// 目的（spike 清单第 7 项）：
 //   a) 可编程触发 compaction：用 session.compact()（agent-session.ts:1790，manual 入口）。
 //      prepareCompaction 在「会话太小」时返回 undefined（compaction.ts:765），因此用
 //      SettingsManager.inMemory 注入极小的 keepRecentTokens 强制产生 cut point——

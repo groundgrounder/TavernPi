@@ -1,7 +1,7 @@
-// data subagent 编排（§6.1 data 是唯一写者）：每轮叙事定稿后从文本抽取状态变更并落库。
+// data subagent 编排（data 是唯一写者）：每轮叙事定稿后从文本抽取状态变更并落库。
 // 流程：DB 摘要 + 当前轮 + 待补齐轮（pendingTurns）组装 userPrompt → 经 P1 runSubagent 单输出
 // 工具强制结构化输出（submit_changeset）→ zod safeParse → applyChangeset（校验+原子应用）。
-// 失败路径（§6.1）：重试上限内把「第 N 次提交未通过校验/应用」反馈追加进下次 attempt 的
+// 失败路径：重试上限内把「第 N 次提交未通过校验/应用」反馈追加进下次 attempt 的
 // userPrompt（模型自纠）；executor 抛错同样进重试；耗尽返回 ok:false（快照跳过由上层处理）。
 // 每次 attempt 记 eventLog（role:"data"）。
 
@@ -29,11 +29,11 @@ export interface DataStageInput {
 	userInput: string;
 	narrativeText: string;
 	createdEntryId?: string;
-	/** data 失败待补齐轮（§6.1）：事实尚未入 DB，须一并抽取进本次变更集。 */
+	/** data 失败待补齐轮：事实尚未入 DB，须一并抽取进本次变更集。 */
 	pendingTurns: Array<{ turnSeq: number; userInput: string; narrativeText: string }>;
-	/** 离线 NPC 推演结构化产物（§6.2 npc 层；data 是唯一写者，须照实转写落库）。空/缺省不加节。 */
+	/** 离线 NPC 推演结构化产物（npc 层；data 是唯一写者，须照实转写落库）。空/缺省不加节。 */
 	offscreenDeltas?: OffscreenDelta[];
-	/** 场景卡时间建议（§6.3 场景分析 → §5.3 流转链路）；非空时 userPrompt 加节供 time_advance 参考。 */
+	/** 场景卡时间建议（场景分析 → 流转链路）；非空时 userPrompt 加节供 time_advance 参考。 */
 	timeSuggestion?: { estimate: string; toTime: string };
 }
 
@@ -49,7 +49,7 @@ export interface DataStageOptions {
 	maxAttempts?: number;
 	/** 缺省 runSubagent；测试/验收故障注入通道。 */
 	executor?: (opts: SubagentRunOptions) => Promise<SubagentResult<unknown>>;
-	/** 严格放行（§6.3 超限轮）：true 时语义问题不整轮重试，而是 filterConflictingItems 剔除问题项后
+	/** 严格放行（超限轮）：true 时语义问题不整轮重试，而是 filterConflictingItems 剔除问题项后
 	 *  应用其余（剔除项记入 outcome.dropped）；zod 形状错误仍走原重试。false/缺省 = M2 形态逐字不变。 */
 	strictDrop?: boolean;
 }
@@ -141,7 +141,7 @@ export async function runDataStage(opts: DataStageOptions): Promise<DataStageOut
 					.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
 					.join("; ")}`;
 			} else {
-				// §6.3 strictDrop（超限放行轮）：语义问题不整轮重试，剔除问题项后应用其余；zod 形状错误不受影响。
+				// strictDrop（超限放行轮）：语义问题不整轮重试，剔除问题项后应用其余；zod 形状错误不受影响。
 				const problems = validateChangesetSemantics(storyDb, parsed.data);
 				if (problems.length > 0 && opts.strictDrop) {
 					const { filtered, dropped } = filterConflictingItems(parsed.data, problems);
@@ -226,7 +226,7 @@ export async function runDataStage(opts: DataStageOptions): Promise<DataStageOut
 			outputChars,
 			error,
 		});
-		// 校验反馈进下次 attempt 的 userPrompt（模型自纠通道，§6.1 重试机制）
+		// 校验反馈进下次 attempt 的 userPrompt（模型自纠通道，重试机制）
 		userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
 	}
 	return { ok: false, attempts: maxAttempts, error: lastError, durationMs: Date.now() - startedAt };

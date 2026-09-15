@@ -1,4 +1,4 @@
-// 设定集热更新（创作规划 §8 决策行「设定集热更新」：注入热、seed 冷，2026-08-22 定案）。
+// 设定集热更新（「设定集热更新」：注入热、seed 冷，2026-08-22 定案）。
 // PackCache：mtime 缓存 + 校验失败回退上次成功快照。
 //   - 内部记录全部相关文件（yaml/yml/sql/md/json）的最新 mtime；
 //   - getPacks() 每次扫描 mtime，有变化才 reload（注入热：作者改文本下一轮生效）；
@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { loadPacks } from "./loader.ts";
 import { PackLoadError, type WorldPack } from "./types.ts";
 
-/** 参与 mtime 追踪的文件扩展名（yaml/yml/sql/md/json，§4.1 相关文件）。 */
+/** 参与 mtime 追踪的文件扩展名（yaml/yml/sql/md/json，相关文件）。 */
 const TRACKED_EXT = /\.(yaml|yml|sql|md|json)$/i;
 
 export class PackCache {

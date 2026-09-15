@@ -1,6 +1,6 @@
-// InteractionBroker：轮中交互通道（创作规划 §6.7）——小游戏/判定 UI 的挂载点。
+// InteractionBroker：轮中交互通道——小游戏/判定 UI 的挂载点。
 //
-// 契约（§6.7）：
+// 契约：
 // - 卡包自定义工具可在执行中发起轮中交互：挂起 await 玩家响应，响应经工具声明的
 //   responseSchema 校验后返回；无 UI handler 时工具收到可辨识错误（InteractionUnavailableError），
 //   自行降级为文本提问或默认分支，不崩溃、不挂死。
@@ -11,12 +11,12 @@
 //   内核不校验 kind 格式（约定层），但未知 kind 由 handler 抛错（让工具降级路径可见）。
 // - responseSchema 用 typebox（与 subagent 结构化输出同一套）：typebox/value 的 Check + Errors。
 // - M1 阶段 m1-cli 注册 readline handler（confirm/choice/text 可玩）；富渲染后续按 kind 增强，
-//   接口不变。M6 随 §10.2 纳入承诺面。
+//   接口不变。M6 纳入对外 API 承诺面。
 
 import type { Static, TSchema } from "typebox";
 import { Check, Errors } from "typebox/value";
 
-/** 一次轮中交互请求（§6.7 机制节）。 */
+/** 一次轮中交互请求（机制节）。 */
 export interface InteractionRequest {
 	/** kind 开放命名空间：内置 confirm/choice/text；卡包自定义 包名:kind（约定层，内核不校验格式）。 */
 	kind: string;
@@ -33,11 +33,11 @@ export interface InteractionRequest {
 /** UI 层注册的交互 handler。返回值须符合请求声明的 responseSchema。 */
 export type InteractionHandler = (req: InteractionRequest) => Promise<unknown>;
 
-/** 交互通道不可用（未注册 handler）。工具 catch 此错误降级（§6.7 降级契约）。 */
+/** 交互通道不可用（未注册 handler）。工具 catch 此错误降级（降级契约）。 */
 export class InteractionUnavailableError extends Error {
 	readonly kind: string;
 	constructor(kind: string) {
-		super(`轮中交互不可用：未注册 handler（kind=${kind}）。工具应降级为默认分支或文本提问（§6.7）`);
+		super(`轮中交互不可用：未注册 handler（kind=${kind}）。工具应降级为默认分支或文本提问`);
 		this.name = "InteractionUnavailableError";
 		this.kind = kind;
 	}

@@ -1,6 +1,6 @@
 // M0 spike #4：两路并行 inMemory session 隔离 + 零盘污染实测。
 //
-// 目的（技术路线 §4 spike 清单第 4 项 / §3.2 第 5 行）：
+// 目的（spike 清单第 4 项）：
 //   a) 共享单个 ModelRuntime，两路 createAgentSession + 各自 SessionManager.inMemory()，
 //      并发 prompt（Promise.all），验证互不串台；
 //   b) 实证「零盘污染」三件套（resourceLoader / settingsManager / modelRuntime）：
@@ -289,7 +289,7 @@ main().catch((err: unknown) => {
 //    A的暗号不知道」。转录级检查：A 全文不含「蓝色」、B 全文不含「红色」。
 //    两路互不串台成立。
 //
-// 2. 零盘污染实测 ✅（与技术路线 §3.2 字面断言存在差异，见下）：
+// 2. 零盘污染实测 ✅（与字面断言存在差异，见下）：
 //    探针 A（全默认，只传 inMemory sessionManager）→ ~/.pi/agent/sessions/ 与
 //    临时 cwd 均【零新增文件】；B/C/D 同样零新增；全隔离主测试零新增。
 //    即：仅用 SessionManager.inMemory()，三个默认项不会产生任何新文件。
@@ -297,7 +297,7 @@ main().catch((err: unknown) => {
 //    （默认 ModelRuntime 只读不写；写 models-store 仅发生在网络刷新 provider
 //    catalog 时，allowModelNetwork 默认 false）。
 //
-//    差异说明：技术路线 §3.2 称「subagent 要零盘污染须显式传自定义
+//    差异说明：「subagent 要零盘污染须显式传自定义
 //    resourceLoader/settingsManager/model」。实测「零新文件」只需 inMemory
 //    sessionManager 即可达成；显式传三件套的真正价值是【零读盘 / 上下文隔离】：
 //    - 默认 settingsManager 读 ~/.pi/agent/settings.json（含 skills 路径等用户配置）；
@@ -309,5 +309,5 @@ main().catch((err: unknown) => {
 //    传隔离三件套（本脚本 IsolatedResourceLoader + SettingsManager.inMemory +
 //    ModelRuntime.create({modelsPath:null}) 即为此范式）。
 //
-// 3. 禁调 session.reload()：本脚本未调用（§3.2 警告：reload 会清全局 provider
+// 3. 禁调 session.reload()：本脚本未调用（警告：reload 会清全局 provider
 //    注册表，殃及并行会话）。

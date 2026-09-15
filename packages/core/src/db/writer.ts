@@ -1,4 +1,4 @@
-// 写者（唯一写路径）。turn_seq 纪律（技术路线 §6 / 创作规划 §5.1）：
+// 写者（唯一写路径）。turn_seq 纪律：
 // - 所有带 turn_seq 的表的写入方法**必须显式传 turnSeq**（类型层面必填，无默认值）；
 // - prepared statement 全部私有，业务代码无途径绕过纪律；
 // - clock 是唯一例外（upsertClock 单例，不带 turn_seq，历史走 time_log）。
@@ -40,7 +40,7 @@ function parseSubject(subject: string): { kind: "player" } | { kind: "npc"; npcI
 	throw new Error(`非法 subject 格式: ${JSON.stringify(subject)}（应为 'player' 或 'npc:<id>'）`);
 }
 
-/** 登记校验：地点必须已存在（§5.0 地点概念从 DB 来的登记校验契约）。 */
+/** 登记校验：地点必须已存在（地点概念从 DB 来的登记校验契约）。 */
 function assertLocationRegistered(db: DatabaseSync, locationId: number, context: string): void {
 	const row = db.prepare("SELECT id FROM locations WHERE id = ?").get(locationId);
 	if (!row) {
@@ -85,7 +85,7 @@ export class DbWriter {
 	}
 
 	// ------------------------------------------------------------------
-	// 时间（§5.3）
+	// 时间
 	// ------------------------------------------------------------------
 
 	/** 更新 clock 单例（id=1）。turn_seq 纪律的显式例外；历史经 advanceClock 写 time_log。
@@ -107,7 +107,7 @@ export class DbWriter {
 	 * from_time 由 writer 内部读取 clock 单例的当前值 —— time_log.from_time 必须
 	 * ≡ 写入时 clock.current_time，来源一致由 DB 层保证，调用方无参数可伪造。
 	 *
-	 * 注意：「不倒流」校验刻意**不在 DB 层**——历法可插拔（§5.3），TEXT 时间比较不可靠，
+	 * 注意：「不倒流」校验刻意**不在 DB 层**——历法可插拔，TEXT 时间比较不可靠，
 	 * 属 pipeline 层职责。防后人误加 DB 层时间序校验。
 	 */
 	advanceClock(input: { turnSeq: number; toTime: string; spanNote?: string }): TimeLogRow {
@@ -136,7 +136,7 @@ export class DbWriter {
 	// 叙事世界
 	// ------------------------------------------------------------------
 
-	/** 追加事件。type 默认 'event'（取值词汇待 M2 校准）。locationId 提供则做登记校验（§5.0）。 */
+	/** 追加事件。type 默认 'event'（取值词汇待 M2 校准）。locationId 提供则做登记校验。 */
 	insertEvent(input: {
 		turnSeq: number;
 		summary: string;
@@ -217,12 +217,12 @@ export class DbWriter {
 	}
 
 	// ------------------------------------------------------------------
-	// 空间基元（§5.1 locations / location_log）
+	// 空间基元（locations / location_log）
 	// ------------------------------------------------------------------
 
 	/**
 	 * 登记地点（幂等变体：按 name 去重，已存在则直接返回既有行——seed/卡包可重复执行）。
-	 * parentId 提供时校验其已登记（§5.0 登记校验契约）。
+	 * parentId 提供时校验其已登记（登记校验契约）。
 	 */
 	insertLocation(input: { name: string; parentId?: number; detail?: string }): LocationRow {
 		if (input.name.trim() === "") {
@@ -244,8 +244,8 @@ export class DbWriter {
 	}
 
 	/**
-	 * 实体移动（§5.1 location_log 镜像 time_log）。subject = 'player' 或 'npc:<id>'。
-	 * - toLocationId 必须已登记（登记校验契约，§5.0）；未登记抛错。
+	 * 实体移动（location_log 镜像 time_log）。subject = 'player' 或 'npc:<id>'。
+	 * - toLocationId 必须已登记（登记校验契约）；未登记抛错。
 	 * - 'player' → upsert world_state 约定键 player_location；'npc:<id>' → 校验 npc 存在后
 	 *   update npcs.current_location；两种都写 location_log（from = 当前值，首移为 NULL）。
 	 * - 原子：location_log + 目标表更新在单事务内。
@@ -396,8 +396,8 @@ export class DbWriter {
 	// 一致性
 	// ------------------------------------------------------------------
 
-	/** 记录每轮一致性条目（PK turn_seq，每轮一行）。rawText 缺省回退 narrativeText（stylize 语义，§6.4）。
-	 *  warnings 可选：§6.3 轻检/审查留痕（规则层硬冲突或 LLM 审查 findings 摘要；轻检在记录后运行，
+	/** 记录每轮一致性条目（PK turn_seq，每轮一行）。rawText 缺省回退 narrativeText（stylize 语义）。
+	 *  warnings 可选：轻检/审查留痕（规则层硬冲突或 LLM 审查 findings 摘要；轻检在记录后运行，
 	 *  警告后补写经 setTurnLogWarnings）。向后兼容：不传则 warnings 为 NULL。 */
 	recordTurnLog(input: {
 		turnSeq: number;
@@ -430,14 +430,14 @@ export class DbWriter {
 		};
 	}
 
-	/** 后补写 turn_log.warnings（§6.3：轻检/审查在 recordTurnLog 之后运行）。 */
+	/** 后补写 turn_log.warnings（轻检/审查在 recordTurnLog 之后运行）。 */
 	setTurnLogWarnings(turnSeq: number, warnings: string): void {
 		assertTurnSeq(turnSeq);
 		this.db.prepare("UPDATE turn_log SET warnings = ? WHERE turn_seq = ?").run(warnings, turnSeq);
 	}
 
 	/**
-	 * 记录 data subagent 落库状态（§6.1 失败路径持久化；PK turn_seq，upsert）。
+	 * 记录 data subagent 落库状态（失败路径持久化；PK turn_seq，upsert）。
 	 * 成功/失败均记录：attempts = 本轮落库尝试次数（重试耗尽或成功时定格），error = 失败原因。
 	 */
 	recordDataStatus(input: {
@@ -470,7 +470,7 @@ export class DbWriter {
 	}
 
 	// ------------------------------------------------------------------
-	// 指令（创造模式，§10.1）
+	// 指令（创造模式）
 	// ------------------------------------------------------------------
 
 	/** 新建剧情大纲指令。status 封闭枚举（active/done/revoked）。 */

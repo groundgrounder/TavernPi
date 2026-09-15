@@ -1,4 +1,4 @@
-// 故事目录与打开（§5.1 布局：<storiesRoot>/<session-id>/story.db + snapshots.db）。
+// 故事目录与打开（布局：<storiesRoot>/<session-id>/story.db + snapshots.db）。
 // 本阶段只建 story.db；snapshots.db 是 M1-P2（快照管理器）。
 
 import { mkdirSync } from "node:fs";

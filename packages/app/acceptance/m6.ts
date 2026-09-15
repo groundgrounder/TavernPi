@@ -1,4 +1,4 @@
-// M6 模式与输入渠道校验集成验收（创作规划 §10.1 三模式 + §8 决策记录「输入渠道校验判定」）：自断言脚本。
+// M6 模式与输入渠道校验集成验收（三模式 +「输入渠道校验判定」）：自断言脚本。
 //
 // 两区：
 // A. 模式预设（确定性，无需真实 LLM —— 运行时创建 + setMode / 构建期抛错 / meta 持久化）：
@@ -8,7 +8,7 @@
 //    ④ adventure 故事 fork（inheritStoryMeta 等价流程）→ 新故事 meta 仍 adventure 且 setMode 抛错；
 //    ⑤ 生存模式构建期关 npc → 抛错；
 //    ⑥ 非 adventure meta + option mode:"adventure" → 抛错（任务 1 升级守卫）。
-// B. 输入渠道校验（§8；⑦ 确定性桩 + 真实 LLM 冒烟；⑧⑨⑩ 场景桩 + 真实叙事 LLM；⑪ /plot 指令流）：
+// B. 输入渠道校验（⑦ 确定性桩 + 真实 LLM 冒烟；⑧⑨⑩ 场景桩 + 真实叙事 LLM；⑪ /plot 指令流）：
 //    ⑦ 生存模式「我命令卫兵立刻打开城门放走囚犯」→ InputRejectedError + DB 零痕迹（turn_log 行数不变 + session 树不进）；
 //    ⑦b 真实 LLM 场景分析冒烟（判定指令注入 → 场景卡含 input_validity 字段）；
 //    ⑧ 同输入 /! 强制 → 正常出叙事 + turn_log.warnings 含「强制提交」；
@@ -57,7 +57,7 @@ import {
 import { InputRejectedError } from "@tavernpi/core";
 
 const repoRoot = resolve(import.meta.dirname, "../../..");
-// 跨区汇总的 pipeline 事件（§6.6 端到端延迟实测用；打印即可，不做硬断言）。
+// 跨区汇总的 pipeline 事件（端到端延迟实测用；打印即可，不做硬断言）。
 const ALL_EVENTS: PipelineEvent[] = [];
 const ZERO_USAGE: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, costTotal: 0 };
 
@@ -85,9 +85,9 @@ function printChecks(checks: Check[]): void {
 	if (failed > 0) process.exitCode = 1;
 }
 
-/** §6.6 端到端延迟实测（打印即可，不做硬断言）：按轮汇总 narrator 墙钟 + 各阶段耗时（事件流聚合）。 */
+/** 端到端延迟实测（打印即可，不做硬断言）：按轮汇总 narrator 墙钟 + 各阶段耗时（事件流聚合）。 */
 function printLatencySummary(): void {
-	console.log("\n===== §6.6 端到端延迟实测（观测，非断言） =====");
+	console.log("\n===== 端到端延迟实测（观测，非断言） =====");
 	const narratorByTurn = new Map<number, { count: number; totalMs: number }>();
 	const stageMs: Record<string, number> = {};
 	for (const e of ALL_EVENTS) {
@@ -430,7 +430,7 @@ async function main(): Promise<void> {
 				storyDb: openStoryDb(join(dstDir, "story.db")),
 				snapshotsDb: openSnapshotsDb(snapshotsDbPath(join(dstDir, "story.db"))),
 			};
-			// createStory 已写 src meta；fork 产物经 inheritStoryMeta 复制到目标目录（§10.1 模式与锁定随 mode 继承）。
+			// createStory 已写 src meta；fork 产物经 inheritStoryMeta 复制到目标目录（模式与锁定随 mode 继承）。
 			inheritStoryMeta(src.storyDir, dstDir);
 			const sm = SessionManager.create(root, join(root, "a4-sessions"));
 			const rt = await createStoryRuntime({
@@ -500,7 +500,7 @@ async function main(): Promise<void> {
 		}
 
 		// ================= B. 输入渠道校验 =================
-		console.log("\n===== B. 输入渠道校验（§8） =====");
+		console.log("\n===== B. 输入渠道校验 =====");
 
 		// B7a. ⑦ 确定性拒绝路径：survival + 场景桩 invalid → InputRejectedError + DB 零痕迹
 		{
@@ -695,7 +695,7 @@ async function main(): Promise<void> {
 		}
 
 		// ================= C. 章节摘要 compaction + /swipe（真实 LLM） =================
-		console.log("\n===== C. 章节摘要 compaction + /swipe（§3.0/§3.1） =====");
+		console.log("\n===== C. 章节摘要 compaction + /swipe =====");
 
 		// C1a. 章节摘要 compaction：数轮叙事 → /compact → 摘要含章节摘要特征（伏笔标记）；上下文替换；后续连贯
 		{
@@ -869,8 +869,8 @@ async function main(): Promise<void> {
 			}
 		}
 
-		// ================= D. 带外顾问 assist（§6.8，真实 LLM） =================
-		console.log("\n===== D. 带外顾问 assist（§6.8） =====");
+		// ================= D. 带外顾问 assist（真实 LLM） =================
+		console.log("\n===== D. 带外顾问 assist =====");
 
 		// D1. 创造：/assist 等价调用返回非空建议；不进叙事流（turn_log/session 分支不变）；pipeline 事件流无 assist 污染
 		{
@@ -909,7 +909,7 @@ async function main(): Promise<void> {
 				const reply = await a.runtime.assist.chat(`请用工具查询 #${far.id} 号 NPC 的信息，告诉我你知道什么。`);
 				console.log(`[obs] D2: assist reply（前 120 字）: ${reply.slice(0, 120)}`);
 				checks.push(check("D2: 冒险 assist 不透露无关 NPC 私密信息（玉玺/井底）", !reply.includes("玉玺") && !reply.includes("井底")));
-				// 跨轮新鲜（§8.6）：assist 工具须每次现建视图——相关 NPC（卫兵，与玩家同地点）离场后不可见；
+				// 跨轮新鲜：assist 工具须每次现建视图——相关 NPC（卫兵，与玩家同地点）离场后不可见；
 				// 无关 NPC（远郊者）移到玩家地点后可见。createDbView 层确定性断言。
 				w.moveSubject({ turnSeq: 20, subject: `npc:${a.seed.guardId}`, toLocationId: market.id });
 				const advViewAfter = createDbView(a.storyState.storyDb.reader, "user-related");
@@ -970,8 +970,8 @@ async function main(): Promise<void> {
 			}
 		}
 
-		// ================= E. §10.2 承诺面定型（受信任写入 / prompts 管理 / 卡包代码挂载 / 多包提示词合并） =================
-		console.log("\n===== E. §10.2 承诺面定型 =====");
+		// ================= E. 承诺面定型（受信任写入 / prompts 管理 / 卡包代码挂载 / 多包提示词合并） =================
+		console.log("\n===== E. 承诺面定型 =====");
 
 		// E1. 受信任写入：合法落库+快照立拍；非法 changeset 拒绝零落库；editor 直改场景的 pipeline 外唯一写路径。
 		{
@@ -1075,7 +1075,7 @@ async function main(): Promise<void> {
 			}
 		}
 
-		// E4. 多包提示词合并：后包覆盖先包 + warning（§6.5/§10.2）。
+		// E4. 多包提示词合并：后包覆盖先包 + warning。
 		{
 			const packA = join(root, "e4-packA");
 			const packB = join(root, "e4-packB");

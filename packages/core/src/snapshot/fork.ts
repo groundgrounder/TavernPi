@@ -1,4 +1,4 @@
-// fork/clone 初始 DB（§3.1）：目标 entry 祖先链最近快照的 dump → 新故事 story.db；
+// fork/clone 初始 DB：目标 entry 祖先链最近快照的 dump → 新故事 story.db；
 // 新故事 snapshots.db 初始化为仅含该一份快照。空链 / 无快照 → 空库初始状态。
 // 目标目录复用安全：写 story.db 前先清除残留 WAL/SHM 与崩溃残留临时文件。
 

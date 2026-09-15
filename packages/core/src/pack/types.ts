@@ -1,12 +1,12 @@
-// 世界包类型（创作规划 §4 插件：世界包 / §4.1 M5 定稿）。
+// 世界包类型（插件：世界包 / M5 定稿）。
 // 本模块是卡包加载 / 匹配 / seed 的共享类型底座。命名空间 = 包名（package.json name）：
-// 加载即校验包名匹配 ^[a-z][a-z0-9_]*$（直接作 SQL 前缀，不做转换，见 §8 决策行「多卡命名空间」）。
+// 加载即校验包名匹配 ^[a-z][a-z0-9_]*$（直接作 SQL 前缀，不做转换，见「多卡命名空间」）。
 
 /** 条目类型（目录即类型；collection/<type>/ 与 EntryType 一一对应）。 */
 export const ENTRY_TYPES = ["character", "location", "object", "faction", "plot"] as const;
 export type EntryType = (typeof ENTRY_TYPES)[number];
 
-/** 条目插入位置（§4.1 匹配语义 M5 定稿）：system（系统提示前部基调区）/ recent（贴近最新叙事）。 */
+/** 条目插入位置（匹配语义 M5 定稿）：system（系统提示前部基调区）/ recent（贴近最新叙事）。 */
 export const ENTRY_POSITIONS = ["system", "recent"] as const;
 export type EntryPosition = (typeof ENTRY_POSITIONS)[number];
 
@@ -52,7 +52,7 @@ export interface StoryMeta {
 	defaultStyle?: string;
 }
 
-/** 世界包加载形态（§4.1 M5 定稿）。 */
+/** 世界包加载形态（M5 定稿）。 */
 export interface WorldPack {
 	/** 包名（package.json name）。 */
 	name: string;

@@ -1,15 +1,15 @@
-// 带外顾问 assist（创作规划 §6.8）：会话式、无开关、只读、草稿制。
+// 带外顾问 assist：会话式、无开关、只读、草稿制。
 //
 // 契约：
 // - 会话式 session：跨轮存续（inMemory 常驻；故事重载时重建、历史不持久 v0）。回溯/前进/fork 时
 //   经 runtime 的 session_tree 钩子调 rebuild() 同步重建——记忆不得包含被回滚掉的剧情。
 // - 三模式人格：创造=作者顾问（全知视角）；生存/冒险=玩家副驾（RP 建议、行动选项）；冒险只知道
 //   「用户该知道的」——DB 读取走 DbView "user-related" 视图过滤（db/view.ts），createDbView 层已做。
-// - 只读 DB；输出均为草稿，由用户决定是否作为输入发出（写者纪律不破，§6.1）。无写工具。
+// - 只读 DB；输出均为草稿，由用户决定是否作为输入发出（写者纪律不破）。无写工具。
 // - 不进叙事流、不影响 pipeline、不触发落库；无开关（用户主动发起，不找它即零开销——session 懒创建）。
 //
 // 冒险视图过滤的形态：本模块只消费 createDbView 的 filter（"none"|"user-related"），不改 db/view.ts 语义。
-// §6.7 choice 集成（选项→交互）不在本 lane——跟踪项，注释说明即可，不做。
+// choice 集成（选项→交互）不在本 lane——跟踪项，注释说明即可，不做。
 
 import {
 	createAgentSession,

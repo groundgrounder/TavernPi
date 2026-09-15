@@ -1,4 +1,4 @@
-// 提示词分层加载器（创作规划 §6.5）+ 分层管理 API（§10.2「各层读写与覆盖链查询」）。
+// 提示词分层加载器 + 分层管理 API（「各层读写与覆盖链查询」）。
 // 四层覆盖：内置 < 全局 < 卡包 < 故事级；高层覆盖低层，出错/为空回退到下一层。
 //
 // 层级目录（各层可选，未提供的层整体跳过，内置层必存在）：
@@ -138,7 +138,7 @@ export function loadPrompt(role: string, dirs: PromptLayerDirs = {}): LoadedProm
 }
 
 // ---------------------------------------------------------------------------
-// 分层管理 API（§10.2「各层读写与覆盖链查询」）
+// 分层管理 API（「各层读写与覆盖链查询」）
 // ---------------------------------------------------------------------------
 
 /** 单层状态（供覆盖链查询）。pack 层聚合多包候选。 */
@@ -210,7 +210,7 @@ export function resolvePromptChain(dirs: PromptLayerDirs, role: string): PromptC
 	return { role, layers, effectiveLayer: effectiveLayer ?? "builtin" };
 }
 
-/** 写/覆盖 story 层提示词覆盖（§10.2）：写 <storyDir>/prompts/<role>.md。 */
+/** 写/覆盖 story 层提示词覆盖：写 <storyDir>/prompts/<role>.md。 */
 export function setStoryPromptOverride(storyDir: string, role: string, content: string): void {
 	assertValidRole(role);
 	const promptsDir = join(storyDir, "prompts");
@@ -218,7 +218,7 @@ export function setStoryPromptOverride(storyDir: string, role: string, content: 
 	writeFileSync(join(promptsDir, `${role}${PROMPT_EXT}`), content);
 }
 
-/** 删 story 层提示词覆盖（§10.2）：删 <storyDir>/prompts/<role>.md；不存在则 no-op。 */
+/** 删 story 层提示词覆盖：删 <storyDir>/prompts/<role>.md；不存在则 no-op。 */
 export function clearStoryPromptOverride(storyDir: string, role: string): void {
 	assertValidRole(role);
 	rmSync(join(storyDir, "prompts", `${role}${PROMPT_EXT}`), { force: true });

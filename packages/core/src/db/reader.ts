@@ -1,4 +1,4 @@
-// 读取 API 最小集（技术路线 §3.3：DB 层职责）。只读，无写途径。
+// 读取 API 最小集（DB 层职责）。只读，无写途径。
 // 按后续 pipeline 需要：clock 读取、turn_seq 范围查询、全表读、NPC 复合读。
 
 import { DatabaseSync } from "node:sqlite";
@@ -100,7 +100,7 @@ export class DbReader {
 	}
 
 	// ------------------------------------------------------------------
-	// 空间基元（§5.1 locations / location_log）
+	// 空间基元（locations / location_log）
 	// ------------------------------------------------------------------
 
 	/** 地点注册表全表读（按 id 升序；parent 名已解析）。 */
@@ -226,7 +226,7 @@ export class DbReader {
 		return this.db.prepare("SELECT id, turn_seq, content, status FROM directives ORDER BY id").all() as unknown as DirectiveRow[];
 	}
 
-	/** data subagent 落库状态全表读（§6.1；按 turn_seq 升序）。 */
+	/** data subagent 落库状态全表读（按 turn_seq 升序）。 */
 	listDataStatus(): DataStatusRow[] {
 		return this.db
 			.prepare("SELECT turn_seq, status, attempts, error FROM data_status ORDER BY turn_seq")

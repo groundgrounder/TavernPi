@@ -1,13 +1,13 @@
-// M1 交互 CLI（人工验收入口，创作规划 §7-M1）：单 agent 叙事循环 + 持久化与快照接线。
+// M1 交互 CLI（人工验收入口）：单 agent 叙事循环 + 持久化与快照接线。
 //
-// 目的：验证 §3.0 契约——/tree 回溯后 DB 与时钟一致、回溯后再前进、fork 后新故事 DB 独立。
+// 目的：验证契约——/tree 回溯后 DB 与时钟一致、回溯后再前进、fork 后新故事 DB 独立。
 // 接线（Lane 3，app 层只消费 core API）：
 //   SessionManager（pi session 树，JSONL 持久化）
 //     ↔ StoryDb（story.db，openStoryDb + turn_seq 纪律写者）
 //     ↔ SnapshotsDb（snapshots.db，takeSnapshot/findNearestSnapshot）
 //     ↔ createSnapshotHooks（挂 session_before_tree / session_tree，导航即原子恢复）
 //     ↔ createDbTools（get_clock/query_events/get_npc/write_event/advance_clock 白名单）
-//     ↔ InteractionBroker（§6.7 轮中交互：readline handler + combat_check 演示工具，仅交互模式注册）。
+//     ↔ InteractionBroker（轮中交互：readline handler + combat_check 演示工具，仅交互模式注册）。
 //
 // 关键接线决策：
 // 1. 快照绑定本轮结束时的 leaf（最终 assistant entry），与 turn_log 同一 id。pi navigateTree
@@ -116,7 +116,7 @@ export interface M1RuntimeOptions {
 	storyState: M1StoryState;
 	onWarning?: (message: string) => void;
 	/**
-	 * 轮中交互（§6.7）：传 InteractionBroker 则注册 combat_check 演示工具并加入白名单。
+	 * 轮中交互：传 InteractionBroker 则注册 combat_check 演示工具并加入白名单。
 	 * 脚本/验收模式（m1:accept）缺省不传——白名单保持既有 5 工具，验收 30 项断言不受影响。
 	 */
 	interaction?: InteractionBroker;
@@ -280,7 +280,7 @@ export async function buildM1Runtime(options: M1RuntimeOptions): Promise<M1Runti
 	// 恢复会用新 StoryDb 实例原子替换，getter 保证工具链在恢复后仍然有效，无需重建会话。
 	const customTools = createDbTools(() => storyState.storyDb, { getCurrentTurnSeq: () => turnSeq });
 	const toolNames: string[] = [...DB_TOOL_NAMES];
-	// 轮中交互（§6.7）：仅交互模式注册 combat_check（验收脚本共享本构建块，但白名单保持在 5 工具）。
+	// 轮中交互：仅交互模式注册 combat_check（验收脚本共享本构建块，但白名单保持在 5 工具）。
 	if (interaction !== undefined) {
 		customTools.push(createCombatCheckTool(interaction));
 		toolNames.push("combat_check");
@@ -372,7 +372,7 @@ export async function navigateToEntry(runtime: M1Runtime, targetId: string): Pro
 }
 
 // ---------------------------------------------------------------------------
-// 轮中交互（§6.7）：combat_check 演示工具 + readline handler
+// 轮中交互：combat_check 演示工具 + readline handler
 // ---------------------------------------------------------------------------
 
 /**
@@ -415,7 +415,7 @@ const COMBAT_OPTIONS = ["稳扎稳打", "冒险突进", "伺机闪避"] as const
 /**
  * combat_check 演示工具：发起一次 choice + 一次 confirm 轮中交互，按确定性规则
  * （core judgeCombat）算出 success/partial/failure 与叙事提示。交互不可用（无 UI handler）
- * 时按默认谨慎分支降级（§6.7 降级契约），不崩溃。
+ * 时按默认谨慎分支降级（降级契约），不崩溃。
  */
 function createCombatCheckTool(broker: InteractionBroker): ToolDefinition {
 	const choiceSchema = Type.Object({ option: Type.Integer({ description: "选中项序号（0 基）" }) });
@@ -475,7 +475,7 @@ function createCombatCheckTool(broker: InteractionBroker): ToolDefinition {
 				};
 			} catch (err) {
 				if (err instanceof InteractionUnavailableError) {
-					// 降级契约（§6.7）：无 UI handler 时按默认谨慎分支返回，不崩溃、不挂死。
+					// 降级契约：无 UI handler 时按默认谨慎分支返回，不崩溃、不挂死。
 					const judgement = judgeCombat({ difficulty: params.difficulty, choiceOption: 0, allIn: false });
 					return {
 						content: [
@@ -550,7 +550,7 @@ function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: 
 	} else if (result.restoredTurnSeq !== undefined) {
 		console.log(`> 恢复成功: turn${result.restoredTurnSeq}（entry ${result.restoredEntryId}）`);
 	} else {
-		console.log("> 恢复成功（空库兜底，§3.1）");
+		console.log("> 恢复成功（空库兜底）");
 	}
 	console.log(`> 当前 clock: ${clock?.current_time ?? "(未初始化)"}，events: ${events.length} 行`);
 }
@@ -581,7 +581,7 @@ function printHelp(): void {
 			"  /help               本帮助",
 			"  空行                退出（不删故事目录，可 --resume 续写）",
 			"",
-			"轮中交互（§6.7）：模型发起战斗/危险判定时调用 combat_check，会在终端向你提问",
+			"轮中交互：模型发起战斗/危险判定时调用 combat_check，会在终端向你提问",
 			"（选择行动方式 + 是否全力一搏）；输入对应序号与 y/n 即可，判定结果进入本轮叙事。",
 		].join("\n"),
 	);
@@ -736,7 +736,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 	const rl = createInterface({ input: process.stdin, output: process.stdout });
 	const queue = new LineQueue(rl);
 
-	// 轮中交互（§6.7）：注册 readline handler（confirm/choice/text），演示工具 combat_check
+	// 轮中交互：注册 readline handler（confirm/choice/text），演示工具 combat_check
 	// 仅交互模式注册（验收脚本缺省不传 interaction，白名单保持 5 工具）。
 	const broker = new InteractionBroker();
 	broker.registerHandler((req) => readlineInteractionHandler(req, queue));

@@ -1,4 +1,4 @@
-// createStory 单测（创作规划 §4.1 M5 定稿：卡包校验 → SQL+seed 迁移 → story.yaml 消费 →
+// createStory 单测（M5 定稿：卡包校验 → SQL+seed 迁移 → story.yaml 消费 →
 // 开场白首轮 + turn_log 0 + 初始快照 → story.meta.json）。
 
 import assert from "node:assert/strict";

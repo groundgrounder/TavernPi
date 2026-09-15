@@ -1,4 +1,4 @@
-// 内核级模式预设单测（创作规划 §10.1 ★信任边界）。
+// 内核级模式预设单测（★信任边界）。
 // 覆盖：预设矩阵 validateSubagentSwitches / 切换规则矩阵 canSwitchMode|assertCanSwitchMode /
 // createStory mode 写 meta + readStoryMeta 回读 / inheritStoryMeta 复制 / runtime 模式解析与 setMode 持久化。
 
@@ -93,7 +93,7 @@ test("adventure：story/npc/stylize 全部强制开", () => {
 // 预设声明（MODE_PRESETS 字段）
 // ---------------------------------------------------------------------------
 
-test("MODE_PRESETS：声明字段符合 §10.1 契约", () => {
+test("MODE_PRESETS：声明字段符合契约", () => {
 	assert.equal(MODE_PRESETS.creation.directivesAllowed, true);
 	assert.equal(MODE_PRESETS.creation.inputValidation, false);
 	assert.equal(MODE_PRESETS.creation.dbViewFilter, "none");

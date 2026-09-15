@@ -1,7 +1,7 @@
-// 快照存储（独立 snapshots.db，§3.1）。
+// 快照存储（独立 snapshots.db）。
 // dump 格式决策：直接存 node:sqlite backup() 生成的完整数据库文件字节。
 //   backup 是 SQLite 官方一致的物理快照，包含 WAL 中已提交内容，且天然包含
-//   turn_log/time_log/directives 等全部表 —— 满足 §3.1「dump = 当时 story.db 的全量导出」意图，
+//   turn_log/time_log/directives 等全部表 —— 满足「dump = 当时 story.db 的全量导出」意图，
 //   实现最简且已实证（spike/06）。逻辑导出（SQL 序列化）在数据量增长后如需可换，不影响表结构。
 
 import { existsSync, readFileSync, rmSync } from "node:fs";
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
 );
 `;
 
-/** snapshots.db 路径：与 story.db 同目录（§5.1）。 */
+/** snapshots.db 路径：与 story.db 同目录。 */
 export function snapshotsDbPath(storyDbPath: string): string {
 	return join(dirname(storyDbPath), "snapshots.db");
 }
@@ -57,7 +57,7 @@ export class SnapshotsDb {
 	/**
 	 * 祖先链最近快照。entryAncestors = 目标 entry 的祖先链（含自身，从近到远）。
 	 * entry id 无全局序，只按祖先关系：按链序找第一个有快照的 entry。
-	 * 空链 / 链上无快照 → undefined（调用方据此走「空库初始状态」兜底，§3.1）。
+	 * 空链 / 链上无快照 → undefined（调用方据此走「空库初始状态」兜底）。
 	 */
 	findNearestSnapshot(entryAncestors: ReadonlyArray<string>): SnapshotRecord | undefined {
 		for (const id of entryAncestors) {

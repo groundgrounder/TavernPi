@@ -1,5 +1,5 @@
 -- ============================================================
--- 模板：inventory 物品栏（创作规划 §5.2 常用表模板）
+-- 模板：inventory 物品栏（常用表模板）
 -- 用途：持有者 ↔ 物品清单；玩家与 NPC 通用。
 --
 -- 抄改步骤同 char-status：把表名里的 PACKNAME 替换成你的包名
@@ -25,6 +25,6 @@ CREATE TABLE IF NOT EXISTS PACKNAME_inventory (
   PRIMARY KEY (owner_ref, item_id)
 );
 
--- 示例种子数据（INSERT OR IGNORE：按主键幂等，重复执行不产生重复行，§4.1 seed 幂等纪律）：
+-- 示例种子数据（INSERT OR IGNORE：按主键幂等，重复执行不产生重复行，seed 幂等纪律）：
 INSERT OR IGNORE INTO PACKNAME_inventory (owner_ref, item_id, name, count, category, equipped, note, turn_seq) VALUES
   ('player', 'myworld:bronze-token', '青铜令牌', 1, '任务物品', 0, '守陵人令牌，进出的凭证', 0);

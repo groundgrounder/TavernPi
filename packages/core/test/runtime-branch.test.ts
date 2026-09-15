@@ -1,4 +1,4 @@
-// runtime 纯函数单测（§6.3 打回重写 userEntryId 修正）：findUserEntryOnBranch。
+// runtime 纯函数单测（打回重写 userEntryId 修正）：findUserEntryOnBranch。
 // 背景：打回重写后原 u_N 与新 u_N' 同 parentId（同挂 a_{N-1}），find-first 会误中旧稿；
 // 从最终 leaf 沿 parentId 上溯找第一个 user entry 才能命中新稿所在分支。
 

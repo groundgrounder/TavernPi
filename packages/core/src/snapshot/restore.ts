@@ -1,4 +1,4 @@
-// 原子恢复（§3.1 / 技术路线 §6 快照原子性）。
+// 原子恢复（快照原子性）。
 // 恢复语义：清理崩溃残留 tmp → 关闭连接 → 显式清除 WAL/SHM 残留 → dump 先写临时文件再
 // rename 原子替换 story.db → 重连。
 // 「重开并返回新 StoryDb」vs「同对象重绑」取舍：
@@ -73,7 +73,7 @@ export function restoreSnapshot(storyDb: StoryDb, dump: Uint8Array): StoryDb {
 }
 
 /**
- * 空库初始状态兜底（§3.1：祖先链无快照 / 导航到根级 user 消息 newLeafId=null 时，
+ * 空库初始状态兜底（祖先链无快照 / 导航到根级 user 消息 newLeafId=null 时，
  * 且故事尚无历史——turn_log 为空。有历史的无快照属外部损伤，见 hooks.ts 的拒绝逻辑）。
  * 语义 = 新迁移的干净库 + 默认 clock（与 fork 空链初始状态一致）。
  */

@@ -1,23 +1,23 @@
-// M4 交互 CLI（人工验收入口，创作规划 §6.3 / §6.4 / §7-M4）：story 阶段 + stylize 叙事循环。
+// M4 交互 CLI（人工验收入口）：story 阶段 + stylize 叙事循环。
 //
 // 与 m3-cli 的关系：命令/LineQueue/fork 重建全同，差异是 createStoryRuntime 传入
-// `npc: { enabled: true }, story: { enabled: true }`（§6.3 场景分析 + 轻检/打回 + 全统筹）；
-// `--stylize`/`--style` 开启 §6.4 润色。每轮打印 story/stylize 阶段报告。
-// 目的：验收 §6.3 契约——场景卡驱动 npc 调度与 data 时间建议、规则层轻检 + LLM 审查打回重写、
-// 超限放行（turn_log.warnings + data strictDrop）、全统筹批注下一轮注入；§6.4 stylize 零事实漂移。
+// `npc: { enabled: true }, story: { enabled: true }`（场景分析 + 轻检/打回 + 全统筹）；
+// `--stylize`/`--style` 开启润色。每轮打印 story/stylize 阶段报告。
+// 目的：验收契约——场景卡驱动 npc 调度与 data 时间建议、规则层轻检 + LLM 审查打回重写、
+// 超限放行（turn_log.warnings + data strictDrop）、全统筹批注下一轮注入；stylize 零事实漂移。
 // 接线（app 层只消费 core API）：
-//   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createStoryRuntime（§10.2 API 面 + npc/story/stylize）
+//   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createStoryRuntime（API 面 + npc/story/stylize）
 //     ├── story 阶段（场景分析 → 场景卡；主叙事后轻检/打回；每 K 轮或 major_event 全统筹）
 //     ├── 主叙事 AgentSession（零 DB 工具，before_agent_start 每轮注入 DB 摘要 + 预演 + 场景卡 +
 //     │      统筹批注 + 打回意见）
 //     ├── npc 阶段（场景卡驱动在场/离线名单 → 在场预演 ×N 并行 + 离线批量推演）
 //     ├── stylize（可选，审查通过后、data 前）
 //     └── runDataStage（data subagent：submit_changeset 单输出工具 + 重试/补齐/事件流/strictDrop）
-//   eventLog = pipeline-events.jsonl（故事目录内）；settings = ~/.tavernpi/settings.json（§6.6）。
+//   eventLog = pipeline-events.jsonl（故事目录内）；settings = ~/.tavernpi/settings.json。
 //
 // 关键决策（与 m3-cli 一致，详见 core pipeline/runtime.ts 文件头）：
 // - 快照绑定本轮 leaf（最终 assistant entry），与 turn_log 同一 id；
-// - data 成功才拍快照（§6.1），失败轮记 data_status.failed、下轮补齐；
+// - data 成功才拍快照，失败轮记 data_status.failed、下轮补齐；
 // - story 缺省关闭 → 形态与 m3 完全一致；m4 显式开启；
 // - fork 流程：createBranchedSession → forkStoryDb → dispose 旧运行态 → 新故事目录重建
 //   StoryRuntime（settings/prompts/eventLog/npc/story/stylize 配置重新传入）。
@@ -147,7 +147,7 @@ function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: 
 	} else if (result.restoredTurnSeq !== undefined) {
 		console.log(`> 恢复成功: turn${result.restoredTurnSeq}（entry ${result.restoredEntryId}）`);
 	} else {
-		console.log("> 恢复成功（空库兜底，§3.1）");
+		console.log("> 恢复成功（空库兜底）");
 	}
 	console.log(`> 当前 clock: ${clock?.current_time ?? "(未初始化)"}，events: ${events.length} 行`);
 }
@@ -181,12 +181,12 @@ function printHelp(): void {
 			"  /help               本帮助",
 			"  空行                退出（不删故事目录，可 --resume 续写）",
 			"",
-			"story subagent（§6.3）：每轮最前场景分析出场景卡（驱动 npc 在场/离线名单与 data 时间建议）；",
+			"story subagent：每轮最前场景分析出场景卡（驱动 npc 在场/离线名单与 data 时间建议）；",
 			"  主叙事后规则层轻检 + LLM 审查，硬冲突打回重写（上限 1 次，超限放行 strictDrop）；",
 			"  每 10 轮或 major_event 触发全统筹（批注下一轮注入）。",
-			"npc subagent（§6.2）：场景卡驱动在场预演 ×N 并行 + 离线批量推演，delta 交 data 转写落库。",
-			"stylize（§6.4）：--stylize 开启润色（只改文风不动事实，零漂移抽查，失败回退原文）。",
-			"data subagent（§6.1）：每轮叙事后自动抽取落库；失败会重试并在下轮补齐，不阻塞叙事。",
+			"npc subagent：场景卡驱动在场预演 ×N 并行 + 离线批量推演，delta 交 data 转写落库。",
+			"stylize：--stylize 开启润色（只改文风不动事实，零漂移抽查，失败回退原文）。",
+			"data subagent：每轮叙事后自动抽取落库；失败会重试并在下轮补齐，不阻塞叙事。",
 			"事件流留痕见故事目录 pipeline-events.jsonl。",
 		].join("\n"),
 	);
@@ -200,7 +200,7 @@ function printTurn(report: TurnResult): void {
 		const onstageIds = report.npc.onstageNpcIds;
 		const offIds = report.npc.offscreenTriggeredIds;
 		console.log(
-			`--- npc 阶段（§6.2） ---\n在场预演: ${onstageIds.length} 个（${onstageIds.length > 0 ? onstageIds.join(", ") : "无"}）| 离线推演: ${offIds.length} 个（${offIds.length > 0 ? `${offIds.join(", ")} → ${report.npc.offscreenDeltas.length} deltas` : "无"}）`,
+			`--- npc 阶段 ---\n在场预演: ${onstageIds.length} 个（${onstageIds.length > 0 ? onstageIds.join(", ") : "无"}）| 离线推演: ${offIds.length} 个（${offIds.length > 0 ? `${offIds.join(", ")} → ${report.npc.offscreenDeltas.length} deltas` : "无"}）`,
 		);
 	}
 	if (report.story) {
@@ -208,15 +208,15 @@ function printTurn(report: TurnResult): void {
 		const overseeText =
 			report.oversee === undefined ? "未触发" : report.oversee === null ? "触发但失败" : "触发";
 		console.log(
-			`--- story 阶段（§6.3） ---\n场景卡: ${s.sceneFallback ? "fallback（确定性兜底）" : "ok"} | 硬冲突: ${s.hardConflicts.length} | 报疑: ${s.suspicions.length} | 审查 findings: ${s.reviewFindings.length} | 重写: ${s.revisions} 次${s.releasedWithWarnings ? " | 超限放行（strictDrop）" : ""} | 全统筹: ${overseeText}`,
+			`--- story 阶段 ---\n场景卡: ${s.sceneFallback ? "fallback（确定性兜底）" : "ok"} | 硬冲突: ${s.hardConflicts.length} | 报疑: ${s.suspicions.length} | 审查 findings: ${s.reviewFindings.length} | 重写: ${s.revisions} 次${s.releasedWithWarnings ? " | 超限放行（strictDrop）" : ""} | 全统筹: ${overseeText}`,
 		);
 	}
 	if (report.stylize) {
 		console.log(
-			`--- stylize（§6.4） ---\n${report.stylize.applied ? "✓ 已润色" : "✗ 回退原文"}${report.stylize.drift ? `，drift: ${report.stylize.drift.join("; ")}` : ""}`,
+			`--- stylize ---\n${report.stylize.applied ? "✓ 已润色" : "✗ 回退原文"}${report.stylize.drift ? `，drift: ${report.stylize.drift.join("; ")}` : ""}`,
 		);
 	}
-	console.log("--- data 落库（§6.1） ---");
+	console.log("--- data 落库 ---");
 	if (report.data.ok) {
 		const a = report.data.applied;
 		console.log(
@@ -224,7 +224,7 @@ function printTurn(report: TurnResult): void {
 		);
 	} else {
 		console.log(`✗ 失败（attempts=${report.data.attempts}）: ${truncate(report.data.error, 300)}`);
-		console.log(`  本轮快照跳过，下轮将补齐（§6.1）`);
+		console.log(`  本轮快照跳过，下轮将补齐`);
 	}
 	console.log(`--- 快照: ${report.snapshotTaken ? "已拍" : "跳过"} ---`);
 	if (report.consecutiveDataFailures > 0) {
@@ -405,10 +405,10 @@ export async function main(argv: readonly string[]): Promise<void> {
 		snapshotsDb: openSnapshotsDb(snapshotsDbPath(dbPath)),
 	};
 
-	// 模型配置（§6.6）与提示词分层（§6.5）：全局层默认启用，包/故事层由后续卡包系统注入。
+	// 模型配置与提示词分层：全局层默认启用，包/故事层由后续卡包系统注入。
 	const { settings, warnings: settingsWarnings } = loadSettings();
 	const prompts: PromptLayerDirs = { globalDir: defaultGlobalPromptsDir() };
-	// ModelRuntime 共享实例（并行纪律：多 subagent session 共享凭证/模型，技术路线 §3.2）。
+	// ModelRuntime 共享实例（并行纪律：多 subagent session 共享凭证/模型）。
 	const modelRuntime = await ModelRuntime.create();
 	const eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"));
 
@@ -444,7 +444,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 		...runtimeExtras(ctx),
 	});
 	console.log(
-		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具，§6.0）`,
+		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具）`,
 	);
 
 	console.log("\n输入行动/对话开始叙事；斜杠命令见 /help；空行退出。");

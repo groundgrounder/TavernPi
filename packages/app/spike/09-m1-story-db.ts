@@ -1,6 +1,6 @@
-// M1-P3：§3.0 契约故事驱动集成验收（真实 LLM 轮次 + 真实 pi session 树 + core DB/快照接线）。
+// M1-P3：契约故事驱动集成验收（真实 LLM 轮次 + 真实 pi session 树 + core DB/快照接线）。
 //
-// 验收场景（创作规划 §3.0 / §7 M1）：
+// 验收场景（M1）：
 //   A. 回溯一致：navigateTree 回溯后 DB 与时钟 = 该节点快照态；
 //   B. 回溯后再前进：跳转点写新分支后，navigateTree 前进到原主线 → DB 恢复原线状态，snapshots.db 不动；
 //   C. fork 独立：pi fork 机制 + forkStoryDb 初始化新故事，写新事件后原故事 DB 不受影响；

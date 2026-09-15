@@ -1,4 +1,4 @@
-// DB 摘要渲染（§5.2 读取渲染由 harness 负责）：把故事 DB 的权威事实渲染成紧凑确定性文本，
+// DB 摘要渲染（读取渲染由 harness 负责）：把故事 DB 的权威事实渲染成紧凑确定性文本，
 // 供 before_agent_start 注入主叙事系统提示（{{db_summary}}）与 data subagent 的 userPrompt。
 //
 // 内容：当前故事时间、玩家位置路径、地点树、NPC 表（特征前 5 + salience 最高 3 条记忆）、
@@ -44,7 +44,7 @@ function renderLocationPath(location: LocationRow, locations: LocationRow[]): st
 	return `${names.join(" > ")}（地点 #${location.id}）`;
 }
 
-/** 渲染故事 DB 权威摘要（§5.2）。recentEvents 控制近期事件条数（默认 10）。 */
+/** 渲染故事 DB 权威摘要。recentEvents 控制近期事件条数（默认 10）。 */
 export function renderDbSummary(storyDb: StoryDb, opts: { recentEvents?: number } = {}): string {
 	const reader = storyDb.reader;
 	const recentEvents = opts.recentEvents ?? 10;

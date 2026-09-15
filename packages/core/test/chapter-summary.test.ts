@@ -1,4 +1,4 @@
-// 章节摘要 compaction（§3.0/§3.1）+ /swipe（§3.0 重骰）单测。
+// 章节摘要 compaction + /swipe（重骰）单测。
 // 覆盖：extractSwallowedMessages / buildChapterSummaryUserPrompt / runChapterSummary（成功 + 失败回退 undefined）；
 // compact 钩子接线（session.compact() + 桩 executor：捕获输入含被吞并区段 + DB 摘要；返回 CompactionResult 形状正确；
 // 失败回退 undefined + warning）；swipe 边界（无 user 消息抛错））。
