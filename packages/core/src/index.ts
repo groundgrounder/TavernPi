@@ -8,6 +8,13 @@
 // 按分组（导出注释）：故事生命周期 / 带模式过滤的 DB 查询（DbView）/ 受信任写入 /
 // 提示词分层管理 / agent 模型配置（settings）/ 模式管理（mode/setMode/MODE_PRESETS）/
 // pipeline 事件流 / 轮中交互通道 / assist。
+//
+// 收窄原则（M6 后复核）：本文件只导出「外部消费者要用的能力」与「跨包共享的契约类型」。
+// 阶段内部实现不在此列——各 subagent 的 runner（run*）、渲染器（render*）、提交 schema
+// （*ZodSchema / *_JSON_SCHEMA / *_OUTPUT_TOOL_NAME）、阶段配置类型（*StageOptions 等）、
+// 内核 schema 常量（CORE_*_SQL / CORE_MIGRATIONS）一律留在 src/ 内，core 自己走相对路径引用。
+// 判据：新增导出前先看它是否服务于 studio 一类的外部消费者；「内部自用」不是理由。
+// 收窄是单向便宜的——加回来不影响兼容，删掉才要版本化，所以宁可窄。
 
 export const CORE_VERSION = "0.6.0";
 
@@ -20,8 +27,8 @@ export {
 	type StoryDb as StoryDbHandle,
 } from "./db/story-db.ts";
 
-// migration 框架
-export { CORE_MIGRATIONS, hasMigration, migrate, type Migration } from "./db/migrate.ts";
+// migration 框架（CORE_MIGRATIONS / hasMigration 属内核内部，不外承诺）
+export { migrate, type Migration } from "./db/migrate.ts";
 
 // 读写层
 export { DbReader, type NpcComposite } from "./db/reader.ts";
@@ -61,9 +68,6 @@ export {
 	type TurnLogRow,
 	type WorldStateRow,
 } from "./db/types.ts";
-
-// schema 常量（迁移测试/卡包工具可用）
-export { CORE_SCHEMA_SQL, CORE_V2_ALTERS, CORE_V2_SPATIAL_SQL, CORE_V3_DATA_STATUS_SQL } from "./db/schema.ts";
 
 // 快照管理器（★）
 export {
@@ -120,11 +124,11 @@ export {
 	type PromptLayerDirs,
 } from "./prompts/loader.ts";
 
-// subagent 运行时（总则）
+// subagent 运行时（runSubagent 是外部注入桩执行器的入口，属对外能力；
+// SubagentOutputTool 是内部输出工具协议，不外承诺）
 export {
 	runSubagent,
 	SubagentOutputError,
-	type SubagentOutputTool,
 	type SubagentResult,
 	type SubagentRunOptions,
 	type SubagentUsage,
@@ -147,11 +151,9 @@ export {
 	type TavernSettings,
 } from "./settings.ts";
 
-// data subagent 变更集
+// data subagent 变更集（受信任写入的载荷契约；提交侧 zod/json-schema 属内部）
 export {
 	applyChangeset,
-	CHANGELOG_JSON_SCHEMA,
-	changesetZodSchema,
 	filterConflictingItems,
 	validateChangesetSemantics,
 	type ApplySummary,
@@ -159,93 +161,17 @@ export {
 	type ChangesetProblem,
 } from "./pipeline/changeset.ts";
 
-// DB 摘要渲染
-export { renderDbSummary } from "./pipeline/db-summary.ts";
-
-// data subagent 编排
+// story 阶段：对外保留场景卡契约、语义校验入口、场景分析入口与确定性兜底卡；
+// 其余（子 runner / 提交 schema / 场景卡渲染器 / 阶段配置类型）属内核内部。
 export {
-	DATA_OUTPUT_TOOL_NAME,
-	runDataStage,
-	type DataStageInput,
-	type DataStageOptions,
-	type DataStageOutcome,
-} from "./pipeline/data-stage.ts";
-
-// npc subagent（场景规划 / 在场预演 / 离线推演 / 渲染器 / 簿记键）
-// isReservedWorldStateKey 从 changeset 重导出：sys_ 前缀命名空间是 npc 簿记键的权威判定
-//（data 禁写内核保留键，见 changeset.ts），归属 npc 节更贴合其用途。
-export { isReservedWorldStateKey } from "./pipeline/changeset.ts";
-export {
-	OFFSCREEN_LAST_TURN_PREFIX,
-	OFFSCREEN_OUTPUT_TOOL_NAME,
-	ONSTAGE_OUTPUT_TOOL_NAME,
-	computeScenePlan,
-	offscreenLastTurnKey,
-	renderOffscreenDeltasForData,
-	renderRehearsals,
-	runOffscreenBatch,
-	runOnstageRehearsals,
-	type NpcRehearsal,
-	type NpcStageOptions,
-	type OffscreenBatch,
-	type OffscreenDelta,
-	type ScenePlan,
-} from "./pipeline/npc-stage.ts";
-
-// story subagent（场景分析 / 规则层轻检 / LLM 审查 / 全统筹 / 渲染器）
-export {
-	OVERSEE_JSON_SCHEMA,
-	OVERSEE_OUTPUT_TOOL_NAME,
-	REVIEW_JSON_SCHEMA,
-	REVIEW_OUTPUT_TOOL_NAME,
-	SCENE_CARD_JSON_SCHEMA,
-	SCENE_OUTPUT_TOOL_NAME,
 	buildFallbackSceneCard,
-	INPUT_VALIDITY_INSTRUCTIONS,
-	overseeZodSchema,
-	renderOverseeNote,
-	renderRevisionRequest,
-	renderSceneCardForNarrator,
-	reviewZodSchema,
-	runOversee,
-	runReview,
-	runRuleChecks,
 	runSceneAnalysis,
-	sceneCardZodSchema,
 	validateSceneCard,
-	type OverseeNote,
-	type ReviewFinding,
-	type RuleCheckInput,
-	type RuleCheckResult,
-	type SceneAnalysisResult,
 	type SceneCard,
-	type StoryStageOptions,
 } from "./pipeline/story-stage.ts";
 
-// stylize（默认关闭的可选阶段；零事实漂移抽查）
-export {
-	STYLIZE_JSON_SCHEMA,
-	STYLIZE_OUTPUT_TOOL_NAME,
-	runStylize,
-	stylizeFactCheck,
-	stylizeZodSchema,
-	type StylizeOptions,
-	type StylizeOutput,
-} from "./pipeline/stylize-stage.ts";
-
-// 章节摘要 compaction（session_before_compact 钩子生成章节摘要替换默认摘要）
-export {
-	CHAPTER_SUMMARY_INSTRUCTIONS_TEXT,
-	CHAPTER_SUMMARY_JSON_SCHEMA,
-	CHAPTER_SUMMARY_OUTPUT_TOOL_NAME,
-	buildChapterSummaryUserPrompt,
-	chapterSummaryZodSchema,
-	extractSwallowedMessages,
-	runChapterSummary,
-	type ChapterSummaryInput,
-	type ChapterSummaryOptions,
-	type ChapterSummaryOutput,
-} from "./pipeline/chapter-summary.ts";
+// stylize：对外保留零事实漂移抽查（外部 UI 自查用）；阶段 runner 与提交 schema 属内部。
+export { stylizeFactCheck } from "./pipeline/stylize-stage.ts";
 
 // 带外顾问（会话式、只读、草稿制、无开关；冒险视图走 user-related 过滤）
 export {
@@ -282,7 +208,6 @@ export { loadPack, loadPacks, KERNEL_TABLE_WHITELIST } from "./pack/loader.ts";
 export { PackCache } from "./pack/cache.ts";
 export {
 	buildCollectionInjection,
-	estimateTokens,
 	type CollectionInjectionOptions,
 	type CollectionInjectionResult,
 } from "./pack/matcher.ts";
