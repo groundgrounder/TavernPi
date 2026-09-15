@@ -10,8 +10,8 @@
 //
 // 接线（app 层只消费 core API）：
 //   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createStoryRuntime（API 面 + mode + story/npc/stylize/data）
-// 全部 subagent 阶段默认全开——creation 下 story 开任意组合合法、survival 仅 stylize 可关、adventure 全开，
-//   全开组合在三种模式下均合法（build-time 校验不报错）。
+// subagent 开关：story/npc 恒开、data 无开关恒开；stylize 默认关——传 --style 才开，
+//   故事模式为 adventure 时强制开（预设要求全开，关闭会被 build-time 校验拒）。
 //
 // 坑（同 m4/m5-cli）：session.prompt 必须 await 完才能 navigateTree；退出不删故事目录。
 
@@ -34,6 +34,7 @@ import {
 	loadSettings,
 	openSnapshotsDb,
 	openStoryDb,
+	resolveStoryMode,
 	snapshotsDbPath,
 	storyDbPath as coreStoryDbPath,
 	type DbReader,
@@ -73,20 +74,23 @@ interface CliCtx {
 	settings: TavernSettings;
 	modelRuntime: ModelRuntime;
 	prompts: PromptLayerDirs;
-	/** 文风（--style；stylize 阶段全开，styleHint 供其使用）。 */
+	/** 文风（--style：启用 stylize 阶段，并把该值作为 styleHint 注入）。 */
 	style?: string;
 }
 
-/** 全开 combo：story/npc 必开，stylize 全开（adventure 须全开；creation/survival 全开也合法）。 */
-function runtimeExtras(ctx: CliCtx): {
+/** subagent 开关 combo：story/npc 必开。
+ *  stylize 仅在「传了 --style」或「故事模式为 adventure」时启用——后者是模式预设要求全开、不可关；
+ *  其余情况默认关闭，stylize 是可选润色阶段，开着就是每轮白付一次 LLM 调用与延迟。 */
+function runtimeExtras(ctx: CliCtx, storyDir: string): {
 	npc: { enabled: boolean };
 	story: { enabled: boolean };
 	stylize?: StylizeRuntimeOptions;
 } {
+	const stylizeOn = resolveStoryMode(undefined, storyDir) === "adventure" || ctx.style !== undefined;
 	return {
 		npc: { enabled: true },
 		story: { enabled: true },
-		stylize: { enabled: true, ...(ctx.style ? { styleHint: ctx.style } : {}) },
+		...(stylizeOn ? { stylize: { enabled: true, ...(ctx.style ? { styleHint: ctx.style } : {}) } } : {}),
 	};
 }
 
@@ -405,7 +409,7 @@ function printHelp(): void {
 			"模式：--mode 创造|生存|冒险 仅创建时生效；--resume 从 story.meta.json 恢复；提示符为 [模式]>。",
 			"输入校验：生存/冒险拒非 user 角色输入（命令 NPC/指定剧情结局）→ 打印 reason/suggestion，",
 			"  可用 /! 前缀强制提交（留痕 warning）；创造模式不校验。",
-			"story/npc/stylize/data 阶段全开（all-on 在三种模式下均满足预设）。",
+			"subagent：story/npc/data 恒开；stylize 默认关（--style 开启，adventure 强制开）。",
 		].join("\n"),
 	);
 }
@@ -485,7 +489,7 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 		prompts: ctx.prompts,
 		eventLog: createPipelineEventLog(join(newStoryDir, "pipeline-events.jsonl")),
 		onWarning: (m) => console.warn(`[warn] ${m}`),
-		...runtimeExtras(ctx),
+		...runtimeExtras(ctx, newStoryDir),
 	});
 	console.log(`> 已切换故事: ${oldSessionId} → ${newSessionId}`);
 	return newRuntime;
@@ -748,7 +752,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 		prompts,
 		eventLog,
 		onWarning: (m) => console.warn(`[warn] ${m}`),
-		...runtimeExtras(ctx),
+		...runtimeExtras(ctx, storyState.storyDir),
 	});
 	console.log(
 		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具）`,
