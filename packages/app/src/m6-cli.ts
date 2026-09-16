@@ -434,6 +434,9 @@ function printTurn(report: TurnResult): void {
 		console.log(
 			`· story: 场景卡 ${s.sceneFallback ? "fallback" : "ok"} · 硬冲突 ${s.hardConflicts.length} · 报疑 ${s.suspicions.length} · 重写 ${s.revisions} 次`,
 		);
+		// 冲突详情原先只落 turn_log.warnings，终端只给计数——玩家/作者看不到「到底哪里冲突」。
+		for (const c of s.hardConflicts) console.log(`    ! 硬冲突: ${c}`);
+		for (const w of s.suspicions) console.log(`    ? 报疑: ${w}`);
 		if (s.releasedWithWarnings) console.log("! 超限放行（story 阶段，冲突留痕）");
 	}
 	if (report.stylize) {
