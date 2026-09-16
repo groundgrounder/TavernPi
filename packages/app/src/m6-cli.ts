@@ -13,6 +13,10 @@
 // subagent 开关：story/npc 恒开、data 无开关恒开；stylize 默认关——传 --style 才开，
 //   故事模式为 adventure 时强制开（预设要求全开，关闭会被 build-time 校验拒）。
 //
+// 呈现：本文件只管**流程**（读行、分派命令、跑轮次），排版全部外包——
+//   `ui.ts` 管主题与写出口，`cli-view.ts` 管每屏的行怎么排，`cli-text-*.ts` 管措辞。
+//   本文件不出现 console.log：生成期活动行靠 `\r` 原地重绘，任何绕过 ui 的写都会把它撕裂。
+//
 // 坑（同 m4/m5-cli）：session.prompt 必须 await 完才能 navigateTree；退出不删故事目录。
 
 import { readFileSync } from "node:fs";
@@ -20,7 +24,7 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { Interface } from "node:readline";
 import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
-import type { SessionEntry, SessionTreeNode } from "@earendil-works/pi-coding-agent";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
 	assertValidRole,
 	buildAncestorChain,
@@ -45,13 +49,9 @@ import {
 	snapshotsDbPath,
 	storyDbPath as coreStoryDbPath,
 	validateSubagentSwitches,
-	type DbView,
 	type InteractionRequest,
-	type LocationRow,
-	type NpcRow,
-	type NpcTraitRow,
+	type PipelineEventLog,
 	type PromptLayerDirs,
-	type SnapshotRestoreResult,
 	type StoryMetaFile,
 	type StoryMode,
 	type StoryRuntime,
@@ -59,10 +59,26 @@ import {
 	type StylizeRuntimeOptions,
 	type TavernSettings,
 	type TurnResult,
-	type WorldPack,
 } from "@tavernpi/core";
 import { InputRejectedError } from "@tavernpi/core";
-import { EN, EN_ERRORS } from "./cli-text-en.ts";
+import {
+	modeLabel,
+	renderHelp,
+	renderInputRejected,
+	renderModels,
+	renderPacks,
+	renderPromptChain,
+	renderPromptLayerList,
+	renderRestore,
+	renderStartup,
+	renderStatus,
+	renderTree,
+	renderTurn,
+	type PromptChainRow,
+	type StageTimings,
+} from "./cli-view.ts";
+import { EN, EN_LABELS, EN_ERRORS } from "./cli-text-en.ts";
+import { Ui } from "./ui.ts";
 
 // ---------------------------------------------------------------------------
 // 常量与参数
@@ -85,6 +101,10 @@ interface CliCtx {
 	settings: TavernSettings;
 	modelRuntime: ModelRuntime;
 	prompts: PromptLayerDirs;
+	/** 展示层：app 层唯一的 stdout 出口。 */
+	ui: Ui;
+	/** pipeline 事件流（阶段耗时与活动行阶段词都从这里来）。fork / 重建 runtime 时换新文件并重新赋值。 */
+	eventLog: PipelineEventLog;
 	/** 文风（--style：启用 stylize 阶段，并把该值作为 styleHint 注入）。 */
 	style?: string;
 	/** subagent 开关（会话级，不持久化）：story/npc 默认开；stylize 缺省 undefined = 按规则自动。 */
@@ -135,16 +155,6 @@ function runtimeExtras(ctx: CliCtx, storyDir: string): {
 // 文本/转录工具（沿 m5-cli）
 // ---------------------------------------------------------------------------
 
-function messageText(message: { role: string; content?: unknown }): string {
-	if (Array.isArray(message.content)) {
-		return (message.content as Array<{ type: string; text?: string }>)
-			.filter((c) => c.type === "text")
-			.map((c) => c.text ?? "")
-			.join("");
-	}
-	return typeof message.content === "string" ? message.content : "";
-}
-
 function messageEntries(sessionManager: SessionManager): Array<Extract<SessionEntry, { type: "message" }>> {
 	return sessionManager.getEntries().filter((e) => e.type === "message") as Array<
 		Extract<SessionEntry, { type: "message" }>
@@ -164,20 +174,25 @@ function resolveTreeTarget(sessionManager: SessionManager, arg: string): Extract
 	return hit;
 }
 
-function truncate(text: string, max: number): string {
-	return text.length > max ? `${text.slice(0, max)}…` : text;
+/** 查目标条目：查不到只报一行、不掀掉整个会话（手滑打错序号不该结束这一局）。
+ *  只吞「找条目」这一步的错误；后续 navigateTree / 重建 runtime 的故障照旧上抛——
+ *  真故障要响，不能混在「参数写错了」里面被咽掉。 */
+function treeTargetHint(
+	ui: Ui,
+	sessionManager: SessionManager,
+	arg: string,
+): Extract<SessionEntry, { type: "message" }> | undefined {
+	try {
+		return resolveTreeTarget(sessionManager, arg);
+	} catch (err) {
+		ui.line(ui.note(err instanceof Error ? err.message : String(err), "err"));
+		return undefined;
+	}
 }
 
 // ---------------------------------------------------------------------------
-// 呈现层工具（呈现美化：显示宽 / 模式文案 / 树形引导线 / 度量徽章）
+// 常量（显示名映射见 cli-text-en.ts 的 EN_LABELS；排版见 cli-view.ts）
 // ---------------------------------------------------------------------------
-
-/** 模式显示名（英文；中文版留给 GUI，见 cli-text-zh.ts）。 */
-const MODE_LABEL: Record<StoryMode, string> = {
-	creation: "creation",
-	survival: "survival",
-	adventure: "adventure",
-};
 
 /** 斜杠命令名（与 /help 一致；供 Tab 补全）。 */
 const COMMANDS = [
@@ -200,16 +215,6 @@ const COMMANDS = [
 	"/help",
 ] as const;
 
-/** 卡包条目类型的显示名（值域见 core 的 ENTRY_TYPES；未收录的原样显示）。
- *  英文下与原值相同；切中文时这里换成「角色 / 地点 / 物品 / 势力 / 剧情」。 */
-const ENTRY_TYPE_LABEL: Record<string, string> = {
-	character: "character",
-	location: "location",
-	object: "object",
-	faction: "faction",
-	plot: "plot",
-};
-
 /** 提示词角色清单（与 core/prompts/*.md 的文件名一一对应；/prompt 用它列出生效层）。 */
 const PROMPT_ROLES = [
 	"narrator",
@@ -226,85 +231,34 @@ const PROMPT_ROLES = [
 	"assist_adventure",
 ] as const;
 
-/** 会话条目类型 → 树形展示的角色标签；非消息条目给平实英文标签。 */
-const ENTRY_ROLE_LABEL: Record<string, string> = {
-	custom: "custom",
-	custom_message: "custom message",
+/** 事件角色 → 每轮报告里的阶段桶（耗时可归并的角色）。
+ *  刻意不含 `narrator`（它的 durationMs 是**整轮**墙钟，不是主叙事阶段耗时）与 `pack`（检索）。 */
+const STAGE_BUCKET: Record<string, keyof StageTimings> = {
+	story_scene: "story",
+	story_review: "story",
+	story_oversee: "story",
+	npc_onstage: "npc",
+	npc_offscreen: "npc",
+	stylize: "stylize",
+	data: "data",
 };
 
-/** 故事树可见条目类型（其余如模型/思考变更等簿记条目透视隐藏，不破坏缩进）。 */
-const STORY_TREE_TYPES = new Set<string>(["message", "compaction", "branch_summary", "custom", "custom_message"]);
-
-/** 单个字符的显示宽度（自写最小 wcwidth：CJK/全角按 2 列，控制字符 0，其余 1）。不依赖外部库。 */
-function charWidth(ch: string): number {
-	const code = ch.codePointAt(0)!;
-	if (code === 0) return 0;
-	if (code < 32 || (code >= 0x7f && code < 0xa0)) return 0;
-	// East Asian Wide / Fullwidth 区间：按 2 列排版，保证中文列表对齐。
-	if (
-		(code >= 0x1100 && code <= 0x115f) ||
-		(code >= 0x2e80 && code <= 0x303e) ||
-		(code >= 0x3041 && code <= 0x33ff) ||
-		(code >= 0x3400 && code <= 0x4dbf) ||
-		(code >= 0x4e00 && code <= 0x9fff) ||
-		(code >= 0xa000 && code <= 0xa4cf) ||
-		(code >= 0xa960 && code <= 0xa97f) ||
-		(code >= 0xac00 && code <= 0xd7a3) ||
-		(code >= 0xf900 && code <= 0xfaff) ||
-		(code >= 0xfe10 && code <= 0xfe19) ||
-		(code >= 0xfe30 && code <= 0xfe6f) ||
-		(code >= 0xff00 && code <= 0xff60) ||
-		(code >= 0xffe0 && code <= 0xffe6) ||
-		(code >= 0x1f300 && code <= 0x1faff) ||
-		(code >= 0x20000 && code <= 0x2fffd) ||
-		(code >= 0x30000 && code <= 0x3fffd)
-	) {
-		return 2;
+/** 事件角色 → 活动行里的阶段词。未收录的角色不改阶段（如 `pack` 检索、`narrator` 收尾事件）。 */
+function activityPhase(role: string): string | undefined {
+	switch (role) {
+		case "npc_onstage":
+		case "npc_offscreen":
+			return EN.activityNpc;
+		case "story_review":
+		case "story_oversee":
+			return EN.activityReview;
+		case "stylize":
+			return EN.activityStylize;
+		case "data":
+			return EN.activityData;
+		default:
+			return undefined;
 	}
-	return 1;
-}
-
-/** 文本的显示宽度（CJK 计 2；供对齐与截断）。 */
-function displayWidth(text: string): number {
-	let w = 0;
-	for (const ch of text) w += charWidth(ch);
-	return w;
-}
-
-/** 按显示宽度截断到 max：超出部分以省略号收尾；按码点走，绝不切断多字节字符。 */
-function truncateByWidth(text: string, max: number): string {
-	if (displayWidth(text) <= max) return text;
-	let w = 0;
-	let out = "";
-	for (const ch of text) {
-		const cw = charWidth(ch);
-		if (w + cw > max) break;
-		out += ch;
-		w += cw;
-	}
-	return `${out}…`;
-}
-
-/** 权重（0–1）映射为 5 格度量徽章，如 0.6 → ▰▰▰▱▱。 */
-function weightGauge(weight: number): string {
-	const clamped = Math.max(0, Math.min(1, weight));
-	const filled = Math.round(clamped * 5);
-	return "▰".repeat(filled) + "▱".repeat(5 - filled);
-}
-
-/** 从地点沿 parent_id 上溯解析父链（如「王城 > 庭院」）；未登记父名断链；无地点给 EN.unlocated。 */
-function locationChain(loc: LocationRow | undefined, byId: Map<number, LocationRow>): string {
-	if (!loc) return EN.unlocated;
-	const chain: string[] = [];
-	const seen = new Set<number>();
-	let cur: LocationRow | undefined = loc;
-	while (cur && !seen.has(cur.id)) {
-		seen.add(cur.id);
-		chain.push(cur.name);
-		cur = cur.parent_id === null ? undefined : byId.get(cur.parent_id);
-	}
-	chain.reverse();
-	return chain.join(" > ");
 }
 
 function readStoryMeta(storyDir: string): StoryMetaFile | undefined {
@@ -315,285 +269,78 @@ function readStoryMeta(storyDir: string): StoryMetaFile | undefined {
 	}
 }
 
+/** 当前时钟的展示串（启动事实块与 /status 同一口径）。 */
+function clockText(runtime: StoryRuntime): string | undefined {
+	const clock = runtime.storyState.storyDb.reader.getClock();
+	return clock ? `${clock.current_time} (${clock.calendar}/${clock.granularity})` : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// 生成期反馈
+// ---------------------------------------------------------------------------
+
+/**
+ * 跑一次生成（runTurn / swipe）并给出生成期反馈。
+ *
+ * 两路信号合到一行活动行上：**pipeline 事件流**给阶段词（谁在干活），
+ * **主叙事 session 的流式增量**给正文尾巴（读者只关心最新几个字）。
+ *
+ * 尾巴是临时的——它可能随后被改稿/重试丢弃，所以只画在活动行上、绝不进正式输出
+ * （正式正文只从 TurnResult.narrativeText 打一次，见 cli-view 的 renderTurn）。
+ * 失败原样抛出（调用方决定怎么呈现），活动行在 finally 里一定收掉。
+ *
+ * 已知边界：内核与 pi SDK 有零星直写 console.warn 的地方（如未配模型时的告警），
+ * 它们绕过 ui，会在活动行上留半行残迹——本层够不着，不为它去改全局 console。
+ */
+async function runWithFeedback(
+	runtime: StoryRuntime,
+	ctx: CliCtx,
+	run: () => Promise<TurnResult>,
+): Promise<void> {
+	const { ui, eventLog } = ctx;
+	const stageMs: StageTimings = {};
+	let phase: string = EN.activityThinking;
+	const setPhase = (next: string): void => {
+		if (next === phase) return;
+		phase = next;
+		ui.activity.setPhase(next, true);
+	};
+	const offEvents = eventLog.on((e) => {
+		const bucket = STAGE_BUCKET[e.role];
+		if (bucket !== undefined) stageMs[bucket] = (stageMs[bucket] ?? 0) + e.durationMs;
+		const next = activityPhase(e.role);
+		if (next !== undefined) setPhase(next);
+	});
+	// 只订主叙事 session：story/npc/stylize/data 各跑各的 session，增量不混进来。
+	const offStream = runtime.session.subscribe((event) => {
+		if (event.type !== "message_update") return;
+		if (event.assistantMessageEvent.type !== "text_delta") return;
+		setPhase(EN.activityWriting);
+		ui.activity.append(event.assistantMessageEvent.delta);
+	});
+	const startedAt = Date.now();
+	ui.activity.start(EN.activityThinking);
+	try {
+		const report = await run();
+		// 必须先停活动行再写报告：定时器还活着的话，下一次重绘会把报告最后一行擦掉。
+		ui.activity.stop();
+		ui.lines(renderTurn(ui, { report, durationMs: Date.now() - startedAt, stageMs }));
+	} finally {
+		ui.activity.stop();
+		offEvents();
+		offStream();
+	}
+}
+
 // ---------------------------------------------------------------------------
 // CLI 命令（沿 m5-cli，增 /mode /plot）
 // ---------------------------------------------------------------------------
 
-/** 会话条目 → 树行文本：消息给 `#轮号 [角色] 摘要`，compaction/分支摘要给 ◆ 摘要，其余给平实角色标签。 */
-function formatTreeEntry(entry: SessionEntry, currentId: string | null, msgIndex: Map<string, number>): string {
-	const isLeaf = entry.id === currentId;
-	let line: string;
-	if (entry.type === "message") {
-		const idx = msgIndex.get(entry.id) ?? "?";
-		line = `#${idx} [${entry.message.role}] ${truncateByWidth(messageText(entry.message), 40)}`;
-	} else if (entry.type === "compaction") {
-		line = `◆ ${EN.treeSummary} ${truncateByWidth(entry.summary, 40)}`;
-	} else if (entry.type === "branch_summary") {
-		line = `◆ ${EN.treeBranchSummary} ${truncateByWidth(entry.summary, 40)}`;
-	} else {
-		const role = ENTRY_ROLE_LABEL[entry.type] ?? entry.type;
-		line = `[${role}]`;
-	}
-	return isLeaf ? `▸ ${line} (${EN.treeCurrent})` : line;
-}
-
-/** 收集「故事树可见节点」：簿记条目（模型/思考变更等）透视展开，其可见后代提升到当前层（不增深）。 */
-function collectTreeNodes(nodes: SessionTreeNode[]): SessionTreeNode[] {
-	const out: SessionTreeNode[] = [];
-	for (const n of nodes) {
-		if (STORY_TREE_TYPES.has(n.entry.type)) out.push(n);
-		else out.push(...collectTreeNodes(n.children));
-	}
-	return out;
-}
-
-/** 递归渲染会话树：│ / ├─ / └─ 表达嵌套分支缩进；隐藏条目不占缩进层级。 */
-function renderTreeNodes(
-	nodes: SessionTreeNode[],
-	prefix: string,
-	isTop: boolean,
-	out: string[],
-	currentId: string | null,
-	msgIndex: Map<string, number>,
-): void {
-	const visible = collectTreeNodes(nodes);
-	for (const [i, node] of visible.entries()) {
-		const isLast = i === visible.length - 1;
-		const connector = isTop && visible.length === 1 ? "" : isLast ? "└─ " : "├─ ";
-		const entryText = formatTreeEntry(node.entry, currentId, msgIndex);
-		out.push(`${prefix}${connector}${entryText}`);
-		const childPrefix = isTop && visible.length === 1 ? "" : prefix + (isLast ? "   " : "│  ");
-		renderTreeNodes(node.children, childPrefix, false, out, currentId, msgIndex);
-	}
-}
-
-function printTree(sessionManager: SessionManager): void {
-	const tree = sessionManager.getTree();
-	const leafId = sessionManager.getLeafId();
-	// #轮号 与 /tree <序号> 导航对齐：按 messageEntries（同 resolveTreeTarget）过滤顺序编号。
-	const msgIndex = new Map<string, number>();
-	{
-		let idx = 0;
-		for (const e of sessionManager.getEntries()) {
-			if (e.type === "message") {
-				idx++;
-				msgIndex.set(e.id, idx);
-			}
-		}
-	}
-	// 当前 leaf 可能是簿记条目（如 model/thinking 变更），在故事树中不可见；
-	// 向上找到最近的可见祖先作为「当前」标记位，让 ▸（当前）仍可见。
-	let currentId: string | null = null;
-	{
-		let cur = leafId ? sessionManager.getEntry(leafId) : undefined;
-		while (cur && !STORY_TREE_TYPES.has(cur.type)) {
-			cur = cur.parentId ? sessionManager.getEntry(cur.parentId) : undefined;
-		}
-		currentId = cur?.id ?? null;
-	}
-	console.log(EN.treeTitle);
-	const rootNodes = collectTreeNodes(tree);
-	if (rootNodes.length === 0) {
-		console.log(EN.treeEmpty);
-		return;
-	}
-	const out: string[] = [];
-	renderTreeNodes(rootNodes, "", true, out, currentId, msgIndex);
-	console.log(out.join("\n"));
-}
-
-function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: ReturnType<typeof createStoryRuntime> extends Promise<infer T> ? T : never): void {
-	const clock = runtime.storyState.storyDb.reader.getClock();
-	const events = runtime.storyState.storyDb.reader.listEvents();
-	if (result === undefined) {
-		console.log(EN.restoreSkipped);
-	} else if (!result.ok) {
-		console.log(EN.restoreFailed(result.error ?? EN.restoreUnknown));
-	} else if (result.restoredTurnSeq !== undefined) {
-		console.log(EN.restoreOk(result.restoredTurnSeq, result.restoredEntryId ?? ""));
-	} else {
-		console.log(EN.restoreEmptyFallback);
-	}
-	console.log(EN.restoreClock(clock?.current_time ?? EN.unset, events.length));
-}
-
-function printPacks(packs: WorldPack[]): void {
-	if (packs.length === 0) {
-		console.log(EN.packsNone);
-		return;
-	}
-	console.log(EN.packsTitle);
-	for (const p of packs) {
-		const byType = new Map<string, number>();
-		for (const e of p.entries) byType.set(e.type, (byType.get(e.type) ?? 0) + 1);
-		const typeSummary = [...byType.entries()]
-			.map(([t, n]) => `${ENTRY_TYPE_LABEL[t] ?? t} ${n}`)
-			.join(EN.listSep);
-		console.log(EN.packsEntry(p.name, p.dir));
-		console.log(
-			EN.packsEntryLine(p.entries.length, typeSummary, p.hasCode ? EN.packsHasCode : EN.packsContentOnly),
-		);
-		if (p.story.title) {
-			console.log(
-				EN.packsStoryLine(
-					p.story.title,
-					p.story.calendar ?? "default calendar",
-					p.story.granularity ?? "default granularity",
-				),
-			);
-		}
-	}
-}
-
-function printNpcDetails(view: DbView, npc: NpcRow, npcNameById: Map<number, string>): void {
-	const comp = view.getNpc(npc.id);
-	// 越集防御：DbView 在 user-related 模式下对集合外 NPC 返回 undefined。
-	if (comp === undefined) return;
-	// 特征：同名单取最新一次演化（turn_seq 最大），权重 0–1 映射 5 格。
-	const traitByLatest = new Map<string, NpcTraitRow>();
-	for (const t of comp.traits) {
-		const cur = traitByLatest.get(t.trait);
-		if (!cur || t.turn_seq > cur.turn_seq) traitByLatest.set(t.trait, t);
-	}
-	for (const t of traitByLatest.values()) {
-		console.log(EN.npcTrait(t.trait, weightGauge(t.weight), t.weight.toFixed(1)));
-	}
-	// 关系：对房另一侧 id → 姓名，好感带符号。
-	for (const rel of comp.relations) {
-		const other = rel.npc_a === npc.id ? rel.npc_b : rel.npc_a;
-		const otherName = npcNameById.get(other) ?? `#${other}`;
-		const sign = rel.disposition >= 0 ? "+" : "";
-		console.log(EN.npcRelation(otherName, sign, rel.disposition));
-	}
-	// 记忆：条数 + 最近一条（turn_seq 最大）内容按显示宽截断。
-	if (comp.memories.length > 0) {
-		const recent = comp.memories.reduce((a, b) => (b.turn_seq > a.turn_seq ? b : a));
-		console.log(EN.npcMemory(comp.memories.length, truncateByWidth(recent.content, 30)));
-	}
-}
-
-function printStatus(runtime: StoryRuntime, ctx: CliCtx): void {
-	const reader = runtime.storyState.storyDb.reader;
-	// 走模式视图（与 /assist 同一套口径）：冒险（信息迷雾）下 DB 查看仅「与 user 相关」——
-	// 原先直接读 reader 全量，会把尚未接触的 NPC 连同其特征/关系/记忆一并列出来。
-	const view = createDbView(reader, MODE_PRESETS[runtime.mode].dbViewFilter);
-	const clock = view.getClock();
-	const events = view.listEvents();
-	const turns = view.getTurnLog();
-	const snaps = runtime.storyState.snapshotsDb.listSnapshots();
-	const dataStatus = view.listDataStatus();
-	const playerLoc = view.getPlayerLocation();
-	const locById = new Map<number, LocationRow>(view.listLocations().map((l) => [l.id, l]));
-	const npcs = view.listNpcs();
-	const npcNameById = new Map<number, string>(npcs.map((n) => [n.id, n.name]));
-
-	const time = clock ? `${clock.current_time} (${clock.calendar}/${clock.granularity})` : EN.unset;
-	const pos = locationChain(playerLoc, locById);
-
-	console.log(EN.statusTitle);
-	console.log(EN.statusLine(time, pos, MODE_LABEL[runtime.mode]));
-	if (npcs.length === 0) {
-		console.log(EN.statusNoNpc);
-	} else {
-		for (const npc of npcs) {
-			console.log(EN.statusNpc(npc.name, npc.id, npc.status, npc.current_location_name ?? EN.unlocated));
-			printNpcDetails(view, npc, npcNameById);
-		}
-	}
-	console.log("");
-	console.log(EN.statusCounts(turns.length, events.length, snaps.length, dataStatus.length));
-	const dirs = ctx.packDirs.length > 0 ? ctx.packDirs.join(", ") : EN.none;
-	const pinned = ctx.pinned.length > 0 ? EN.statusPinnedSuffix(ctx.pinned.join(", ")) : "";
-	console.log(EN.statusPacks(dirs, pinned));
-	console.log(EN.statusIds(runtime.sessionManager.getSessionId(), runtime.sessionManager.getLeafId() ?? ""));
-}
-
-function printHelp(): void {
-	console.log(
-		[
-			EN.helpTitle,
-			...EN.helpGroups,
-			"",
-			EN.helpKeys,
-			"",
-			EN.helpModeNote,
-			EN.helpForceNote,
-			EN.helpAgentNote,
-		].join("\n"),
-	);
-}
-
-function printTurn(report: TurnResult): void {
-	console.log(EN.turnHeader(report.turnSeq));
-	if (report.narrativeText.trim().length > 0) {
-		console.log(report.narrativeText.trim());
-		console.log("");
-	} else {
-		console.log(EN.turnEmptyNarrative);
-	}
-	// 系统信息行：`· ` 前缀；警告/错误用 `! ` 前缀。
-	if (report.collection) {
-		const c = report.collection;
-		console.log(
-			EN.turnCollection(
-				c.injected.length > 0 ? c.injected.join(", ") : EN.turnCollectionNone,
-				c.warnings.length > 0 ? EN.turnCollectionWarnings(c.warnings.join("; ")) : "",
-			),
-		);
-	}
-	if (report.npc) {
-		const onstage = report.npc.onstageNpcIds;
-		console.log(
-			EN.turnNpc(
-				onstage.length > 0 ? `${onstage.length} (${onstage.join(", ")})` : `${onstage.length}`,
-				report.npc.offscreenTriggeredIds.length,
-			),
-		);
-	}
-	if (report.story) {
-		const s = report.story;
-		console.log(
-			EN.turnReview(
-				s.sceneFallback ? EN.turnSceneFallback : EN.turnSceneOk,
-				s.hardConflicts.length,
-				s.suspicions.length,
-				s.revisions,
-			),
-		);
-		// 冲突详情原先只写进 turn_log，终端只有计数——看不到「到底哪里冲突」。
-		for (const c of s.hardConflicts) console.log(`    ! ${c}`);
-		for (const w of s.suspicions) console.log(`    ? ${w}`);
-		if (s.releasedWithWarnings) console.log(EN.turnReleasedNote);
-	}
-	if (report.stylize) {
-		console.log(
-			EN.turnStylize(
-				report.stylize.applied ? EN.turnStylized : EN.turnStylizeKept,
-				report.stylize.drift && report.stylize.drift.length > 0
-					? EN.turnDrift(report.stylize.drift.join("; "))
-					: "",
-			),
-		);
-	}
-	if (report.data.ok) {
-		const a = report.data.applied;
-		console.log(
-			EN.turnDataOk(
-				a.events,
-				a.newNpcs,
-				a.timeAdvanced ? EN.turnTimeAdvanced : EN.turnTimeUnchanged,
-				report.data.dropped && report.data.dropped.length > 0 ? EN.turnDropped(report.data.dropped.length) : "",
-			),
-		);
-	} else {
-		console.log(EN.turnDataFailed(report.data.attempts, truncate(report.data.error, 300)));
-	}
-	console.log(EN.turnSnapshot(report.snapshotTaken));
-}
-
 async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise<StoryRuntime> {
-	const { session, sessionManager, storyState } = runtime;
-	const target = resolveTreeTarget(sessionManager, arg);
+	const { sessionManager, storyState } = runtime;
+	const { ui } = ctx;
+	const target = treeTargetHint(ui, sessionManager, arg);
+	if (target === undefined) return runtime;
 	const truncateId = target.message.role === "user" ? (target.parentId ?? target.id) : target.id;
 	const chain = buildAncestorChain(sessionManager.getEntries(), target.id);
 	const oldSessionId = sessionManager.getSessionId();
@@ -602,14 +349,17 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 	const newFile = sessionManager.createBranchedSession(truncateId);
 	const newSessionId = sessionManager.getSessionId();
 	const newStoryDir = join(ctx.storiesRoot, newSessionId);
-	console.log(EN.branchedSession(newSessionId, newFile ?? EN.unset));
+	ui.line(ui.note(EN.branchedSession(newSessionId, newFile ?? EN.unset), "info"));
 
 	const forkResult = forkStoryDb(oldStoryState.snapshotsDb, chain, newStoryDir);
-	console.log(
-		EN.forkedStoryDb(
-			newStoryDir,
-			forkResult.storyDb.reader.listEvents().length,
-			forkResult.snapshotsDb.listSnapshots().length,
+	ui.line(
+		ui.note(
+			EN.forkedStoryDb(
+				newStoryDir,
+				forkResult.storyDb.reader.listEvents().length,
+				forkResult.snapshotsDb.listSnapshots().length,
+			),
+			"info",
 		),
 	);
 
@@ -627,6 +377,7 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 		storyDb: forkResult.storyDb,
 		snapshotsDb: forkResult.snapshotsDb,
 	};
+	ctx.eventLog = createPipelineEventLog(join(newStoryDir, "pipeline-events.jsonl"));
 	const newRuntime = await createStoryRuntime({
 		cwd: ctx.cwd,
 		sessionManager,
@@ -634,19 +385,20 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 		settings: ctx.settings,
 		modelRuntime: ctx.modelRuntime,
 		prompts: ctx.prompts,
-		eventLog: createPipelineEventLog(join(newStoryDir, "pipeline-events.jsonl")),
-		onWarning: (m) => console.warn(`[warn] ${m}`),
+		eventLog: ctx.eventLog,
+		onWarning: (m) => ui.warn(m),
 		...runtimeExtras(ctx, newStoryDir),
 	});
-	attachInteraction(newRuntime, ctx.queue);
-	console.log(EN.storySwitched(oldSessionId, newSessionId));
+	attachInteraction(newRuntime, ctx);
+	ui.line(ui.note(EN.storySwitched(oldSessionId, newSessionId), "ok"));
 	return newRuntime;
 }
 
 /** 轮中交互 handler：把 broker 的请求落到 readline 上（内置 confirm/choice/text 三种 kind）。
  *  卡包代码工具经 getInteractionBroker() 发起请求时走到这里；未挂 handler 时 broker 抛
  *  InteractionUnavailableError，由工具自行降级（不崩、不挂死）。 */
-async function readlineInteractionHandler(req: InteractionRequest, queue: LineQueue): Promise<unknown> {
+async function readlineInteractionHandler(req: InteractionRequest, ctx: CliCtx): Promise<unknown> {
+	const { queue, ui } = ctx;
 	switch (req.kind) {
 		case "confirm": {
 			const answer = (await queue.nextLine(EN.interactionConfirmPrompt(req.prompt))).trim().toLowerCase();
@@ -659,8 +411,8 @@ async function readlineInteractionHandler(req: InteractionRequest, queue: LineQu
 			if (!Array.isArray(options) || options.length === 0 || !options.every((o) => typeof o === "string")) {
 				throw new Error(EN.interactionBadChoice);
 			}
-			console.log(req.prompt);
-			options.forEach((opt: string, i: number) => console.log(`  [${i + 1}] ${opt}`));
+			ui.line(ui.note(req.prompt, "info"));
+			options.forEach((opt: string, i: number) => ui.line(ui.bullet(`[${i + 1}] ${opt}`)));
 			const line = (await queue.nextLine("> ")).trim();
 			const idx = Number(line) - 1;
 			if (!Number.isInteger(idx) || idx < 0 || idx >= options.length) {
@@ -676,8 +428,8 @@ async function readlineInteractionHandler(req: InteractionRequest, queue: LineQu
 }
 
 /** 给 runtime 的轮中交互 broker 挂 handler。每次重建 runtime 都要重挂——broker 是实例级的。 */
-function attachInteraction(runtime: StoryRuntime, queue: LineQueue): void {
-	runtime.interaction.registerHandler((req) => readlineInteractionHandler(req, queue));
+function attachInteraction(runtime: StoryRuntime, ctx: CliCtx): void {
+	runtime.interaction.registerHandler((req) => readlineInteractionHandler(req, ctx));
 }
 
 /** 以当前 ctx 重建 runtime：subagent 开关在创建时固化，改开关必须重建。
@@ -685,6 +437,7 @@ function attachInteraction(runtime: StoryRuntime, queue: LineQueue): void {
 async function rebuildRuntime(runtime: StoryRuntime, ctx: CliCtx): Promise<StoryRuntime> {
 	const { sessionManager, storyState } = runtime;
 	runtime.dispose();
+	ctx.eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"));
 	const rebuilt = await createStoryRuntime({
 		cwd: ctx.cwd,
 		sessionManager,
@@ -692,77 +445,104 @@ async function rebuildRuntime(runtime: StoryRuntime, ctx: CliCtx): Promise<Story
 		settings: ctx.settings,
 		modelRuntime: ctx.modelRuntime,
 		prompts: ctx.prompts,
-		eventLog: createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl")),
-		onWarning: (m) => console.warn(`[warn] ${m}`),
+		eventLog: ctx.eventLog,
+		onWarning: (m) => ctx.ui.warn(m),
 		...runtimeExtras(ctx, storyState.storyDir),
 	});
-	attachInteraction(rebuilt, ctx.queue);
+	attachInteraction(rebuilt, ctx);
 	return rebuilt;
 }
 
 async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Promise<StoryRuntime | undefined> {
 	const [cmd, ...rest] = line.slice(1).split(/\s+/);
 	const arg = rest.join(" ").trim();
+	const { ui } = ctx;
 	switch (cmd) {
 		case "tree": {
 			if (arg === "") {
-				printTree(runtime.sessionManager);
+				ui.lines(renderTree(ui, runtime.sessionManager));
 				return undefined;
 			}
-			const target = resolveTreeTarget(runtime.sessionManager, arg);
-			console.log(EN.treeNavigating(target.id, target.message.role));
-			const { session } = runtime;
-			if (session.isStreaming) {
-				console.log(EN.navigatingBusy);
+			const target = treeTargetHint(ui, runtime.sessionManager, arg);
+			if (target === undefined) return undefined;
+			if (runtime.session.isStreaming) {
+				ui.line(ui.note(EN.navigatingBusy, "warn"));
 				return undefined;
 			}
-			await session.navigateTree(target.id);
-			printRestoreResult(runtime.hooks.state.lastRestoreResult, runtime);
+			ui.line(ui.note(EN.treeNavigating(target.id, target.message.role), "info"));
+			await runtime.session.navigateTree(target.id);
+			const clock = runtime.storyState.storyDb.reader.getClock();
+			ui.lines(
+				renderRestore(
+					ui,
+					runtime.hooks.state.lastRestoreResult,
+					clock?.current_time ?? EN.unset,
+					runtime.storyState.storyDb.reader.listEvents().length,
+				),
+			);
 			return undefined;
 		}
 		case "fork": {
 			if (arg === "") {
-				console.log(EN.forkUsage);
+				ui.line(ui.note(EN.forkUsage, "warn"));
 				return undefined;
 			}
 			return cmdFork(arg, runtime, ctx);
 		}
-		case "status":
-			printStatus(runtime, ctx);
+		case "status": {
+			// 走模式视图（与 /assist 同一套口径）：冒险（信息迷雾）下 DB 查看仅「与 user 相关」。
+			const view = createDbView(runtime.storyState.storyDb.reader, MODE_PRESETS[runtime.mode].dbViewFilter);
+			ui.lines(
+				renderStatus(ui, {
+					view,
+					snapshotCount: runtime.storyState.snapshotsDb.listSnapshots().length,
+					mode: runtime.mode,
+					sessionId: runtime.sessionManager.getSessionId(),
+					entryId: runtime.sessionManager.getLeafId() ?? EN.unset,
+					packDirs: ctx.packDirs,
+					pinned: ctx.pinned,
+				}),
+			);
 			return undefined;
+		}
 		case "packs": {
 			if (ctx.packs === undefined) {
-				printPacks([]);
+				ui.lines(renderPacks(ui, []));
 			} else {
 				const { packs, warnings } = ctx.packs.cache.getPacks();
-				printPacks(packs);
-				for (const w of warnings) console.warn(`[warn] ${w}`);
+				ui.lines(renderPacks(ui, packs));
+				for (const w of warnings) ui.warn(w);
 			}
 			return undefined;
 		}
 		case "pin": {
 			if (arg === "") {
-				console.log(EN.pinUsage);
+				ui.line(ui.note(EN.pinUsage, "warn"));
 				return undefined;
 			}
 			if (!ctx.pinned.includes(arg)) ctx.pinned.push(arg);
-			console.log(`> pinned: [${ctx.pinned.join(", ")}]`);
+			ui.line(ui.note(EN.pinnedList(ctx.pinned.length > 0 ? ctx.pinned.join(EN.listSep) : EN.none), "ok"));
 			return undefined;
 		}
 		case "unpin": {
 			const idx = ctx.pinned.indexOf(arg);
 			if (idx >= 0) ctx.pinned.splice(idx, 1);
-			console.log(`> pinned: [${ctx.pinned.join(", ")}]`);
+			ui.line(ui.note(EN.pinnedList(ctx.pinned.length > 0 ? ctx.pinned.join(EN.listSep) : EN.none), "ok"));
 			return undefined;
 		}
 		case "reload": {
 			if (ctx.packs === undefined) {
-				console.log(EN.reloadNone);
+				ui.line(ui.note(EN.reloadNone, "warn"));
 				return undefined;
 			}
 			const { packs, warnings } = ctx.packs.cache.getPacks();
-			console.log(EN.packsReloaded(packs.map((p) => EN.packsReloadEntry(p.name, p.entries.length)).join(", ")));
-			for (const w of warnings) console.warn(`[warn] ${w}`);
+			ui.line(
+				ui.note(
+					EN.packsReloaded(packs.map((p) => EN.packsReloadEntry(p.name, p.entries.length)).join(EN.listSep)),
+					"ok",
+				),
+			);
+			for (const w of warnings) ui.warn(w);
 			return undefined;
 		}
 		case "prompt": {
@@ -774,115 +554,121 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			const storyDir = runtime.storyState.storyDir;
 			const dirs: PromptLayerDirs = { ...ctx.prompts, storyDir };
 			if (parts.length === 0) {
-				console.log(EN.promptLayers);
-				for (const role of PROMPT_ROLES) {
+				// 查询失败的角色单独标出，不让一个错吞掉整屏。
+				const rows: Array<{ role: string; layer?: string; error?: string }> = PROMPT_ROLES.map((role) => {
 					try {
-						console.log(`  ${role}: ${resolvePromptChain(dirs, role).effectiveLayer}`);
+						return { role, layer: resolvePromptChain(dirs, role).effectiveLayer };
 					} catch (err) {
-						console.log(EN.promptQueryFailed(role, err instanceof Error ? err.message : String(err)));
+						return { role, error: err instanceof Error ? err.message : String(err) };
 					}
-				}
+				});
+				ui.lines(renderPromptLayerList(ui, rows));
 				return undefined;
 			}
 			const [role, op, file] = parts as [string, string?, string?];
 			try {
 				assertValidRole(role);
 			} catch (err) {
-				console.log(`! ${err instanceof Error ? err.message : String(err)}`);
+				ui.line(ui.note(err instanceof Error ? err.message : String(err), "warn"));
 				return undefined;
 			}
 			if (op === undefined) {
 				const chain = resolvePromptChain(dirs, role);
-				console.log(EN.promptChain(role, chain.effectiveLayer));
-				for (const l of chain.layers) {
-					const mark = l.effective ? EN.promptEffectiveMark : "";
-					console.log(`  ${l.layer.padEnd(8)}${l.exists ? EN.promptChars(l.contentLength) : EN.promptMissing}${mark}`);
-					for (const p of l.paths) console.log(`      ${p}`);
-				}
+				const layers: PromptChainRow[] = chain.layers.map((l) => ({
+					layer: l.layer,
+					exists: l.exists,
+					contentLength: l.contentLength,
+					effective: l.effective,
+					paths: l.paths,
+				}));
+				ui.lines(renderPromptChain(ui, role, chain.effectiveLayer, layers));
 				return undefined;
 			}
 			if (op === "clear") {
 				clearStoryPromptOverride(storyDir, role);
-				console.log(EN.promptCleared(role));
+				ui.line(ui.note(EN.promptCleared(role), "ok"));
 				return undefined;
 			}
 			if (op === "load") {
 				if (file === undefined) {
-					console.log(EN.promptLoadUsage);
+					ui.line(ui.note(EN.promptLoadUsage, "warn"));
 					return undefined;
 				}
 				const abs = resolve(file);
 				const content = readFileSync(abs, "utf-8");
 				setStoryPromptOverride(storyDir, role, content);
-				console.log(EN.promptSet(role, content.length, abs));
-				console.log(EN.promptSetHint);
+				ui.lines([
+					ui.note(EN.promptSet(role, content.length, abs), "ok"),
+					ui.note(EN.promptSetHint, "info"),
+				]);
 				return undefined;
 			}
-			console.log(EN.promptUsage);
+			ui.line(ui.note(EN.promptUsage, "warn"));
 			return undefined;
 		}
 		case "write": {
 			// /write <json 文件> —— 受信任写入：按 Changeset 契约直写 story.db。
 			// 校验失败由 trustedWrite 抛中文错并保证零落库；此处只负责读文件与呈现结果。
 			if (arg === "") {
-				console.log(EN.writeUsage);
-				console.log(EN.writeHint);
+				ui.lines([ui.note(EN.writeUsage, "warn"), ui.note(EN.writeHint, "info")]);
 				return undefined;
 			}
 			try {
 				const abs = resolve(arg);
 				const raw = JSON.parse(readFileSync(abs, "utf-8")) as unknown;
 				const res = await runtime.trustedWrite(raw as Parameters<StoryRuntime["trustedWrite"]>[0]);
-				console.log(
-					EN.writeDone(res.turnSeq, res.snapshotTaken ? EN.yes : EN.no),
-				);
-				console.log(`  ${JSON.stringify(res.summary)}`);
+				ui.lines([
+					ui.note(EN.writeDone(res.turnSeq, res.snapshotTaken ? EN.yes : EN.no), "ok"),
+					ui.note(JSON.stringify(res.summary), "info"),
+				]);
 			} catch (err) {
-				console.log(EN.writeFailed(err instanceof Error ? err.message : String(err)));
+				ui.line(ui.note(EN.writeFailed(err instanceof Error ? err.message : String(err)), "err"));
 			}
 			return undefined;
 		}
 		case "agents": {
 			// /agents 查看；/agents <story|npc|stylize> <on|off> 设置（会话级，不持久化）。
 			// 改开关必须重建 runtime——subagent 选项在创建时固化。
+			const onOff = (b: boolean): string => (b ? EN.agentsOn : EN.agentsOff);
+			const storyDir = runtime.storyState.storyDir;
 			if (arg === "") {
-				const on = (b: boolean): string => (b ? EN.agentsOn : EN.agentsOff);
-				console.log(
-					EN.agentsTitle(
-						on(ctx.agents.story),
-						on(ctx.agents.npc),
-						on(stylizeEnabled(ctx, runtime.storyState.storyDir)),
-						MODE_LABEL[runtime.mode],
+				ui.lines([
+					ui.note(
+						EN.agentsTitle(
+							onOff(ctx.agents.story),
+							onOff(ctx.agents.npc),
+							onOff(stylizeEnabled(ctx, storyDir)),
+							EN_LABELS.mode[runtime.mode],
+						),
+						"info",
 					),
-				);
-				console.log(EN.agentsUsage);
+					ui.note(EN.agentsUsage, "info"),
+				]);
 				return undefined;
 			}
 			const [name, value] = arg.split(/\s+/);
 			if ((name !== "story" && name !== "npc" && name !== "stylize") || (value !== "on" && value !== "off")) {
-				console.log(EN.agentsBadArg("/agents <story|npc|stylize> <on|off>"));
+				ui.line(ui.note(EN.agentsBadArg("/agents <story|npc|stylize> <on|off>"), "warn"));
 				return undefined;
 			}
 			const next: CliCtx["agents"] = { ...ctx.agents, [name]: value === "on" };
-			const stylizeOn = name === "stylize" ? value === "on" : stylizeEnabled(ctx, runtime.storyState.storyDir);
+			const stylizeOn = name === "stylize" ? value === "on" : stylizeEnabled(ctx, storyDir);
 			const problems = validateSubagentSwitches(runtime.mode, {
 				story: next.story,
 				npc: next.npc,
 				stylize: stylizeOn,
 			});
 			if (problems.length > 0) {
-				console.log(EN.agentsRejected);
-				for (const p of problems) console.log(`    - ${p}`);
+				ui.line(ui.note(EN.agentsRejected, "warn"));
+				for (const p of problems) ui.line(ui.detail(p, "warn"));
 				return undefined;
 			}
 			ctx.agents = next;
 			const rebuilt = await rebuildRuntime(runtime, ctx);
-			const onOff = (b: boolean): string => (b ? EN.agentsOn : EN.agentsOff);
-			console.log(
-				EN.agentsApplied(
-					onOff(ctx.agents.story),
-					onOff(ctx.agents.npc),
-					onOff(stylizeEnabled(ctx, runtime.storyState.storyDir)),
+			ui.line(
+				ui.note(
+					EN.agentsApplied(onOff(ctx.agents.story), onOff(ctx.agents.npc), onOff(stylizeEnabled(ctx, storyDir))),
+					"ok",
 				),
 			);
 			return rebuilt;
@@ -890,72 +676,75 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 		case "models": {
 			// 角色清单与 core settings.ts 的 MODEL_ROLES 对应（那是未导出的内部常量，此处同步维护）。
 			const roles = ["narrator", "data", "story", "npc", "stylize", "chapter_summary", "assist"] as const;
-			console.log(EN.modelsTitle);
-			for (const role of roles) {
+			const rows = roles.map((role) => {
 				const ref = ctx.settings.models[role];
-				console.log(`  ${role.padEnd(16)}${ref ? `${ref.provider}/${ref.id}` : EN.modelsUnset}`);
-			}
+				return [role, ref ? `${ref.provider}/${ref.id}` : EN.modelsUnset] as const;
+			});
+			ui.lines(renderModels(ui, rows));
 			return undefined;
 		}
 		case "mode": {
 			if (arg === "") {
-				console.log(EN.modeCurrent(MODE_LABEL[runtime.mode], runtime.mode));
+				ui.line(ui.note(modeLabel(runtime.mode), "info"));
 				return undefined;
 			}
 			if (!MODE_SET.includes(arg as StoryMode)) {
-				console.log(EN.modeInvalid(arg, MODE_SET.map((m) => MODE_LABEL[m]).join(" / ")));
+				ui.line(
+					ui.note(EN.modeInvalid(arg, MODE_SET.map((m) => EN_LABELS.mode[m]).join(" / ")), "warn"),
+				);
 				return undefined;
 			}
 			try {
 				runtime.setMode(arg as StoryMode);
-				console.log(EN.modeSwitched(MODE_LABEL[arg as StoryMode]));
+				ui.line(ui.note(EN.modeSwitched(EN_LABELS.mode[arg as StoryMode]), "ok"));
 			} catch (err) {
-				console.log(EN.modeSwitchFailed(err instanceof Error ? err.message : String(err)));
+				ui.line(ui.note(EN.modeSwitchFailed(err instanceof Error ? err.message : String(err)), "err"));
 			}
 			return undefined;
 		}
 		case "plot": {
 			if (arg === "") {
-				console.log(EN.plotUsage);
+				ui.line(ui.note(EN.plotUsage, "warn"));
 				return undefined;
 			}
 			if (runtime.mode !== "creation") {
-				console.log(EN.plotWrongMode);
+				ui.line(ui.note(EN.plotWrongMode, "warn"));
 				return undefined;
 			}
 			const turnSeq = computeNextTurnSeq(runtime.storyState.storyDb);
 			const directive = runtime.storyState.storyDb.writer.insertDirective({ turnSeq, content: arg });
-			console.log(EN.plotWritten(directive.id, arg));
+			ui.line(ui.note(EN.plotWritten(directive.id, arg), "ok"));
 			return undefined;
 		}
 		case "swipe": {
 			// /swipe（重骰）：基于分支重生成最后一个 user 轮次，旧稿留树。
 			if (arg !== "") {
-				console.log(EN.swipeUsage);
+				ui.line(ui.note(EN.swipeUsage, "warn"));
 				return undefined;
 			}
 			try {
-				const report = await runtime.swipe();
-				printTurn(report);
+				await runWithFeedback(runtime, ctx, () => runtime.swipe());
 			} catch (err) {
-				console.log(EN.swipeFailed(err instanceof Error ? err.message : String(err)));
+				ui.line(ui.note(EN.swipeFailed(err instanceof Error ? err.message : String(err)), "err"));
 			}
 			return undefined;
 		}
 		case "compact": {
 			// /compact：章节摘要 compaction。
 			if (arg !== "") {
-				console.log(EN.compactUsage);
+				ui.line(ui.note(EN.compactUsage, "warn"));
 				return undefined;
 			}
 			try {
 				const result = await runtime.session.compact();
-				console.log(EN.compactDone(`${result.summary.slice(0, 120)}${result.summary.length > 120 ? "…" : ""}`));
-				console.log(EN.compactReplaced(result.tokensBefore));
+				ui.lines([
+					ui.note(EN.compactDone(`${result.summary.slice(0, 120)}${result.summary.length > 120 ? "…" : ""}`), "ok"),
+					ui.note(EN.compactReplaced(result.tokensBefore), "info"),
+				]);
 			} catch (err) {
 				const m = err instanceof Error ? err.message : String(err);
 				if (/Nothing to compact|Already compacted/i.test(m)) {
-					console.log(EN.compactSkipped(m));
+					ui.line(ui.note(EN.compactSkipped(m), "warn"));
 				} else {
 					throw err;
 				}
@@ -965,25 +754,27 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 		case "assist": {
 			// /assist：带外顾问，只读、草稿制、不进叙事流。输出为草稿，由用户决定是否作为输入发出。
 			if (arg === "") {
-				console.log(EN.assistUsage);
+				ui.line(ui.note(EN.assistUsage, "warn"));
 				return undefined;
 			}
 			try {
 				const reply = await runtime.assist.chat(arg);
-				console.log(`\n${EN.assistTitle}`);
-				console.log(EN.assistHint);
-				console.log(reply);
-				console.log("──────────────");
+				ui.line();
+				ui.line(ui.heading(EN.assistTitle));
+				ui.line(ui.note(EN.assistHint, "info"));
+				ui.line();
+				ui.line(reply);
+				ui.line(ui.paint("dim", "─".repeat(ui.width)));
 			} catch (err) {
-				console.log(EN.assistFailed(err instanceof Error ? err.message : String(err)));
+				ui.line(ui.note(EN.assistFailed(err instanceof Error ? err.message : String(err)), "err"));
 			}
 			return undefined;
 		}
 		case "help":
-			printHelp();
+			ui.lines(renderHelp(ui));
 			return undefined;
 		default:
-			console.log(EN.unknownCommand(cmd ?? ""));
+			ui.line(ui.note(EN.unknownCommand(cmd ?? ""), "warn"));
 			return undefined;
 	}
 }
@@ -995,9 +786,11 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 class LineQueue {
 	private readonly lines: string[] = [];
 	private readonly waiters: Array<(line: string) => void> = [];
+	private readonly ui: Ui;
 	private eof = false;
 
-	constructor(rl: Interface) {
+	constructor(rl: Interface, ui: Ui) {
+		this.ui = ui;
 		rl.on("line", (line) => {
 			const waiter = this.waiters.shift();
 			if (waiter) waiter(line);
@@ -1011,7 +804,8 @@ class LineQueue {
 	}
 
 	async nextLine(prompt: string): Promise<string> {
-		process.stdout.write(prompt);
+		// 走 ui：先把生成期活动行让出这一行，再写提示符（绕过 ui 写会把活动行撕成两截）。
+		this.ui.prompt(prompt);
 		if (this.lines.length > 0) return this.lines.shift()!;
 		if (this.eof) return "";
 		return new Promise<string>((resolve) => {
@@ -1053,6 +847,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
 }
 
 export async function main(argv: readonly string[]): Promise<void> {
+	const ui = new Ui();
 	const args = parseArgs(argv);
 	const storiesRoot = args.root ?? defaultStoriesRoot();
 	const cwd = repoRoot;
@@ -1060,6 +855,8 @@ export async function main(argv: readonly string[]): Promise<void> {
 	let sessionManager: SessionManager;
 	let storyState: StoryState;
 	let packDirs = args.pack.map((d) => resolve(d));
+	/** 续写时模式来自 story.meta.json（不是命令行）——启动事实块后提示一句，让来源可见。 */
+	let modeFromMeta = false;
 
 	if (args.resume !== undefined) {
 		// 续写：session 文件恢复；mode 从 story.meta.json 恢复（runtime 解析）；subagent 开关全开满足各模式预设。
@@ -1072,9 +869,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 			snapshotsDb: openSnapshotsDb(snapshotsDbPath(dbPath)),
 		};
 		const meta = readStoryMeta(storyState.storyDir);
-		if (meta?.mode !== undefined) {
-			console.log(EN.modeRestoredFromMeta(meta.mode));
-		}
+		modeFromMeta = meta?.mode !== undefined;
 		if (packDirs.length === 0 && meta !== undefined) {
 			packDirs = meta.packs.map((p) => p.dir);
 		}
@@ -1083,11 +878,6 @@ export async function main(argv: readonly string[]): Promise<void> {
 		const created = await createStory({ storiesRoot, packDirs, cwd, ...(args.mode !== undefined ? { mode: args.mode } : {}) });
 		sessionManager = created.sessionManager;
 		storyState = created.storyState;
-		const clock = storyState.storyDb.reader.getClock();
-		console.log(EN.clockInit(clock?.current_time ?? EN.unset, clock?.calendar ?? "", clock?.granularity ?? ""));
-		if (created.packs.length > 0) {
-			console.log(EN.packsLoaded(created.packs.map((p) => p.name).join(EN.listSep)));
-		}
 	}
 	const sessionId = sessionManager.getSessionId();
 
@@ -1099,10 +889,6 @@ export async function main(argv: readonly string[]): Promise<void> {
 	};
 	const modelRuntime = await ModelRuntime.create();
 	const eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"));
-
-	console.log(EN.sessionId(sessionId));
-	console.log(EN.storyDir(storyState.storyDir));
-	for (const w of settingsWarnings) console.warn(`[warn] ${w}`);
 
 	const rl = createInterface({
 		input: process.stdin,
@@ -1132,7 +918,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 			return [[], cur];
 		},
 	});
-	const queue = new LineQueue(rl);
+	const queue = new LineQueue(rl, ui);
 
 	const pinned: string[] = [];
 	const ctx: CliCtx = {
@@ -1141,6 +927,8 @@ export async function main(argv: readonly string[]): Promise<void> {
 		settings,
 		modelRuntime,
 		prompts,
+		ui,
+		eventLog,
 		...(args.style !== undefined ? { style: args.style } : {}),
 		agents: { story: true, npc: true },
 		queue,
@@ -1159,10 +947,10 @@ export async function main(argv: readonly string[]): Promise<void> {
 		modelRuntime,
 		prompts,
 		eventLog,
-		onWarning: (m) => console.warn(`[warn] ${m}`),
+		onWarning: (m) => ui.warn(m),
 		...runtimeExtras(ctx, storyState.storyDir),
 	});
-	attachInteraction(runtime, queue);
+	attachInteraction(runtime, ctx);
 	// Ctrl+C：第一次请求退出（若当前轮正在生成，等它结束再退），第二次强制退出。
 	// 不接管的话 readline 只会把接口关掉——若此刻卡在几百秒的主叙事里，用户按了 Ctrl+C
 	// 既没有提示也不会退出，会以为进程挂了。
@@ -1170,34 +958,48 @@ export async function main(argv: readonly string[]): Promise<void> {
 	rl.on("SIGINT", () => {
 		sigintCount++;
 		if (sigintCount >= 2) {
-			console.log(EN.forceExit);
+			ui.line(ui.note(EN.forceExit, "warn"));
 			process.exit(130);
 		}
-		console.log(runtime.session.isStreaming ? EN.ctrlCGenerating : EN.ctrlCIdle);
+		ui.line(ui.note(runtime.session.isStreaming ? EN.ctrlCGenerating : EN.ctrlCIdle, "warn"));
 		rl.close();
 	});
-	console.log(EN.toolWhitelist(runtime.session.getActiveToolNames().join(", ")));
-	// 启动横幅：故事标题 + 模式名（adventure 追加 locked 徽章）。
-	const bannerMeta = readStoryMeta(storyState.storyDir);
-	const storyTitle = bannerMeta?.title ?? sessionManager.getSessionName() ?? EN.untitled;
-	const modeLabel = MODE_LABEL[runtime.mode];
-	const lockedBadge = runtime.mode === "adventure" ? EN.lockedBadge : "";
-	console.log(EN.banner(storyTitle, modeLabel, lockedBadge));
-	if (runtime.mode !== "creation") {
-		const modeInfo = runtime.mode === "adventure" ? EN.modeNoteLocked : EN.modeNoteNormal;
-		console.log(EN.modeNote(modeLabel, modeInfo));
-	}
 
-	console.log(`\n${EN.hint}`);
+	// 启动头部：故事标题 · 模式（adventure 追加锁定徽章）+ 事实块（会话/目录/时钟/包/工具）。
+	const bannerMeta = readStoryMeta(storyState.storyDir);
+	const loaded = ctx.packs?.cache.getPacks();
+	const packNames = loaded?.packs.map((p) => p.name).join(EN.listSep);
+	const toolNames = runtime.session.getActiveToolNames();
+	const clock = clockText(runtime);
+	ui.lines(
+		renderStartup(ui, {
+			story: bannerMeta?.title ?? sessionManager.getSessionName() ?? EN.untitled,
+			mode: EN_LABELS.mode[runtime.mode],
+			locked: runtime.mode === "adventure",
+			...(runtime.mode === "creation"
+				? {}
+				: { modeNote: runtime.mode === "adventure" ? EN.modeNoteLocked : EN.modeNoteNormal }),
+			sessionId,
+			storyDir: storyState.storyDir,
+			...(clock !== undefined ? { clock } : {}),
+			tools: toolNames.length > 0 ? toolNames.join(EN.listSep) : EN.toolsEmpty,
+			...(packNames !== undefined && packNames !== "" ? { packs: packNames } : {}),
+		}),
+	);
+	for (const w of settingsWarnings) ui.warn(w);
+	for (const w of loaded?.warnings ?? []) ui.warn(w);
+	if (modeFromMeta) ui.line(ui.note(EN.modeRestoredFromMeta, "info"));
+	ui.line();
+	ui.line(ui.note(EN.hint, "info"));
+
 	try {
 		for (;;) {
-			const line = (await queue.nextLine(`[${MODE_LABEL[runtime.mode]}]> `)).trim();
+			const line = (await queue.nextLine(`[${EN_LABELS.mode[runtime.mode]}]> `)).trim();
 			if (line === "") break;
 			// /! 前缀：输入渠道校验强制提交（去前缀 + force:true）
 			if (line.startsWith("/! ")) {
 				const forcedInput = line.slice(2).trim();
-				const report = await runtime.runTurn(forcedInput, { force: true });
-				printTurn(report);
+				await runWithFeedback(runtime, ctx, () => runtime.runTurn(forcedInput, { force: true }));
 				continue;
 			}
 			if (line.startsWith("/")) {
@@ -1205,13 +1007,10 @@ export async function main(argv: readonly string[]): Promise<void> {
 				if (next !== undefined) runtime = next;
 			} else {
 				try {
-					const report = await runtime.runTurn(line);
-					printTurn(report);
+					await runWithFeedback(runtime, ctx, () => runtime.runTurn(line));
 				} catch (err) {
 					if (err instanceof InputRejectedError) {
-						console.log(EN.inputRejected(err.reason));
-						console.log(EN.inputSuggestion(err.suggestion));
-						console.log(EN.inputForceHint);
+						ui.lines(renderInputRejected(ui, err.reason, err.suggestion));
 					} else {
 						throw err;
 					}
@@ -1223,8 +1022,13 @@ export async function main(argv: readonly string[]): Promise<void> {
 		runtime.dispose();
 		runtime.storyState.storyDb.close();
 		runtime.storyState.snapshotsDb.close();
-		console.log(
-			`${EN.storyDirKept(runtime.storyState.storyDir)}\n${EN.resumeHint(`node packages/app/src/m6-cli.ts --resume ${runtime.sessionManager.getSessionFile()}`)}`,
+		ui.line();
+		ui.line(ui.note(EN.storyDirKept(runtime.storyState.storyDir), "info"));
+		ui.line(
+			ui.note(
+				EN.resumeHint(`node packages/app/src/m6-cli.ts --resume ${runtime.sessionManager.getSessionFile()}`),
+				"info",
+			),
 		);
 	}
 }
