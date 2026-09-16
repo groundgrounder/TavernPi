@@ -22,7 +22,9 @@ import type { Interface } from "node:readline";
 import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { SessionEntry, SessionTreeNode } from "@earendil-works/pi-coding-agent";
 import {
+	assertValidRole,
 	buildAncestorChain,
+	clearStoryPromptOverride,
 	computeNextTurnSeq,
 	createDbView,
 	createPipelineEventLog,
@@ -37,7 +39,9 @@ import {
 	openSnapshotsDb,
 	openStoryDb,
 	PackCache,
+	resolvePromptChain,
 	resolveStoryMode,
+	setStoryPromptOverride,
 	snapshotsDbPath,
 	storyDbPath as coreStoryDbPath,
 	validateSubagentSwitches,
@@ -170,6 +174,22 @@ const MODE_LABEL: Record<StoryMode, string> = {
 	survival: "生存",
 	adventure: "冒险",
 };
+
+/** 提示词角色清单（与 core/prompts/*.md 的文件名一一对应；/prompt 用它列出生效层）。 */
+const PROMPT_ROLES = [
+	"narrator",
+	"story_scene",
+	"story_review",
+	"story_oversee",
+	"npc_onstage",
+	"npc_offscreen",
+	"data",
+	"stylize",
+	"chapter_summary",
+	"assist_creation",
+	"assist_survival",
+	"assist_adventure",
+] as const;
 
 /** 会话条目类型 → 树形展示的角色标签；非消息条目尽量平实中文。 */
 const ENTRY_ROLE_LABEL: Record<string, string> = {
@@ -456,6 +476,7 @@ function printHelp(): void {
 			"  /reload            重新加载卡包（mtime 检测；校验失败回退上次成功快照 + warning）",
 			"  /agents            查看/设置 subagent 开关（/agents <story|npc|stylize> <on|off>）",
 			"  /models            查看各角色解析到的模型（配置见 ~/.tavernpi/settings.json）",
+			"  /prompt            查看提示词分层（/prompt [角色] [load <文件>|clear]）",
 			"  /mode              查看当前内核级模式（创造 / 生存 / 冒险）",
 			"  /mode <模式>         切换模式（catch 非法切换错；冒险锁定不可切）",
 			"  /plot <文本>         创造模式专属：写入剧情大纲指令（生存/冒险报错）",
@@ -648,6 +669,62 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			const { packs, warnings } = ctx.packs.cache.getPacks();
 			console.log(`> 已重载: ${packs.map((p) => `${p.name}(${p.entries.length} 条目)`).join(", ")}`);
 			for (const w of warnings) console.warn(`[warn] ${w}`);
+			return undefined;
+		}
+		case "prompt": {
+			// /prompt                     列出各角色的生效层
+			// /prompt <角色>               查看该角色的四层覆盖链（story > pack > global > builtin）
+			// /prompt <角色> load <文件>    用文件内容设置 story 层覆盖
+			// /prompt <角色> clear         清除 story 层覆盖
+			const parts = arg.split(/\s+/).filter((s) => s !== "");
+			const storyDir = runtime.storyState.storyDir;
+			const dirs: PromptLayerDirs = { ...ctx.prompts, storyDir };
+			if (parts.length === 0) {
+				console.log("--- 提示词生效层（story > pack > global > builtin）---");
+				for (const role of PROMPT_ROLES) {
+					try {
+						console.log(`  ${role}: ${resolvePromptChain(dirs, role).effectiveLayer}`);
+					} catch (err) {
+						console.log(`  ${role}: 查询失败（${err instanceof Error ? err.message : String(err)}）`);
+					}
+				}
+				return undefined;
+			}
+			const [role, op, file] = parts as [string, string?, string?];
+			try {
+				assertValidRole(role);
+			} catch (err) {
+				console.log(`! ${err instanceof Error ? err.message : String(err)}`);
+				return undefined;
+			}
+			if (op === undefined) {
+				const chain = resolvePromptChain(dirs, role);
+				console.log(`--- ${role} 覆盖链（生效层: ${chain.effectiveLayer}）---`);
+				for (const l of chain.layers) {
+					const mark = l.effective ? " *" : "";
+					console.log(`  ${l.layer}${mark}: ${l.exists ? `${l.contentLength} 字符` : "（无）"}`);
+					for (const p of l.paths) console.log(`      ${p}`);
+				}
+				return undefined;
+			}
+			if (op === "clear") {
+				clearStoryPromptOverride(storyDir, role);
+				console.log(`> 已清除 ${role} 的 story 层覆盖`);
+				return undefined;
+			}
+			if (op === "load") {
+				if (file === undefined) {
+					console.log("用法: /prompt <角色> load <文件路径>");
+					return undefined;
+				}
+				const abs = resolve(file);
+				const content = readFileSync(abs, "utf-8");
+				setStoryPromptOverride(storyDir, role, content);
+				console.log(`> 已设置 ${role} 的 story 层覆盖（${content.length} 字符，来源 ${abs}）`);
+				console.log("  提示：story 层优先于 pack/global/builtin；下一轮生效。");
+				return undefined;
+			}
+			console.log("用法: /prompt | /prompt <角色> | /prompt <角色> load <文件> | /prompt <角色> clear");
 			return undefined;
 		}
 		case "agents": {
