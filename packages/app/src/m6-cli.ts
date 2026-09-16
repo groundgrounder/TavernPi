@@ -199,6 +199,15 @@ const COMMANDS = [
 	"/help",
 ] as const;
 
+/** 卡包条目类型的中文名（值域见 core 的 ENTRY_TYPES；未收录的原样显示）。 */
+const ENTRY_TYPE_LABEL: Record<string, string> = {
+	character: "角色",
+	location: "地点",
+	object: "物品",
+	faction: "势力",
+	plot: "剧情",
+};
+
 /** 提示词角色清单（与 core/prompts/*.md 的文件名一一对应；/prompt 用它列出生效层）。 */
 const PROMPT_ROLES = [
 	"narrator",
@@ -395,28 +404,28 @@ function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: 
 	const clock = runtime.storyState.storyDb.reader.getClock();
 	const events = runtime.storyState.storyDb.reader.listEvents();
 	if (result === undefined) {
-		console.log("> 恢复结果: 未执行（无钩子状态）");
+		console.log("> 恢复：未执行（无快照钩子状态）");
 	} else if (!result.ok) {
-		console.log(`> 恢复失败: ${result.error ?? "未知错误"}`);
+		console.log(`> 恢复失败：${result.error ?? "未知错误"}`);
 	} else if (result.restoredTurnSeq !== undefined) {
 		console.log(`> 恢复成功: turn${result.restoredTurnSeq}（entry ${result.restoredEntryId}）`);
 	} else {
 		console.log("> 恢复成功（空库兜底）");
 	}
-	console.log(`> 当前 clock: ${clock?.current_time ?? "(未初始化)"}，events: ${events.length} 行`);
+	console.log(`> 当前时间：${clock?.current_time ?? "未初始化"} · 事件 ${events.length} 条`);
 }
 
 /** 单个 NPC 分卡细节：特征（最新演化）/ 关系（对端 + 好感）/ 记忆（条数 + 最近一条）。 */
 function printPacks(packs: WorldPack[]): void {
 	if (packs.length === 0) {
-		console.log("--- packs: 无（无世界包注入） ---");
+		console.log("--- 世界包：无（未启用检索注入） ---");
 		return;
 	}
 	console.log("--- packs ---");
 	for (const p of packs) {
 		const byType = new Map<string, number>();
 		for (const e of p.entries) byType.set(e.type, (byType.get(e.type) ?? 0) + 1);
-		const typeSummary = [...byType.entries()].map(([t, n]) => `${t} ${n}`).join("、");
+		const typeSummary = [...byType.entries()].map(([t, n]) => `${ENTRY_TYPE_LABEL[t] ?? t} ${n}`).join("、");
 		console.log(
 			`[${p.name}] ${p.dir}\n  条目 ${p.entries.length}（${typeSummary}）· ${p.hasCode ? "含代码（挂载扩展）" : "纯内容包"}${p.story.title ? `\n  story.yaml: ${p.story.title}（${p.story.calendar ?? "默认历法"}/${p.story.granularity ?? "默认粒度"}）` : ""}`,
 		);
@@ -469,9 +478,9 @@ function printStatus(runtime: StoryRuntime, ctx: CliCtx): void {
 	const pos = locationChain(playerLoc, locById);
 
 	console.log("── 状态 ──");
-	console.log(`时间: ${time} · 位置: ${pos} · 模式: ${MODE_LABEL[runtime.mode]}`);
+	console.log(`时间：${time} · 位置：${pos} · 模式：${MODE_LABEL[runtime.mode]}`);
 	if (npcs.length === 0) {
-		console.log("未发现 NPC（暂时没有角色登场）。");
+		console.log("暂无登场角色。");
 	} else {
 		for (const npc of npcs) {
 			console.log(`◆ ${npc.name} #${npc.id}（${npc.status}）@ ${npc.current_location_name ?? "未定位"}`);
@@ -479,46 +488,47 @@ function printStatus(runtime: StoryRuntime, ctx: CliCtx): void {
 		}
 	}
 	console.log("");
-	console.log(`轮数: ${turns.length} · events: ${events.length} 行 · 快照: ${snaps.length} 份 · data_status: ${dataStatus.length} 行`);
+	console.log(`轮数 ${turns.length} · 事件 ${events.length} 条 · 快照 ${snaps.length} 份 · 落库记录 ${dataStatus.length} 条`);
 	console.log(
-		`packs: ${ctx.packDirs.length > 0 ? ctx.packDirs.join(", ") : "（无）"} | pinned: ${ctx.pinned.length > 0 ? ctx.pinned.join(", ") : "（无）"}`,
+		`世界包：${ctx.packDirs.length > 0 ? ctx.packDirs.join("、") : "无"} · 手动固定：${ctx.pinned.length > 0 ? ctx.pinned.join("、") : "无"}`,
 	);
-	console.log(`session: ${runtime.sessionManager.getSessionId()} · leaf: ${runtime.sessionManager.getLeafId()}`);
+	console.log(`会话 ${runtime.sessionManager.getSessionId()} · 当前条目 ${runtime.sessionManager.getLeafId()}`);
 }
 
 function printHelp(): void {
 	console.log(
 		[
 			"可用命令：",
-			"  /tree              列出当前故事的条目树（引导线 + 当前分支标记 ▸）",
-			"  /tree <序号|entryId>  跳转到目标条目（钩子自动恢复 DB）",
-			"  /fork <序号|entryId>  从目标条目分叉新故事（fork 产物继承模式，冒险继承锁定）",
-			"  /status            查看当前状态：时间 / 位置 / 模式 / NPC 分卡（冒险模式仅显示与玩家相关的）",
-			"  /packs             列出已加载世界包与条目统计",
-			"  /pin <包名:type:id>   手动钉条目（每轮必注入，最高优先级）",
-			"  /unpin <包名:type:id> 取消手动钉",
-			"  /reload            重新加载卡包（mtime 检测；校验失败回退上次成功快照 + warning）",
-			"  /agents            查看/设置 subagent 开关（/agents <story|npc|stylize> <on|off>）",
-			"  /models            查看各角色解析到的模型（配置见 ~/.tavernpi/settings.json）",
-			"  /prompt            查看提示词分层（/prompt [角色] [load <文件>|clear]）",
-			"  /write <文件>        受信任写入：按 Changeset 契约直写故事库（校验失败零落库）",
-			"  /mode              查看当前内核级模式（创造 / 生存 / 冒险）",
-			"  /mode <模式>         切换模式（catch 非法切换错；冒险锁定不可切）",
-			"  /plot <文本>         创造模式专属：写入剧情大纲指令（生存/冒险报错）",
-			"  /swipe             基于分支重生成最后一个 user 轮次（旧稿留树）",
-			"  /compact           触发章节摘要 compaction（会话太小友好提示）",
-			"  /assist <文本>       带外顾问（只读/草稿制/不进叙事）：创作建议或 RPG 建议",
-			"  /help              本帮助",
+			"  /tree                查看故事树（树形缩进，▸ 标出当前分支）",
+			"  /tree <序号|条目id>   跳转到指定条目（会连带恢复当时的数据库状态）",
+			"  /fork <序号|条目id>   从指定条目分叉出新故事（继承模式；冒险模式连锁定一起继承）",
+			"  /status              查看状态：时间 / 位置 / 模式 / NPC 卡片（冒险模式只显示与玩家相关的）",
+			"  /packs               查看已加载的世界包与条目统计",
+			"  /pin <包名:type:id>   手动固定条目（每轮强制注入，优先级最高）",
+			"  /unpin <包名:type:id> 取消手动固定",
+			"  /reload              重新加载世界包（检测文件改动；校验不通过则退回上次成功的版本并警告）",
+			"  /agents              查看或设置子代理开关（/agents <story|npc|stylize> <on|off>）",
+			"  /models              查看各角色实际使用的模型（配置在 ~/.tavernpi/settings.json）",
+			"  /prompt              查看提示词分层（/prompt [角色] [load <文件>|clear]）",
+			"  /write <文件>         受信任写入：按变更集契约直接写库（校验不通过则不写入任何内容）",
+			"  /mode                查看当前模式（创造 / 生存 / 冒险）",
+			"  /mode <模式>          切换模式（非法切换会被拒绝并说明原因；冒险模式已锁定，不可切换）",
+			"  /plot <大纲>          仅创造模式可用：写入剧情大纲指令（生存 / 冒险模式会拒绝）",
+			"  /swipe               重新生成最后一轮的叙事（旧稿仍保留在故事树里）",
+			"  /compact             触发章节摘要压缩（会话太短时会提示无需压缩）",
+			"  /assist <问题>        旁路顾问（只读、只出草稿、不进叙事）：给创作建议或扮演建议",
+			"  /help                本帮助",
 			"",
-			"快捷键：Tab 补全命令/角色名 · ↑↓ 翻历史 · Ctrl+L 清屏 · Ctrl+A/E 行首行尾 · Ctrl+W 删词",
-			"  （以上除 Tab 外均为 readline 默认；Ctrl+P 已被 readline 占用为「上一条历史」）",
-			"  Ctrl+C 第一次 = 请求退出（当前轮若在生成，等它结束），第二次 = 立即强制退出",
-			"  空行               退出（不删故事目录，可 --resume 续写）",
+			"快捷键：Tab 补全命令与角色名 · ↑↓ 翻历史 · Ctrl+L 清屏 · Ctrl+A/E 行首行尾 · Ctrl+W 删词",
+			"  （除 Tab 外都是终端自带的；Ctrl+P 已被终端占用为「上一条历史」，不能拿来开菜单）",
+			"  Ctrl+C：第一次请求退出（若正在生成，等这轮结束），第二次立即强制退出",
+			"  空行                  退出（不删故事目录，之后可用 --resume 续写）",
 			"",
-			"模式：--mode 创造|生存|冒险 仅创建时生效；--resume 从 story.meta.json 恢复；提示符为 [模式]>。",
-			"输入校验：生存/冒险拒非 user 角色输入（命令 NPC/指定剧情结局）→ 打印 reason/suggestion，",
-			"  可用 /! 前缀强制提交（留痕 warning）；创造模式不校验。",
-			"subagent：story/npc/data 恒开；stylize 默认关（--style 或卡包 defaultStyle 开启，adventure 强制开）。",
+			"模式：--mode 创造|生存|冒险 只在新建故事时生效；--resume 会从 story.meta.json 恢复模式。",
+			"输入校验：生存 / 冒险模式会拒绝「指挥 NPC 或替故事指定结局」这类越权输入，",
+			"  并说明原因、给出改写建议；确实要原样提交，就打 /! 前缀（会留下记录）。",
+			"子代理：story / npc / data 始终开启；stylize 默认关闭",
+			"  （传 --style 或卡包声明 defaultStyle 时开启；冒险模式强制开启）。",
 		].join("\n"),
 	);
 }
@@ -529,45 +539,45 @@ function printTurn(report: TurnResult): void {
 		console.log(report.narrativeText.trim());
 		console.log("");
 	} else {
-		console.log("（本轮主叙事未产出正文，无内容可显示；详见上方 warning）");
+		console.log("（本轮没有产出正文，无内容可显示；原因见上方警告）");
 	}
 	// 系统信息行：`· ` 前缀；警告/错误用 `! ` 前缀。
 	if (report.collection) {
 		const c = report.collection;
 		console.log(
-			`· 卡包注入: ${c.injected.length > 0 ? c.injected.join("、") : "（无命中）"}${c.warnings.length > 0 ? ` · 警告: ${c.warnings.join("；")}` : ""}`,
+			`· 世界包注入：${c.injected.length > 0 ? c.injected.join("、") : "无命中"}${c.warnings.length > 0 ? ` · 警告：${c.warnings.join("；")}` : ""}`,
 		);
 	}
 	if (report.npc) {
 		const onstage = report.npc.onstageNpcIds;
 		console.log(
-			`· npc 预演: ${onstage.length} 个在场${onstage.length > 0 ? `（${onstage.join(", ")}）` : ""} · 离线推演: ${report.npc.offscreenTriggeredIds.length} 个`,
+			`· NPC 预演：在场 ${onstage.length} 个${onstage.length > 0 ? `（${onstage.join("、")}）` : ""} · 离线推演 ${report.npc.offscreenTriggeredIds.length} 个`,
 		);
 	}
 	if (report.story) {
 		const s = report.story;
 		console.log(
-			`· story: 场景卡 ${s.sceneFallback ? "fallback" : "ok"} · 硬冲突 ${s.hardConflicts.length} · 报疑 ${s.suspicions.length} · 重写 ${s.revisions} 次`,
+			`· story 阶段：场景卡 ${s.sceneFallback ? "降级兜底" : "正常"} · 硬冲突 ${s.hardConflicts.length} · 存疑 ${s.suspicions.length} · 重写 ${s.revisions} 次`,
 		);
-		// 冲突详情原先只落 turn_log.warnings，终端只给计数——玩家/作者看不到「到底哪里冲突」。
-		for (const c of s.hardConflicts) console.log(`    ! 硬冲突: ${c}`);
-		for (const w of s.suspicions) console.log(`    ? 报疑: ${w}`);
-		if (s.releasedWithWarnings) console.log("! 超限放行（story 阶段，冲突留痕）");
+		// 冲突详情原先只写进 turn_log，终端只有计数——看不到「到底哪里冲突」。
+		for (const c of s.hardConflicts) console.log(`    ! 硬冲突：${c}`);
+		for (const w of s.suspicions) console.log(`    ? 存疑：${w}`);
+		if (s.releasedWithWarnings) console.log("! 重写次数用尽后放行（冲突已记入本轮记录）");
 	}
 	if (report.stylize) {
 		console.log(
-			`· stylize: ${report.stylize.applied ? "已润色" : "回退原文"}${report.stylize.drift && report.stylize.drift.length > 0 ? ` · drift: ${report.stylize.drift.join("; ")}` : ""}`,
+			`· 文风润色：${report.stylize.applied ? "已润色" : "保持原文"}${report.stylize.drift && report.stylize.drift.length > 0 ? ` · 事实偏离：${report.stylize.drift.join("；")}` : ""}`,
 		);
 	}
 	if (report.data.ok) {
 		const a = report.data.applied;
 		console.log(
-			`· data 已落库（attempts=${report.data.attempts} · events=${a.events} · new_npcs=${a.newNpcs} · 时间推进=${a.timeAdvanced ? "是" : "否"}${report.data.dropped && report.data.dropped.length > 0 ? ` · strictDrop 剔除 ${report.data.dropped.length} 项` : ""}）`,
+			`· data 落库：成功（尝试 ${report.data.attempts} 次 · 事件 ${a.events} · 新增 NPC ${a.newNpcs} · 时间推进：${a.timeAdvanced ? "是" : "否"}${report.data.dropped && report.data.dropped.length > 0 ? ` · 剔除冲突项 ${report.data.dropped.length} 个` : ""}）`,
 		);
 	} else {
-		console.log(`! data 落库失败（attempts=${report.data.attempts}）: ${truncate(report.data.error, 300)}`);
+		console.log(`! data 落库失败（尝试 ${report.data.attempts} 次）：${truncate(report.data.error, 300)}`);
 	}
-	console.log(`· 快照: ${report.snapshotTaken ? "已拍" : "跳过"}`);
+	console.log(`· 快照：${report.snapshotTaken ? "已保存" : "未保存"}`);
 }
 
 async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise<StoryRuntime> {
@@ -688,7 +698,7 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			console.log(`> navigateTree(${target.id})（${target.message.role} 消息）`);
 			const { session } = runtime;
 			if (session.isStreaming) {
-				console.log("> isStreaming 期间不能 navigateTree（须等上一轮完成）");
+				console.log("> 正在生成中，此时不能跳转条目（请等这一轮结束）");
 				return undefined;
 			}
 			await session.navigateTree(target.id);
@@ -801,7 +811,7 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			// 校验失败由 trustedWrite 抛中文错并保证零落库；此处只负责读文件与呈现结果。
 			if (arg === "") {
 				console.log("用法: /write <changeset.json>");
-				console.log("  受信任写入：按 Changeset 契约（@tavernpi/core 的 Changeset 类型）直写故事库。");
+				console.log("  受信任写入：按变更集格式直接写入故事库（跳过模型，校验不通过则完全不写入）。");
 				return undefined;
 			}
 			try {
@@ -809,7 +819,7 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 				const raw = JSON.parse(readFileSync(abs, "utf-8")) as unknown;
 				const res = await runtime.trustedWrite(raw as Parameters<StoryRuntime["trustedWrite"]>[0]);
 				console.log(
-					`> 受信任写入完成: turnSeq=${res.turnSeq} · 快照=${res.snapshotTaken ? "已拍" : "跳过"}`,
+					`> 受信任写入完成：第 ${res.turnSeq} 轮 · 快照：${res.snapshotTaken ? "已保存" : "未保存"}`,
 				);
 				console.log(`  ${JSON.stringify(res.summary)}`);
 			} catch (err) {
@@ -859,7 +869,7 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 				const ref = ctx.settings.models[role];
 				console.log(`  ${role}: ${ref ? `${ref.provider}/${ref.id}` : "（未配置 → 走 pi 默认）"}`);
 			}
-			console.log("  配置位置: ~/.tavernpi/settings.json 的 models.<角色>");
+			console.log("  配置位置：~/.tavernpi/settings.json 里的 models.<角色>");
 			return undefined;
 		}
 		case "mode": {
@@ -935,7 +945,7 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			}
 			try {
 				const reply = await runtime.assist.chat(arg);
-				console.log("\n── 带外顾问 ──");
+				console.log("\n── 旁路顾问 ──");
 				console.log("只读/草稿制，不进叙事流；以下为草稿，可自行决定是否作为输入发出。");
 				console.log(reply);
 				console.log("──────────────");
