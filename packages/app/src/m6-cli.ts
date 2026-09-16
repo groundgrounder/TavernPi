@@ -40,6 +40,7 @@ import {
 	resolveStoryMode,
 	snapshotsDbPath,
 	storyDbPath as coreStoryDbPath,
+	validateSubagentSwitches,
 	type DbView,
 	type LocationRow,
 	type NpcRow,
@@ -80,6 +81,8 @@ interface CliCtx {
 	prompts: PromptLayerDirs;
 	/** 文风（--style：启用 stylize 阶段，并把该值作为 styleHint 注入）。 */
 	style?: string;
+	/** subagent 开关（会话级，不持久化）：story/npc 默认开；stylize 缺省 undefined = 按规则自动。 */
+	agents: { story: boolean; npc: boolean; stylize?: boolean };
 	/** 卡包检索注入（packDirs 为空 = undefined，无注入形态）。 */
 	packs?: { cache: PackCache; pinned: () => string[] };
 	/** 会话级手动钉列表（/pin /unpin 维护；经 getter 传入 runtime）。 */
@@ -88,28 +91,34 @@ interface CliCtx {
 	packDirs: string[];
 }
 
-/** subagent 开关 combo：story/npc 必开。
- *  stylize 在三种情况下启用：显式 --style、故事模式为 adventure（预设强制全开、不可关）、
- *  或卡包在 story.yaml 里声明了 defaultStyle（见下方 runtimeExtras 内注释）。
- *  其余情况默认关闭——stylize 是可选润色阶段，开着就是每轮多付一次 LLM 调用与延迟。 */
+/** stylize 是否启用。/agents 的显式设置优先；否则按规则：
+ *  显式 --style ／ 故事模式为 adventure（预设强制全开、不可关）／
+ *  卡包在 story.yaml 里声明了 defaultStyle（作者写下它就是想让这部作品用它，
+ *  否则该字段对「没传 --style」的玩家形同虚设）。 */
+function stylizeEnabled(ctx: CliCtx, storyDir: string): boolean {
+	if (ctx.agents.stylize !== undefined) return ctx.agents.stylize;
+	const meta = readStoryMeta(storyDir);
+	return (
+		resolveStoryMode(undefined, storyDir) === "adventure" ||
+		ctx.style !== undefined ||
+		meta?.defaultStyle !== undefined
+	);
+}
+
+/** subagent 开关 combo：story/npc 由 /agents 控制（创造模式下可关，缺省全开）；
+ *  stylize 由 stylizeEnabled 判定。组合合法性由 runtime 构建期校验（validateSubagentSwitches）。 */
 function runtimeExtras(ctx: CliCtx, storyDir: string): {
-	npc: { enabled: boolean };
-	story: { enabled: boolean };
+	npc?: { enabled: boolean };
+	story?: { enabled: boolean };
 	stylize?: StylizeRuntimeOptions;
 	packs?: { cache: PackCache; pinned: () => string[] };
 } {
-	// stylize 开启条件：显式 --style ／ 故事模式为 adventure（预设强制全开）／
-	// 卡包在 story.yaml 里声明了 defaultStyle——作者写下它就是想让这部作品用它，
-	// 若只在 --style 时才生效，该字段对「没传 --style」的玩家就形同虚设。
-	const meta = readStoryMeta(storyDir);
-	const stylizeOn =
-		resolveStoryMode(undefined, storyDir) === "adventure" ||
-		ctx.style !== undefined ||
-		meta?.defaultStyle !== undefined;
 	return {
-		npc: { enabled: true },
-		story: { enabled: true },
-		...(stylizeOn ? { stylize: { enabled: true, ...(ctx.style ? { styleHint: ctx.style } : {}) } } : {}),
+		...(ctx.agents.npc ? { npc: { enabled: true } } : {}),
+		...(ctx.agents.story ? { story: { enabled: true } } : {}),
+		...(stylizeEnabled(ctx, storyDir)
+			? { stylize: { enabled: true, ...(ctx.style ? { styleHint: ctx.style } : {}) } }
+			: {}),
 		...(ctx.packs !== undefined ? { packs: ctx.packs } : {}),
 	};
 }
@@ -445,6 +454,8 @@ function printHelp(): void {
 			"  /pin <包名:type:id>   手动钉条目（每轮必注入，最高优先级）",
 			"  /unpin <包名:type:id> 取消手动钉",
 			"  /reload            重新加载卡包（mtime 检测；校验失败回退上次成功快照 + warning）",
+			"  /agents            查看/设置 subagent 开关（/agents <story|npc|stylize> <on|off>）",
+			"  /models            查看各角色解析到的模型（配置见 ~/.tavernpi/settings.json）",
 			"  /mode              查看当前内核级模式（创造 / 生存 / 冒险）",
 			"  /mode <模式>         切换模式（catch 非法切换错；冒险锁定不可切）",
 			"  /plot <文本>         创造模式专属：写入剧情大纲指令（生存/冒险报错）",
@@ -556,6 +567,24 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 	return newRuntime;
 }
 
+/** 以当前 ctx 重建 runtime：subagent 开关在创建时固化，改开关必须重建。
+ *  dispose 旧实例（级联释放 assist 会话与 broker 注册），复用同一个 sessionManager 与 storyState。 */
+async function rebuildRuntime(runtime: StoryRuntime, ctx: CliCtx): Promise<StoryRuntime> {
+	const { sessionManager, storyState } = runtime;
+	runtime.dispose();
+	return createStoryRuntime({
+		cwd: ctx.cwd,
+		sessionManager,
+		storyState,
+		settings: ctx.settings,
+		modelRuntime: ctx.modelRuntime,
+		prompts: ctx.prompts,
+		eventLog: createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl")),
+		onWarning: (m) => console.warn(`[warn] ${m}`),
+		...runtimeExtras(ctx, storyState.storyDir),
+	});
+}
+
 async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Promise<StoryRuntime | undefined> {
 	const [cmd, ...rest] = line.slice(1).split(/\s+/);
 	const arg = rest.join(" ").trim();
@@ -619,6 +648,51 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			const { packs, warnings } = ctx.packs.cache.getPacks();
 			console.log(`> 已重载: ${packs.map((p) => `${p.name}(${p.entries.length} 条目)`).join(", ")}`);
 			for (const w of warnings) console.warn(`[warn] ${w}`);
+			return undefined;
+		}
+		case "agents": {
+			// /agents 查看；/agents <story|npc|stylize> <on|off> 设置（会话级，不持久化）。
+			// 改开关必须重建 runtime——subagent 选项在创建时固化。
+			if (arg === "") {
+				console.log(
+					`> subagent: story=${ctx.agents.story ? "on" : "off"} npc=${ctx.agents.npc ? "on" : "off"} stylize=${stylizeEnabled(ctx, runtime.storyState.storyDir) ? "on" : "off"}（模式: ${MODE_LABEL[runtime.mode]}）`,
+				);
+				console.log("  用法: /agents <story|npc|stylize> <on|off>（创造模式可关；生存/冒险受限）");
+				return undefined;
+			}
+			const [name, value] = arg.split(/\s+/);
+			if ((name !== "story" && name !== "npc" && name !== "stylize") || (value !== "on" && value !== "off")) {
+				console.log("用法: /agents <story|npc|stylize> <on|off>");
+				return undefined;
+			}
+			const next: CliCtx["agents"] = { ...ctx.agents, [name]: value === "on" };
+			const stylizeOn = name === "stylize" ? value === "on" : stylizeEnabled(ctx, runtime.storyState.storyDir);
+			const problems = validateSubagentSwitches(runtime.mode, {
+				story: next.story,
+				npc: next.npc,
+				stylize: stylizeOn,
+			});
+			if (problems.length > 0) {
+				console.log("! 该开关组合不符合当前模式预设：");
+				for (const p of problems) console.log(`    - ${p}`);
+				return undefined;
+			}
+			ctx.agents = next;
+			const rebuilt = await rebuildRuntime(runtime, ctx);
+			console.log(
+				`> subagent: story=${ctx.agents.story ? "on" : "off"} npc=${ctx.agents.npc ? "on" : "off"} stylize=${stylizeEnabled(ctx, runtime.storyState.storyDir) ? "on" : "off"}（已重建运行时）`,
+			);
+			return rebuilt;
+		}
+		case "models": {
+			// 角色清单与 core settings.ts 的 MODEL_ROLES 对应（那是未导出的内部常量，此处同步维护）。
+			const roles = ["narrator", "data", "story", "npc", "stylize", "chapter_summary", "assist"] as const;
+			console.log("--- 各角色模型 ---");
+			for (const role of roles) {
+				const ref = ctx.settings.models[role];
+				console.log(`  ${role}: ${ref ? `${ref.provider}/${ref.id}` : "（未配置 → 走 pi 默认）"}`);
+			}
+			console.log("  配置位置: ~/.tavernpi/settings.json 的 models.<角色>");
 			return undefined;
 		}
 		case "mode": {
@@ -839,6 +913,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 		modelRuntime,
 		prompts,
 		...(args.style !== undefined ? { style: args.style } : {}),
+		agents: { story: true, npc: true },
 		pinned,
 		packDirs,
 	};
