@@ -24,6 +24,7 @@ import type { SessionEntry, SessionTreeNode } from "@earendil-works/pi-coding-ag
 import {
 	buildAncestorChain,
 	computeNextTurnSeq,
+	createDbView,
 	createPipelineEventLog,
 	createStory,
 	createStoryRuntime,
@@ -32,12 +33,13 @@ import {
 	forkStoryDb,
 	inheritStoryMeta,
 	loadSettings,
+	MODE_PRESETS,
 	openSnapshotsDb,
 	openStoryDb,
 	resolveStoryMode,
 	snapshotsDbPath,
 	storyDbPath as coreStoryDbPath,
-	type DbReader,
+	type DbView,
 	type LocationRow,
 	type NpcRow,
 	type NpcTraitRow,
@@ -342,8 +344,10 @@ function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: 
 }
 
 /** 单个 NPC 分卡细节：特征（最新演化）/ 关系（对端 + 好感）/ 记忆（条数 + 最近一条）。 */
-function printNpcDetails(reader: DbReader, npc: NpcRow, npcNameById: Map<number, string>): void {
-	const comp = reader.getNpc(npc.id);
+function printNpcDetails(view: DbView, npc: NpcRow, npcNameById: Map<number, string>): void {
+	const comp = view.getNpc(npc.id);
+	// 越集防御：DbView 在 user-related 模式下对集合外 NPC 返回 undefined。
+	if (comp === undefined) return;
 	// 特征：同名单取最新一次演化（turn_seq 最大），权重 0–1 映射 5 格。
 	const traitByLatest = new Map<string, NpcTraitRow>();
 	for (const t of comp.traits) {
@@ -369,14 +373,17 @@ function printNpcDetails(reader: DbReader, npc: NpcRow, npcNameById: Map<number,
 
 function printStatus(runtime: StoryRuntime): void {
 	const reader = runtime.storyState.storyDb.reader;
-	const clock = reader.getClock();
-	const events = reader.listEvents();
-	const turns = reader.getTurnLog();
+	// 走模式视图（与 /assist 同一套口径）：冒险（信息迷雾）下 DB 查看仅「与 user 相关」——
+	// 原先直接读 reader 全量，会把尚未接触的 NPC 连同其特征/关系/记忆一并列出来。
+	const view = createDbView(reader, MODE_PRESETS[runtime.mode].dbViewFilter);
+	const clock = view.getClock();
+	const events = view.listEvents();
+	const turns = view.getTurnLog();
 	const snaps = runtime.storyState.snapshotsDb.listSnapshots();
-	const dataStatus = reader.listDataStatus();
-	const playerLoc = reader.getPlayerLocation();
-	const locById = new Map<number, LocationRow>(reader.listLocations().map((l) => [l.id, l]));
-	const npcs = reader.listNpcs();
+	const dataStatus = view.listDataStatus();
+	const playerLoc = view.getPlayerLocation();
+	const locById = new Map<number, LocationRow>(view.listLocations().map((l) => [l.id, l]));
+	const npcs = view.listNpcs();
 	const npcNameById = new Map<number, string>(npcs.map((n) => [n.id, n.name]));
 
 	const time = clock ? `${clock.current_time}（${clock.calendar}/${clock.granularity}）` : "未初始化";
@@ -389,7 +396,7 @@ function printStatus(runtime: StoryRuntime): void {
 	} else {
 		for (const npc of npcs) {
 			console.log(`◆ ${npc.name} #${npc.id}（${npc.status}）@ ${npc.current_location_name ?? "未定位"}`);
-			printNpcDetails(reader, npc, npcNameById);
+			printNpcDetails(view, npc, npcNameById);
 		}
 	}
 	console.log("");
@@ -404,7 +411,7 @@ function printHelp(): void {
 			"  /tree              列出当前故事的条目树（引导线 + 当前分支标记 ▸）",
 			"  /tree <序号|entryId>  跳转到目标条目（钩子自动恢复 DB）",
 			"  /fork <序号|entryId>  从目标条目分叉新故事（fork 产物继承模式，冒险继承锁定）",
-			"  /status            查看当前状态：时间 / 位置 / 模式 / NPC 分卡",
+			"  /status            查看当前状态：时间 / 位置 / 模式 / NPC 分卡（冒险模式仅显示与玩家相关的）",
 			"  /mode              查看当前内核级模式（创造 / 生存 / 冒险）",
 			"  /mode <模式>         切换模式（catch 非法切换错；冒险锁定不可切）",
 			"  /plot <文本>         创造模式专属：写入剧情大纲指令（生存/冒险报错）",

@@ -32,7 +32,8 @@ export interface SubagentSwitchFlags {
  * - toggleable：可关闭的 subagent/交互开关白名单（data 不在内 = 不可关）。adventure 为空 = 全锁。
  * - directivesAllowed：剧情大纲指令是否合法（仅创造；生存/冒险拒绝非 user 角色行为）。
  * - inputValidation：是否做输入渠道校验（生存/冒险 true；创造 false，允许剧情大纲指令）。
- * - dbViewFilter：冒险为 user-related，其余 none。本 lane 只声明不实现（查询层接线是 P1c）。
+ * - dbViewFilter：冒险为 user-related，其余 none。本模块只做声明，实际过滤由查询层落实
+ *   （DbView；assist 与 CLI 的 /status 都按此字段取值）。
  * - switchableTo：可切换到的模式；adventure 为空数组（锁定，不可切入切出）。
  * - locked：adventure true（创建时选定后锁定）。
  */
