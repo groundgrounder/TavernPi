@@ -419,6 +419,8 @@ function printTurn(report: TurnResult): void {
 	if (report.narrativeText.trim().length > 0) {
 		console.log(report.narrativeText.trim());
 		console.log("");
+	} else {
+		console.log("（本轮主叙事未产出正文，无内容可显示；详见上方 warning）");
 	}
 	// 系统信息行：`· ` 前缀；警告/错误用 `! ` 前缀。
 	if (report.npc) {
@@ -711,9 +713,10 @@ export async function main(argv: readonly string[]): Promise<void> {
 		const created = await createStory({ storiesRoot, packDirs, cwd, ...(args.mode !== undefined ? { mode: args.mode } : {}) });
 		sessionManager = created.sessionManager;
 		storyState = created.storyState;
+		const clock = storyState.storyDb.reader.getClock();
+		console.log(`> clock 初值: ${clock?.current_time}（${clock?.calendar}/${clock?.granularity}）`);
 		if (created.packs.length > 0) {
-			const clock = storyState.storyDb.reader.getClock();
-			console.log(`> clock 初值: ${clock?.current_time}（${clock?.calendar}/${clock?.granularity}）`);
+			console.log(`> 已加载卡包: ${created.packs.map((p) => p.name).join("、")}`);
 		}
 	}
 	const sessionId = sessionManager.getSessionId();

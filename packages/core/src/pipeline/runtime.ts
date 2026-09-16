@@ -443,6 +443,9 @@ export interface StoryRuntimeOptions {
 	/** 主叙事 session 的 pi SettingsManager（compaction 触发参数：keepRecentTokens 等）。
 	 *  缺省走 createAgentSession 默认（~/.pi/agent 全局设置）；测试/验收可传 SettingsManager.inMemory 注入小 keepRecentTokens。 */
 	settingsManager?: SettingsManager;
+	/** 主叙事思考等级。缺省 "medium"（SDK 默认值），**刻意不跟随** pi 全局配置——
+	 *  全局值服务于编码场景（常见 max），而叙事要的是正文，见 sessionOptions 处注释。 */
+	narratorThinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
 	/** 章节摘要 compaction subagent 选项：缺省走真实 runSubagent。executor 供测试故障注入。 */
 	chapterSummary?: {
 		executor?: (opts: SubagentRunOptions) => Promise<SubagentResult<unknown>>;
@@ -630,6 +633,14 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 	let mode: StoryMode = resolveStoryMode(opts.mode, storyState.storyDir);
 	const maxDataAttempts = opts.maxDataAttempts ?? 3;
 	const failureWarningThreshold = opts.failureWarningThreshold ?? 3;
+	// 空叙事重试（见 runTurnInternal 内的保护段）：每次重试 = 一次完整主叙事调用（实测 200 秒上下），
+	// 故只给 1 次；批注明确告知模型「上一稿只有思考、没有正文」。
+	const EMPTY_NARRATIVE_MAX_RETRIES = 1;
+	const EMPTY_NARRATIVE_REVISION = [
+		"## 上一稿没有产出正文",
+		"你上一次只输出了思考过程，正文为空——玩家什么都看不到。",
+		"请直接输出本轮叙事正文，不要只做分析、复述计划或停在思考里。",
+	].join("\n");
 	// 阶段选项：缺省全部关闭（enabled=false，M2/M3 形态不变）。
 	const npcOpts: NpcStageRuntimeOptions = { enabled: false, ...opts.npc };
 	const storyOpts: StoryStageRuntimeOptions = { enabled: false, ...opts.story };
@@ -829,6 +840,10 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		tools: codePackToolNames,
 		model: narratorModel,
 		modelRuntime,
+		// 主叙事思考等级刻意与 pi 全局配置解耦：全局值服务于编码场景（常被调成 max），
+		// 而叙事阶段要的是正文——max 级思考会挤压输出预算、显著抬高「只思考不落笔」的概率
+		// （实测约半数轮次正文为空），单轮还多花 200 秒上下。缺省取 SDK 默认 medium。
+		thinkingLevel: opts.narratorThinkingLevel ?? "medium",
 		...(opts.settingsManager !== undefined ? { settingsManager: opts.settingsManager } : {}),
 	};
 	let created = await createAgentSession(sessionOptions);
@@ -849,7 +864,15 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		}
 	}
 	if (created.modelFallbackMessage) {
+		// 来自 pi SDK：它取 session 路径上最后一条 assistant 消息的 provider/model 当作「本会话模型」
+		// 去恢复（session-manager.js 的 getSessionContextSettings）。新建故事时那条就是开场白，
+		// 没有真实模型可恢复，于是必然回退到默认模型——预期行为，不影响运行。
+		// 在 ~/.tavernpi/settings.json 配好 models.narrator 后，sessionOptions.model 有值，
+		// SDK 不再走恢复分支，这条提示即消失。
 		console.warn(`[warn] ${created.modelFallbackMessage}`);
+		console.warn(
+			`  （新建故事时这是开场白占位模型导致的预期回退；配好 ~/.tavernpi/settings.json 的 models.narrator 即消失）`,
+		);
 	}
 
 	// 轮中交互 broker：主叙事 session 是唯一宿主——注册当前 runtime broker，卡包工具经 getInteractionBroker() 取用。
@@ -1002,6 +1025,37 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			}
 			let userEntryId = assertUserEntryOnBranch(sessionManager.getEntries(), leafId);
 			let narrativeText = extractLastAssistantReply(session.state.messages.slice(promptStart)) ?? "";
+
+			// ---- 空叙事保护（重试）----
+			// 模型可能「想完就停」：stopReason=stop、output token 全部计入 reasoning，正文块缺失
+			// （实测 thinking=max 下约半数轮次如此）。这是采样层面的概率行为，换个采样常能成功。
+			// 不保护的话本轮会顶着「成功」跑完：轻检对空文本通过、data 空落库、照常拍快照，
+			// 玩家只看到一片空白，且空掉的内容会积压到下一轮（一轮讲完三轮的事）。
+			// 机制复用轻检打回：navigateTree 撤掉空 assistant 消息 → 带批注重发同一输入。
+			for (let attempt = 1; attempt <= EMPTY_NARRATIVE_MAX_RETRIES && narrativeText.trim() === ""; attempt++) {
+				onWarning?.(`主叙事未产出正文（仅 thinking），重试第 ${attempt}/${EMPTY_NARRATIVE_MAX_RETRIES} 次`);
+				const canRewind =
+					storyState.snapshotsDb.findNearestSnapshot(
+						buildAncestorChain(sessionManager.getEntries(), userEntryId),
+					) !== undefined;
+				if (canRewind) {
+					await session.navigateTree(userEntryId);
+				}
+				pendingRevision = EMPTY_NARRATIVE_REVISION;
+				promptStart = session.state.messages.length;
+				await session.prompt(input);
+				leafId = sessionManager.getLeafId();
+				if (leafId === null) {
+					throw new Error("空叙事重试后无 leaf entry（会话树异常）");
+				}
+				userEntryId = assertUserEntryOnBranch(sessionManager.getEntries(), leafId);
+				narrativeText = extractLastAssistantReply(session.state.messages.slice(promptStart)) ?? "";
+			}
+			// 批注只服务重试那一次 prompt；后续（轻检打回）会写自己的批注，这里先复位防泄漏。
+			pendingRevision = undefined;
+			if (narrativeText.trim() === "") {
+				onWarning?.(`主叙事连续 ${EMPTY_NARRATIVE_MAX_RETRIES + 1} 次未产出正文，本轮叙事为空`);
+			}
 
 			if (storyOpts.enabled && sceneCard) {
 				const maxRevisions = storyOpts.maxRevisions ?? 1;
@@ -1179,7 +1233,8 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				ts: new Date().toISOString(),
 				turnSeq,
 				role: "narrator",
-				ok: true,
+				// 空正文不算 ok：原先硬编码 true，导致空叙事的轮次在事件流里看起来一切正常。
+				ok: finalText.trim().length > 0,
 				durationMs: Date.now() - startedAt,
 				outputChars: finalText.length,
 			});

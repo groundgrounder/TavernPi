@@ -190,7 +190,13 @@ function mergeStoryMeta(packs: WorldPack[]): StoryMeta {
 	return merged;
 }
 
-/** 开场白落 session：首轮 assistant 消息（pi session 树根，无父）。返回 entry id。 */
+/** 开场白落 session：首轮 assistant 消息（pi session 树根，无父）。返回 entry id。
+ *  provider/model 是**占位值**，不是真实模型调用：pi SDK 会遍历 session 路径、取最后一条
+ *  assistant 消息的 provider/model 当作「本会话模型」去恢复（session-manager.js 的
+ *  getSessionContextSettings）。开场白是新建故事里唯一的 assistant 消息，必然被取到；
+ *  它没有真实模型可恢复，SDK 于是打一条 `Could not restore model ...` 并回退到默认模型
+ *  ——属预期行为，不影响运行。试图删掉这两个字段只会让报错变成更难懂的 `undefined/undefined`。
+ *  主叙事解析出真实模型后（sessionOptions.model 有值），SDK 不再走恢复分支，该提示即消失。 */
 function appendOpeningMessage(sessionManager: SessionManager, opening: string): string {
 	const message = {
 		role: "assistant",

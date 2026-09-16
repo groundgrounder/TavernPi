@@ -399,14 +399,14 @@ test("runRuleChecks：六条断言逐一触发", () => {
 			tone: "",
 			major_event: false,
 		};
-		// 规则 2：艾琳 current_location=王城=玩家位置 → 不触发；把艾琳挪到市集 → 触发
+		// 规则 2：艾琳 current_location=王城=场景地点 → 不触发；把艾琳挪到市集 → 触发
 		story.writer.moveSubject({ turnSeq: 2, subject: `npc:${ids.onstageId}`, toLocationId: ids.marketId });
 
 		const narrative = "他想起亡者生前的叮嘱，又记起 0000-01-02 那天的旧事。"; // 规则 5/6
 		const result = runRuleChecks({ sceneCard: card, storyDb: story, narrativeText: narrative, turnSeq: 2 });
 
 		assert.ok(result.hardConflicts.some((c) => c.includes("dead")), "规则1：dead 在场");
-		assert.ok(result.hardConflicts.some((c) => c.includes("≠ 玩家位置")), "规则2：在场 NPC 位置不符");
+		assert.ok(result.hardConflicts.some((c) => c.includes("≠ 场景地点")), "规则2：在场 NPC 与场景地点不符");
 		assert.ok(result.hardConflicts.some((c) => c.includes("同时出现在在场名单与离线名单")), "规则3：在场∩离线");
 		assert.ok(result.hardConflicts.some((c) => c.includes("时间幻觉")), "规则4：current_story_time≠clock");
 		assert.ok(result.suspicions.some((s) => s.includes("死者名字")), "规则5：叙事含死者名字");
@@ -430,6 +430,73 @@ test("runRuleChecks：合法场景卡 + 无问题叙事 → 空结果", () => {
 		});
 		assert.deepEqual(result.hardConflicts, []);
 		assert.deepEqual(result.suspicions, []);
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("runRuleChecks：在场 NPC 未定位（current_location=null）不判位置冲突", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		const wangCheng = story.writer.insertLocation({ name: "王城" });
+		story.writer.moveSubject({ turnSeq: 1, subject: "player", toLocationId: wangCheng.id });
+		// NPC 只建行、不给位置——等价于卡包没在 db/seed.sql 里设置 NPC 初始位置。
+		// 此时 current_location=null，不应与玩家位置比较：null 断言不了「他不在玩家处」，
+		// 判冲突只会每轮打回重写一次（重写后仍是 null，必然超限放行）。
+		const npc = story.writer.insertNpc({ name: "柳先生" });
+		const card: SceneCard = {
+			onstage_npc_ids: [npc.id],
+			offscreen_npc_ids: [],
+			scene_location_name: "王城",
+			current_story_time: "0000-01-01",
+			time_span_estimate: "",
+			to_time_suggestion: "",
+			scene_goal: "",
+			tone: "",
+			major_event: false,
+		};
+		const result = runRuleChecks({ sceneCard: card, storyDb: story, narrativeText: "……", turnSeq: 2 });
+		assert.ok(
+			!result.hardConflicts.some((c) => c.includes("≠ 场景地点")),
+			"未定位的在场 NPC 不应判位置冲突",
+		);
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("runRuleChecks：玩家移动轮不误报——NPC 与场景地点一致、但与 DB 玩家位置不一致时不判冲突", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		const teahouse = story.writer.insertLocation({ name: "茶棚" });
+		const ferry = story.writer.insertLocation({ name: "渡口" });
+		// DB 里玩家还停在「茶棚」（上一轮末的位置，本轮 data 尚未推进）
+		story.writer.moveSubject({ turnSeq: 1, subject: "player", toLocationId: teahouse.id });
+		const npc = story.writer.insertNpc({ name: "老渡" });
+		story.writer.moveSubject({ turnSeq: 1, subject: `npc:${npc.id}`, toLocationId: ferry.id });
+		// 本轮玩家「从茶棚走到渡口」：场景卡把场景定在渡口（与 NPC 一致），
+		// 而 DB 玩家位置滞后仍在茶棚——若拿玩家位置比较就会误判冲突。
+		const card: SceneCard = {
+			onstage_npc_ids: [npc.id],
+			offscreen_npc_ids: [],
+			scene_location_name: "渡口",
+			current_story_time: "0000-01-01",
+			time_span_estimate: "",
+			to_time_suggestion: "",
+			scene_goal: "",
+			tone: "",
+			major_event: false,
+		};
+		const result = runRuleChecks({ sceneCard: card, storyDb: story, narrativeText: "……", turnSeq: 2 });
+		assert.ok(
+			!result.hardConflicts.some((c) => c.includes("≠ 场景地点")),
+			"NPC 与场景卡声明的场景地点一致，不应因玩家位置滞后而误判",
+		);
+		assert.equal(result.hardConflicts.length, 0, "该卡其余字段合法，整体不应有硬冲突");
 		story.close();
 	} finally {
 		cleanupTempDir(dir);

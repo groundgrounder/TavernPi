@@ -402,13 +402,22 @@ export function runRuleChecks(input: RuleCheckInput): RuleCheckResult {
 			hardConflicts.push(`场景卡在场 NPC #${id} ${npc.name} status=${npc.status}（死者/缺席者不得在场行动）`);
 		}
 	}
-	// 2. 在场 NPC 当前位置必须等于玩家位置（玩家已定位时）
-	if (playerLoc) {
+	// 2. 在场 NPC 必须与「本轮场景所在地」一致（双方都已定位时）。
+	//    参照物优先取场景卡自己声明的 scene_location_name：DB 里的玩家位置在每个 turn 开头
+	//    仍是上一轮末的值，玩家一动就滞后——「我在茶棚，本轮走到渡口」这类输入会让场景卡
+	//    把玩家放进渡口，而 DB 玩家位置还停在茶棚，拿它比较必然误判冲突、白搭一次重写
+	//    （实测：移动轮必中）。场景卡地点名解析不出（尚未登记）时才退回玩家位置。
+	//    未定位（current_location == null）仍不算冲突：卡包没给 NPC 设初始位置、或刚创建
+	//    尚未落位时都是 null，断言不了「他不在场景处」。
+	const sceneLoc = storyDb.reader.listLocations().find((l) => l.name === sceneCard.scene_location_name);
+	const refLocId = sceneLoc?.id ?? playerLoc?.id;
+	const refLocName = sceneLoc?.name ?? playerLoc?.name;
+	if (refLocId !== undefined) {
 		for (const id of sceneCard.onstage_npc_ids) {
 			const npc = npcById.get(id);
-			if (npc && npc.current_location !== playerLoc.id) {
+			if (npc && npc.current_location != null && npc.current_location !== refLocId) {
 				hardConflicts.push(
-					`场景卡在场 NPC #${id} ${npc.name} 的 current_location=${npc.current_location_name ?? "null"} ≠ 玩家位置 ${playerLoc.name}`,
+					`场景卡在场 NPC #${id} ${npc.name} 的 current_location=${npc.current_location_name ?? "null"} ≠ 场景地点 ${refLocName}`,
 				);
 			}
 		}
