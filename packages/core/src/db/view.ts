@@ -26,7 +26,8 @@ export const PLAYER_NPC_ID_KEY = "player_npc_id";
  * 玩家相关 NPC 集合。
  * playerNpcId：锚定的玩家 npcs 行 id（未设/无效/不存在行为 null）。
  * npcIds：与 user 相关集合 = 玩家自身 ∪ npc_relations 任一侧为 player_npc_id 的对端 ∪
- *         与玩家同地点（npcs.current_location = world_state player_location 解析出的 location_id）的 NPC。
+ *         与玩家同地点（npcs.current_location = world_state player_location 解析出的 location_id）的 NPC ∪
+ *         叙事文本里被提起过的 NPC（「知道」的近似）。
  * degraded：未设 player_npc_id（或值无效/指向不存在行）。退化为仅同地点 NPC。
  * warning：degraded 且因「值无效/指向不存在行」触发时的说明；正常未设不携带。
  */
@@ -90,6 +91,9 @@ export function resolveRelatedNpcSet(reader: DbReader): RelatedNpcSet {
 		}
 	}
 
+	// 叙事里被提起过的（「知道」的近似，见 resolveMentionedNpcIds）。
+	for (const id of resolveMentionedNpcIds(reader)) npcIds.add(id);
+
 	return { playerNpcId, npcIds, degraded, ...(warning === undefined ? {} : { warning }) };
 }
 
@@ -105,26 +109,80 @@ function isSysBookkeepingKey(key: string): boolean {
 }
 
 /**
- * 冒险视图：与 DbReader 同形的只读方法子集（NPC 域 + 世界公开面 + data_status）。
- * filter="none" 全量透传（sys_ 键也可见）；filter="user-related" 按 resolveRelatedNpcSet 规则过滤：
- * - NPC 域（listNpcs / findNpcByCardRef / getNpc）只返回集合内的行；越集 id 调 getNpc 返回 undefined（UI 友好）；
- * - 可见 NPC 的 composite 内 relations 再按「对端也在集合内」过滤；
- * - world_state 隐藏 sys_ 前缀内核簿记键（player_location / player_npc_id 保持可见）；
- * - 世界公开面（locations / events / phases / time_log / turn_log / location_log / directives / clock）全量透传。
+ * 「user 经历过」的地点集合：location_log 中 subject=player 的起点/终点 ∪ 玩家当前所在地
+ * ∪ 这些地点的祖先链。
+ * 祖先链必须有：地点是包含关系（王城 > 庭院），到过「庭院」的人自然知道「王城」。
+ */
+function resolveVisitedLocationIds(reader: DbReader): Set<number> {
+	const ids = new Set<number>();
+	for (const row of reader.listLocationLog(Number.MAX_SAFE_INTEGER)) {
+		if (row.subject !== "player") continue;
+		if (row.from_location !== null) ids.add(row.from_location);
+		if (row.to_location !== null) ids.add(row.to_location);
+	}
+	const current = reader.getPlayerLocation();
+	if (current !== undefined) ids.add(current.id);
+
+	const byId = new Map(reader.listLocations().map((l) => [l.id, l]));
+	for (const id of [...ids]) {
+		let parent = byId.get(id)?.parent_id ?? null;
+		while (parent !== null && !ids.has(parent)) {
+			ids.add(parent);
+			parent = byId.get(parent)?.parent_id ?? null;
+		}
+	}
+	return ids;
+}
+
+/**
+ * 「user 知道」的 NPC 追加集：叙事文本（turn_log.narrative_text）里出现过名字的 NPC。
+ * 这是「知道」的近似——故事里被提起过的人，玩家就认识；真正的「见过面」没有可靠落库记录。
+ * 名字匹配为子串匹配，可能误判（同名/子串），故只用于**放宽**可见性，不用于收紧。
+ */
+function resolveMentionedNpcIds(reader: DbReader): Set<number> {
+	const names = new Map<number, string>();
+	for (const npc of reader.listNpcs()) {
+		if (npc.name.trim() !== "") names.set(npc.id, npc.name);
+	}
+	const hit = new Set<number>();
+	if (names.size === 0) return hit;
+	for (const turn of reader.getTurnLog()) {
+		for (const [id, name] of names) {
+			if (!hit.has(id) && turn.narrative_text.includes(name)) hit.add(id);
+		}
+	}
+	return hit;
+}
+
+/**
+ * 冒险视图：与 DbReader 同形的只读方法子集。
+ * filter="none" 全量透传（sys_ 键也可见）；filter="user-related" 的总原则是
+ * **只有 user 经历过或知道的数据才可见**：
+ * - NPC 域（listNpcs / findNpcByCardRef / getNpc）只返回集合内的行（自身 ∪ 有关系 ∪ 同地点 ∪ 叙事提起过）；
+ *   越集 id 调 getNpc 返回 undefined（UI 友好）；可见 NPC 的 composite 内 relations 再按「对端也在集合内」过滤。
+ * - 地点（listLocations / getLocation）只给 user 到过的（含祖先链）；越集 getLocation 返回 undefined。
+ * - 事件（listEvents）只给发生在 user 到过地点的事件。
+ * - 位移记录（listLocationLog）只给玩家自己的。
+ * - 幕/阶段（listPhases）、剧情大纲指令（listDirectives）、落库状态（listDataStatus）一律不可见
+ *   （分别是叙事结构元数据、作者意图、内核运维面）。
+ * - world_state 隐藏 sys_ 前缀内核簿记键（player_location / player_npc_id 保持可见）。
+ * - clock / time_log / turn_log 全量：时间可感知，叙事与玩家输入本就是 user 自己的经历。
  *
- * 注意：相关集合（relatedSet）在**构造时**解析并冻结一次——冒险可见性在该视图实例上不会随 NPC 移动而刷新。
- * 需要新鲜可见性的调用方（如 assist 工具的跨轮存续会话）应**每次查询重建**视图（createDbView + resolveRelatedNpcSet
- * 开销可忽略），而不是复用同一实例。
+ * 注意：相关集合与到访地点集都在**构造时**解析并冻结一次——可见性不会随移动/新叙事自动刷新。
+ * 需要新鲜可见性的调用方（如 assist 工具的跨轮存续会话）应**每次查询重建**视图，而不是复用同一实例。
  */
 export class DbView {
 	private readonly reader: DbReader;
 	private readonly filter: "none" | "user-related";
 	private readonly related: RelatedNpcSet;
+	/** 「user 经历过」的地点集合（user-related 下用于地点/事件过滤，见 resolveVisitedLocationIds）。 */
+	private readonly visitedLocationIds: Set<number>;
 
 	constructor(reader: DbReader, filter: "none" | "user-related") {
 		this.reader = reader;
 		this.filter = filter;
 		this.related = resolveRelatedNpcSet(reader);
+		this.visitedLocationIds = resolveVisitedLocationIds(reader);
 	}
 
 	/** 相关 NPC 集合（供 UI/assist 消费；"none" 模式下仅信息性）。 */
@@ -152,11 +210,16 @@ export class DbView {
 	// 叙事世界
 	// ------------------------------------------------------------------
 
+	/** 事件：user-related 下只给「发生在 user 到过的地点」的事件——没去过的地方出什么事，玩家无从得知。 */
 	listEvents(options: { fromTurn?: number; toTurn?: number; type?: string } = {}): EventRow[] {
-		return this.reader.listEvents(options);
+		const rows = this.reader.listEvents(options);
+		if (this.filter === "none") return rows;
+		return rows.filter((e) => e.location_id !== null && this.visitedLocationIds.has(e.location_id));
 	}
 
+	/** 幕/阶段：冒险（user-related）下不暴露叙事结构元数据（含创作目标 goals）。 */
 	listPhases(): PhaseRow[] {
+		if (this.filter === "user-related") return [];
 		return this.reader.listPhases();
 	}
 
@@ -172,11 +235,16 @@ export class DbView {
 	// 空间基元
 	// ------------------------------------------------------------------
 
+	/** 地点：user-related 下只给「user 到过的」地点（含祖先链）——没去过的地方连名字都不该知道。 */
 	listLocations(): LocationRow[] {
-		return this.reader.listLocations();
+		const rows = this.reader.listLocations();
+		if (this.filter === "none") return rows;
+		return rows.filter((l) => this.visitedLocationIds.has(l.id));
 	}
 
+	/** 单地点读：越集（未到过）返回 undefined，与 getNpc 的越集语义一致。 */
 	getLocation(id: number): LocationRow | undefined {
+		if (this.filter === "user-related" && !this.visitedLocationIds.has(id)) return undefined;
 		return this.reader.getLocation(id);
 	}
 
@@ -184,8 +252,11 @@ export class DbView {
 		return this.reader.getPlayerLocation();
 	}
 
+	/** 位移记录：user-related 下只给玩家自己的——别人的行程是别人的事。 */
 	listLocationLog(limit = 20): LocationLogRow[] {
-		return this.reader.listLocationLog(limit);
+		const rows = this.reader.listLocationLog(limit);
+		if (this.filter === "none") return rows;
+		return rows.filter((r) => r.subject === "player");
 	}
 
 	// ------------------------------------------------------------------
@@ -226,11 +297,15 @@ export class DbView {
 		return this.reader.getTurnLog(turnSeq);
 	}
 
+	/** 剧情大纲指令：作者意图（非世界事实），冒险（user-related）下完全不可见。 */
 	listDirectives(status?: "active" | "done" | "revoked"): DirectiveRow[] {
+		if (this.filter === "user-related") return [];
 		return this.reader.listDirectives(status);
 	}
 
+	/** data 落库状态：内核运维面（失败/补齐/重试记录），玩家侧不可见。 */
 	listDataStatus(): DataStatusRow[] {
+		if (this.filter === "user-related") return [];
 		return this.reader.listDataStatus();
 	}
 }

@@ -247,30 +247,46 @@ test("world_state：sys_ 键在 user-related 下隐藏、none 下可见；player
 	}
 });
 
-test("世界公开面（events/locations/phases/time_log/clock/turn_log/directives/location_log）user-related 下全量透传", () => {
+test("user-related 只给「user 经历过或知道」的数据：到过地点/当地事件可见，未到过的与作者意图/运维面不可见", () => {
 	const dir = makeTempDir();
 	try {
 		const story = openStoryDb(join(dir, "story.db"));
 		const city = story.writer.insertLocation({ name: "王城" });
-		const yard = story.writer.insertLocation({ name: "庭院" });
+		const yard = story.writer.insertLocation({ name: "庭院" }); // 玩家没去过
 		story.writer.moveSubject({ turnSeq: 1, subject: "player", toLocationId: city.id });
+		const passerby = story.writer.insertNpc({ name: "路人" });
+		story.writer.moveSubject({ turnSeq: 2, subject: `npc:${passerby.id}`, toLocationId: yard.id }); // 别人的行程
 		story.writer.advanceClock({ turnSeq: 2, toTime: "0000-01-02", spanNote: "次日" });
-		story.writer.insertEvent({ turnSeq: 3, summary: "城门洞开", locationId: city.id });
+		story.writer.insertEvent({ turnSeq: 3, summary: "城门洞开", locationId: city.id }); // 到过地点的事件
+		story.writer.insertEvent({ turnSeq: 4, summary: "庭院私语", locationId: yard.id }); // 没到过地点的事件
 		story.writer.insertPhase({ name: "第一幕", startedTurn: 1 });
-		story.writer.recordTurnLog({ turnSeq: 4, sessionEntryId: "s1", userInput: "hi", narrativeText: "叙事" });
-		story.writer.insertDirective({ turnSeq: 5, content: "作者意图" });
+		story.writer.recordTurnLog({ turnSeq: 5, sessionEntryId: "s1", userInput: "hi", narrativeText: "叙事" });
+		story.writer.insertDirective({ turnSeq: 6, content: "作者意图" });
 
 		const view = createDbView(story.reader, "user-related");
-		assert.equal(view.getClock()?.current_time, "0000-01-02", "clock 透传");
-		assert.equal(view.listTimeLog().length, 1, "time_log 透传");
-		assert.equal(view.listEvents().length, 1, "events 透传");
-		assert.equal(view.listPhases().length, 1, "phases 透传");
-		assert.equal(view.getTurnLog().length, 1, "turn_log 透传");
-		assert.equal(view.listDirectives().length, 1, "directives 透传");
-		assert.equal(view.listLocationLog().length, 1, "location_log 透传");
-		assert.equal(view.listLocations().length, 2, "locations 透传");
-		assert.equal(view.getLocation(city.id)?.name, "王城", "getLocation 透传");
-		assert.equal(view.getPlayerLocation()?.name, "王城", "getPlayerLocation 透传");
+
+		// 可见：可感知的时间 + 自己的经历
+		assert.equal(view.getClock()?.current_time, "0000-01-02", "clock 可见（时间可感知）");
+		assert.equal(view.listTimeLog().length, 1, "time_log 可见");
+		assert.equal(view.getTurnLog().length, 1, "turn_log 可见（玩家自己的经历）");
+		assert.equal(view.getPlayerLocation()?.name, "王城", "getPlayerLocation 可见");
+
+		// 可见：到过的地点；未到过的连 getLocation 都取不到
+		assert.equal(view.listLocations().length, 1, "只给到过的地点");
+		assert.equal(view.getLocation(city.id)?.name, "王城", "到过的地点可见");
+		assert.equal(view.getLocation(yard.id), undefined, "未到过的地点越集返回 undefined");
+
+		// 可见：发生在到过地点的事件（未到过地点的事件不可见）
+		assert.equal(view.listEvents().length, 1, "只给到过地点的事件");
+
+		// 可见：位移记录只剩玩家自己的（NPC 的行程被滤掉）
+		assert.equal(view.listLocationLog().length, 1, "只给玩家自己的位移");
+		assert.equal(view.listLocationLog()[0]!.subject, "player");
+
+		// 不可见：叙事结构元数据 / 作者意图 / 内核运维面
+		assert.equal(view.listPhases().length, 0, "phases 不可见");
+		assert.equal(view.listDirectives().length, 0, "directives 不可见");
+		assert.equal(view.listDataStatus().length, 0, "data_status 不可见");
 		story.close();
 	} finally {
 		cleanupTempDir(dir);
