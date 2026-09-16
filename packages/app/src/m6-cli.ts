@@ -36,6 +36,7 @@ import {
 	MODE_PRESETS,
 	openSnapshotsDb,
 	openStoryDb,
+	PackCache,
 	resolveStoryMode,
 	snapshotsDbPath,
 	storyDbPath as coreStoryDbPath,
@@ -52,6 +53,7 @@ import {
 	type StylizeRuntimeOptions,
 	type TavernSettings,
 	type TurnResult,
+	type WorldPack,
 } from "@tavernpi/core";
 import { InputRejectedError } from "@tavernpi/core";
 
@@ -78,6 +80,12 @@ interface CliCtx {
 	prompts: PromptLayerDirs;
 	/** 文风（--style：启用 stylize 阶段，并把该值作为 styleHint 注入）。 */
 	style?: string;
+	/** 卡包检索注入（packDirs 为空 = undefined，无注入形态）。 */
+	packs?: { cache: PackCache; pinned: () => string[] };
+	/** 会话级手动钉列表（/pin /unpin 维护；经 getter 传入 runtime）。 */
+	pinned: string[];
+	/** 已加载包目录（/packs 展示；fork 重建复用同一列表重建 cache）。 */
+	packDirs: string[];
 }
 
 /** subagent 开关 combo：story/npc 必开。
@@ -88,6 +96,7 @@ function runtimeExtras(ctx: CliCtx, storyDir: string): {
 	npc: { enabled: boolean };
 	story: { enabled: boolean };
 	stylize?: StylizeRuntimeOptions;
+	packs?: { cache: PackCache; pinned: () => string[] };
 } {
 	// stylize 开启条件：显式 --style ／ 故事模式为 adventure（预设强制全开）／
 	// 卡包在 story.yaml 里声明了 defaultStyle——作者写下它就是想让这部作品用它，
@@ -101,6 +110,7 @@ function runtimeExtras(ctx: CliCtx, storyDir: string): {
 		npc: { enabled: true },
 		story: { enabled: true },
 		...(stylizeOn ? { stylize: { enabled: true, ...(ctx.style ? { styleHint: ctx.style } : {}) } } : {}),
+		...(ctx.packs !== undefined ? { packs: ctx.packs } : {}),
 	};
 }
 
@@ -344,6 +354,22 @@ function printRestoreResult(result: SnapshotRestoreResult | undefined, runtime: 
 }
 
 /** 单个 NPC 分卡细节：特征（最新演化）/ 关系（对端 + 好感）/ 记忆（条数 + 最近一条）。 */
+function printPacks(packs: WorldPack[]): void {
+	if (packs.length === 0) {
+		console.log("--- packs: 无（无世界包注入） ---");
+		return;
+	}
+	console.log("--- packs ---");
+	for (const p of packs) {
+		const byType = new Map<string, number>();
+		for (const e of p.entries) byType.set(e.type, (byType.get(e.type) ?? 0) + 1);
+		const typeSummary = [...byType.entries()].map(([t, n]) => `${t} ${n}`).join("、");
+		console.log(
+			`[${p.name}] ${p.dir}\n  条目 ${p.entries.length}（${typeSummary}）· ${p.hasCode ? "含代码（挂载扩展）" : "纯内容包"}${p.story.title ? `\n  story.yaml: ${p.story.title}（${p.story.calendar ?? "默认历法"}/${p.story.granularity ?? "默认粒度"}）` : ""}`,
+		);
+	}
+}
+
 function printNpcDetails(view: DbView, npc: NpcRow, npcNameById: Map<number, string>): void {
 	const comp = view.getNpc(npc.id);
 	// 越集防御：DbView 在 user-related 模式下对集合外 NPC 返回 undefined。
@@ -371,7 +397,7 @@ function printNpcDetails(view: DbView, npc: NpcRow, npcNameById: Map<number, str
 	}
 }
 
-function printStatus(runtime: StoryRuntime): void {
+function printStatus(runtime: StoryRuntime, ctx: CliCtx): void {
 	const reader = runtime.storyState.storyDb.reader;
 	// 走模式视图（与 /assist 同一套口径）：冒险（信息迷雾）下 DB 查看仅「与 user 相关」——
 	// 原先直接读 reader 全量，会把尚未接触的 NPC 连同其特征/关系/记忆一并列出来。
@@ -401,6 +427,9 @@ function printStatus(runtime: StoryRuntime): void {
 	}
 	console.log("");
 	console.log(`轮数: ${turns.length} · events: ${events.length} 行 · 快照: ${snaps.length} 份 · data_status: ${dataStatus.length} 行`);
+	console.log(
+		`packs: ${ctx.packDirs.length > 0 ? ctx.packDirs.join(", ") : "（无）"} | pinned: ${ctx.pinned.length > 0 ? ctx.pinned.join(", ") : "（无）"}`,
+	);
 	console.log(`session: ${runtime.sessionManager.getSessionId()} · leaf: ${runtime.sessionManager.getLeafId()}`);
 }
 
@@ -412,6 +441,10 @@ function printHelp(): void {
 			"  /tree <序号|entryId>  跳转到目标条目（钩子自动恢复 DB）",
 			"  /fork <序号|entryId>  从目标条目分叉新故事（fork 产物继承模式，冒险继承锁定）",
 			"  /status            查看当前状态：时间 / 位置 / 模式 / NPC 分卡（冒险模式仅显示与玩家相关的）",
+			"  /packs             列出已加载世界包与条目统计",
+			"  /pin <包名:type:id>   手动钉条目（每轮必注入，最高优先级）",
+			"  /unpin <包名:type:id> 取消手动钉",
+			"  /reload            重新加载卡包（mtime 检测；校验失败回退上次成功快照 + warning）",
 			"  /mode              查看当前内核级模式（创造 / 生存 / 冒险）",
 			"  /mode <模式>         切换模式（catch 非法切换错；冒险锁定不可切）",
 			"  /plot <文本>         创造模式专属：写入剧情大纲指令（生存/冒险报错）",
@@ -438,6 +471,12 @@ function printTurn(report: TurnResult): void {
 		console.log("（本轮主叙事未产出正文，无内容可显示；详见上方 warning）");
 	}
 	// 系统信息行：`· ` 前缀；警告/错误用 `! ` 前缀。
+	if (report.collection) {
+		const c = report.collection;
+		console.log(
+			`· 卡包注入: ${c.injected.length > 0 ? c.injected.join("、") : "（无命中）"}${c.warnings.length > 0 ? ` · 警告: ${c.warnings.join("；")}` : ""}`,
+		);
+	}
 	if (report.npc) {
 		const onstage = report.npc.onstageNpcIds;
 		console.log(
@@ -494,6 +533,8 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 
 	// fork 产物继承元数据：复制 story.meta.json——模式与锁定（adventure）随 mode 继承。
 	inheritStoryMeta(oldStoryState.storyDir, newStoryDir);
+	// fork 重建 cache（注入热更按当前磁盘包内容）。
+	if (ctx.packDirs.length > 0) ctx.packs = { cache: new PackCache(ctx.packDirs), pinned: () => ctx.pinned };
 
 	const newStoryState = {
 		storyDir: newStoryDir,
@@ -543,8 +584,43 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			return cmdFork(arg, runtime, ctx);
 		}
 		case "status":
-			printStatus(runtime);
+			printStatus(runtime, ctx);
 			return undefined;
+		case "packs": {
+			if (ctx.packs === undefined) {
+				printPacks([]);
+			} else {
+				const { packs, warnings } = ctx.packs.cache.getPacks();
+				printPacks(packs);
+				for (const w of warnings) console.warn(`[warn] ${w}`);
+			}
+			return undefined;
+		}
+		case "pin": {
+			if (arg === "") {
+				console.log("用法: /pin <包名:type:id>");
+				return undefined;
+			}
+			if (!ctx.pinned.includes(arg)) ctx.pinned.push(arg);
+			console.log(`> pinned: [${ctx.pinned.join(", ")}]`);
+			return undefined;
+		}
+		case "unpin": {
+			const idx = ctx.pinned.indexOf(arg);
+			if (idx >= 0) ctx.pinned.splice(idx, 1);
+			console.log(`> pinned: [${ctx.pinned.join(", ")}]`);
+			return undefined;
+		}
+		case "reload": {
+			if (ctx.packs === undefined) {
+				console.log("> 无卡包");
+				return undefined;
+			}
+			const { packs, warnings } = ctx.packs.cache.getPacks();
+			console.log(`> 已重载: ${packs.map((p) => `${p.name}(${p.entries.length} 条目)`).join(", ")}`);
+			for (const w of warnings) console.warn(`[warn] ${w}`);
+			return undefined;
+		}
 		case "mode": {
 			if (arg === "") {
 				console.log(`> 当前模式: ${MODE_LABEL[runtime.mode]}（${runtime.mode}）`);
@@ -755,6 +831,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 	const rl = createInterface({ input: process.stdin, output: process.stdout });
 	const queue = new LineQueue(rl);
 
+	const pinned: string[] = [];
 	const ctx: CliCtx = {
 		storiesRoot,
 		cwd,
@@ -762,7 +839,12 @@ export async function main(argv: readonly string[]): Promise<void> {
 		modelRuntime,
 		prompts,
 		...(args.style !== undefined ? { style: args.style } : {}),
+		pinned,
+		packDirs,
 	};
+	if (packDirs.length > 0) {
+		ctx.packs = { cache: new PackCache(packDirs), pinned: () => ctx.pinned };
+	}
 
 	let runtime: StoryRuntime = await createStoryRuntime({
 		cwd,
