@@ -79,14 +79,22 @@ interface CliCtx {
 }
 
 /** subagent 开关 combo：story/npc 必开。
- *  stylize 仅在「传了 --style」或「故事模式为 adventure」时启用——后者是模式预设要求全开、不可关；
- *  其余情况默认关闭，stylize 是可选润色阶段，开着就是每轮白付一次 LLM 调用与延迟。 */
+ *  stylize 在三种情况下启用：显式 --style、故事模式为 adventure（预设强制全开、不可关）、
+ *  或卡包在 story.yaml 里声明了 defaultStyle（见下方 runtimeExtras 内注释）。
+ *  其余情况默认关闭——stylize 是可选润色阶段，开着就是每轮多付一次 LLM 调用与延迟。 */
 function runtimeExtras(ctx: CliCtx, storyDir: string): {
 	npc: { enabled: boolean };
 	story: { enabled: boolean };
 	stylize?: StylizeRuntimeOptions;
 } {
-	const stylizeOn = resolveStoryMode(undefined, storyDir) === "adventure" || ctx.style !== undefined;
+	// stylize 开启条件：显式 --style ／ 故事模式为 adventure（预设强制全开）／
+	// 卡包在 story.yaml 里声明了 defaultStyle——作者写下它就是想让这部作品用它，
+	// 若只在 --style 时才生效，该字段对「没传 --style」的玩家就形同虚设。
+	const meta = readStoryMeta(storyDir);
+	const stylizeOn =
+		resolveStoryMode(undefined, storyDir) === "adventure" ||
+		ctx.style !== undefined ||
+		meta?.defaultStyle !== undefined;
 	return {
 		npc: { enabled: true },
 		story: { enabled: true },
@@ -409,7 +417,7 @@ function printHelp(): void {
 			"模式：--mode 创造|生存|冒险 仅创建时生效；--resume 从 story.meta.json 恢复；提示符为 [模式]>。",
 			"输入校验：生存/冒险拒非 user 角色输入（命令 NPC/指定剧情结局）→ 打印 reason/suggestion，",
 			"  可用 /! 前缀强制提交（留痕 warning）；创造模式不校验。",
-			"subagent：story/npc/data 恒开；stylize 默认关（--style 开启，adventure 强制开）。",
+			"subagent：story/npc/data 恒开；stylize 默认关（--style 或卡包 defaultStyle 开启，adventure 强制开）。",
 		].join("\n"),
 	);
 }
