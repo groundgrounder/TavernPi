@@ -178,6 +178,27 @@ const MODE_LABEL: Record<StoryMode, string> = {
 	adventure: "冒险",
 };
 
+/** 斜杠命令名（与 /help 一致；供 Tab 补全）。 */
+const COMMANDS = [
+	"/tree",
+	"/fork",
+	"/status",
+	"/packs",
+	"/pin",
+	"/unpin",
+	"/reload",
+	"/agents",
+	"/models",
+	"/prompt",
+	"/write",
+	"/mode",
+	"/plot",
+	"/swipe",
+	"/compact",
+	"/assist",
+	"/help",
+] as const;
+
 /** 提示词角色清单（与 core/prompts/*.md 的文件名一一对应；/prompt 用它列出生效层）。 */
 const PROMPT_ROLES = [
 	"narrator",
@@ -488,6 +509,10 @@ function printHelp(): void {
 			"  /compact           触发章节摘要 compaction（会话太小友好提示）",
 			"  /assist <文本>       带外顾问（只读/草稿制/不进叙事）：创作建议或 RPG 建议",
 			"  /help              本帮助",
+			"",
+			"快捷键：Tab 补全命令/角色名 · ↑↓ 翻历史 · Ctrl+L 清屏 · Ctrl+A/E 行首行尾 · Ctrl+W 删词",
+			"  （以上除 Tab 外均为 readline 默认；Ctrl+P 已被 readline 占用为「上一条历史」）",
+			"  Ctrl+C 第一次 = 请求退出（当前轮若在生成，等它结束），第二次 = 立即强制退出",
 			"  空行               退出（不删故事目录，可 --resume 续写）",
 			"",
 			"模式：--mode 创造|生存|冒险 仅创建时生效；--resume 从 story.meta.json 恢复；提示符为 [模式]>。",
@@ -1044,7 +1069,34 @@ export async function main(argv: readonly string[]): Promise<void> {
 	console.log(`> storyDir: ${storyState.storyDir}`);
 	for (const w of settingsWarnings) console.warn(`[warn] ${w}`);
 
-	const rl = createInterface({ input: process.stdin, output: process.stdout });
+	const rl = createInterface({
+		input: process.stdin,
+		output: process.stdout,
+		// Tab 补全：斜杠命令名；/mode 补模式；/prompt 与 /agents 补各自的名字。
+		// 注：Ctrl+P 在 readline 里已是「上一条历史」，与「打开菜单」冲突，故菜单仍走 /help。
+		completer: (line: string): [string[], string] => {
+			if (!line.startsWith("/")) return [[], line];
+			const parts = line.split(/\s+/);
+			const cur = parts[parts.length - 1] ?? "";
+			if (parts.length === 1) {
+				const hits = COMMANDS.filter((c) => c.startsWith(cur));
+				return [hits.length > 0 ? [...hits] : [], cur];
+			}
+			if (parts.length === 2) {
+				const table: Record<string, readonly string[]> = {
+					"/mode": MODE_SET,
+					"/prompt": PROMPT_ROLES,
+					"/agents": ["story", "npc", "stylize"],
+				};
+				const candidates = table[parts[0] ?? ""];
+				if (candidates !== undefined) {
+					const hits = candidates.filter((c) => c.startsWith(cur));
+					return [hits.length > 0 ? [...hits] : [], cur];
+				}
+			}
+			return [[], cur];
+		},
+	});
 	const queue = new LineQueue(rl);
 
 	const pinned: string[] = [];
@@ -1076,6 +1128,23 @@ export async function main(argv: readonly string[]): Promise<void> {
 		...runtimeExtras(ctx, storyState.storyDir),
 	});
 	attachInteraction(runtime, queue);
+	// Ctrl+C：第一次请求退出（若当前轮正在生成，等它结束再退），第二次强制退出。
+	// 不接管的话 readline 只会把接口关掉——若此刻卡在几百秒的主叙事里，用户按了 Ctrl+C
+	// 既没有提示也不会退出，会以为进程挂了。
+	let sigintCount = 0;
+	rl.on("SIGINT", () => {
+		sigintCount++;
+		if (sigintCount >= 2) {
+			console.log("\n> 强制退出（未等当前操作完成）");
+			process.exit(130);
+		}
+		console.log(
+			runtime.session.isStreaming
+				? "\n> 已收到 Ctrl+C：当前轮仍在生成，会在它结束后退出；再按一次立即强制退出。"
+				: "\n> 已收到 Ctrl+C：正在退出（再按一次可强制立即退出）。",
+		);
+		rl.close();
+	});
 	console.log(
 		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具）`,
 	);
