@@ -21,19 +21,9 @@
     "spike:07": "node packages/app/spike/07-compaction.ts",
     "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p packages/app/tsconfig.json && tsc -p packages/tools/tsconfig.json",
     "test": "node --test \"packages/core/test/**/*.test.ts\"",
-    "m1:cli": "node packages/app/src/m1-cli.ts",
-    "m1:accept": "node packages/app/acceptance/m1.ts",
-    "m2:cli": "node packages/app/src/m2-cli.ts",
-    "m3:cli": "node packages/app/src/m3-cli.ts",
-    "m4:cli": "node packages/app/src/m4-cli.ts",
-    "m5:cli": "node packages/app/src/m5-cli.ts",
     "m6:cli": "node packages/app/src/m6-cli.ts",
     "pack:check": "node packages/tools/src/cli.ts check",
-    "m3:accept": "node packages/app/acceptance/m3.ts",
-    "m4:accept": "node packages/app/acceptance/m4.ts",
-    "m5:accept": "node packages/app/acceptance/m5.ts",
-    "m6:accept": "node packages/app/acceptance/m6.ts",
-    "m2:accept": "node packages/app/acceptance/m2.ts"
+    "m6:accept": "node packages/app/acceptance/m6.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

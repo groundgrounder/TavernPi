@@ -63,7 +63,7 @@ node packages/tools/src/cli.ts templates           # SQL 表模板库（可抄�
 packages/
 ├── core/   # @tavernpi/core：turn pipeline 编排 + DB 层 + 快照 + subagent 体系
 │           # + 提示词分层 + 卡包加载 + 模式预设/视图过滤 + assist + 对外 API
-├── app/    # CLI（m6:cli 为当前形态）+ 里程碑验收脚本（acceptance/）+ spike 工件
+├── app/    # CLI（m6:cli）+ 验收脚本（acceptance/m6.ts）+ spike 工件
 └── tools/  # @tavernpi/tools：卡包校验/骨架/模板 CLI
 ```
 
@@ -72,7 +72,7 @@ packages/
 ```bash
 npm test              # core 单测（node --test）
 npm run typecheck     # core + app
-npm run m6:accept     # M6 故事驱动验收（真实 LLM；m1-m5 同理 m1:accept…m5:accept）
+npm run m6:accept     # 故事驱动验收（真实 LLM，需 auth.json）
 ```
 
-里程碑交付状态与验收证据见 `packages/app/acceptance/`（m1–m6 各一个验收脚本）。
+里程碑交付状态与验收证据见 `packages/app/acceptance/m6.ts`（自断言脚本，需真实 LLM）。
