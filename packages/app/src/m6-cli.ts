@@ -46,6 +46,7 @@ import {
 	storyDbPath as coreStoryDbPath,
 	validateSubagentSwitches,
 	type DbView,
+	type InteractionRequest,
 	type LocationRow,
 	type NpcRow,
 	type NpcTraitRow,
@@ -87,6 +88,8 @@ interface CliCtx {
 	style?: string;
 	/** subagent 开关（会话级，不持久化）：story/npc 默认开；stylize 缺省 undefined = 按规则自动。 */
 	agents: { story: boolean; npc: boolean; stylize?: boolean };
+	/** 行输入队列：轮中交互 handler 要用，fork / 重建 runtime 后也靠它重新挂载。 */
+	queue: LineQueue;
 	/** 卡包检索注入（packDirs 为空 = undefined，无注入形态）。 */
 	packs?: { cache: PackCache; pinned: () => string[] };
 	/** 会话级手动钉列表（/pin /unpin 维护；经 getter 传入 runtime）。 */
@@ -477,6 +480,7 @@ function printHelp(): void {
 			"  /agents            查看/设置 subagent 开关（/agents <story|npc|stylize> <on|off>）",
 			"  /models            查看各角色解析到的模型（配置见 ~/.tavernpi/settings.json）",
 			"  /prompt            查看提示词分层（/prompt [角色] [load <文件>|clear]）",
+			"  /write <文件>        受信任写入：按 Changeset 契约直写故事库（校验失败零落库）",
 			"  /mode              查看当前内核级模式（创造 / 生存 / 冒险）",
 			"  /mode <模式>         切换模式（catch 非法切换错；冒险锁定不可切）",
 			"  /plot <文本>         创造模式专属：写入剧情大纲指令（生存/冒险报错）",
@@ -584,8 +588,46 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 		onWarning: (m) => console.warn(`[warn] ${m}`),
 		...runtimeExtras(ctx, newStoryDir),
 	});
+	attachInteraction(newRuntime, ctx.queue);
 	console.log(`> 已切换故事: ${oldSessionId} → ${newSessionId}`);
 	return newRuntime;
+}
+
+/** 轮中交互 handler：把 broker 的请求落到 readline 上（内置 confirm/choice/text 三种 kind）。
+ *  卡包代码工具经 getInteractionBroker() 发起请求时走到这里；未挂 handler 时 broker 抛
+ *  InteractionUnavailableError，由工具自行降级（不崩、不挂死）。 */
+async function readlineInteractionHandler(req: InteractionRequest, queue: LineQueue): Promise<unknown> {
+	switch (req.kind) {
+		case "confirm": {
+			const answer = (await queue.nextLine(`${req.prompt}（y/n）> `)).trim().toLowerCase();
+			if (answer === "y" || answer === "yes") return { confirmed: true };
+			if (answer === "n" || answer === "no") return { confirmed: false };
+			throw new Error(`非法确认输入: ${JSON.stringify(answer)}（应为 y/n）`);
+		}
+		case "choice": {
+			const options = ((req.payload ?? {}) as { options?: unknown }).options;
+			if (!Array.isArray(options) || options.length === 0 || !options.every((o) => typeof o === "string")) {
+				throw new Error("choice 交互缺合法 payload.options（string[]）");
+			}
+			console.log(req.prompt);
+			options.forEach((opt: string, i: number) => console.log(`  [${i + 1}] ${opt}`));
+			const line = (await queue.nextLine("> ")).trim();
+			const idx = Number(line) - 1;
+			if (!Number.isInteger(idx) || idx < 0 || idx >= options.length) {
+				throw new Error(`非法选项序号: ${JSON.stringify(line)}（应为 1-${options.length}）`);
+			}
+			return { option: idx };
+		}
+		case "text":
+			return { text: (await queue.nextLine(`${req.prompt}> `)).trim() };
+		default:
+			throw new Error(`未知交互 kind: ${req.kind}（内置 confirm/choice/text；卡包自定义 包名:kind）`);
+	}
+}
+
+/** 给 runtime 的轮中交互 broker 挂 handler。每次重建 runtime 都要重挂——broker 是实例级的。 */
+function attachInteraction(runtime: StoryRuntime, queue: LineQueue): void {
+	runtime.interaction.registerHandler((req) => readlineInteractionHandler(req, queue));
 }
 
 /** 以当前 ctx 重建 runtime：subagent 开关在创建时固化，改开关必须重建。
@@ -593,7 +635,7 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 async function rebuildRuntime(runtime: StoryRuntime, ctx: CliCtx): Promise<StoryRuntime> {
 	const { sessionManager, storyState } = runtime;
 	runtime.dispose();
-	return createStoryRuntime({
+	const rebuilt = await createStoryRuntime({
 		cwd: ctx.cwd,
 		sessionManager,
 		storyState,
@@ -604,6 +646,8 @@ async function rebuildRuntime(runtime: StoryRuntime, ctx: CliCtx): Promise<Story
 		onWarning: (m) => console.warn(`[warn] ${m}`),
 		...runtimeExtras(ctx, storyState.storyDir),
 	});
+	attachInteraction(rebuilt, ctx.queue);
+	return rebuilt;
 }
 
 async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Promise<StoryRuntime | undefined> {
@@ -725,6 +769,27 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 				return undefined;
 			}
 			console.log("用法: /prompt | /prompt <角色> | /prompt <角色> load <文件> | /prompt <角色> clear");
+			return undefined;
+		}
+		case "write": {
+			// /write <json 文件> —— 受信任写入：按 Changeset 契约直写 story.db。
+			// 校验失败由 trustedWrite 抛中文错并保证零落库；此处只负责读文件与呈现结果。
+			if (arg === "") {
+				console.log("用法: /write <changeset.json>");
+				console.log("  受信任写入：按 Changeset 契约（@tavernpi/core 的 Changeset 类型）直写故事库。");
+				return undefined;
+			}
+			try {
+				const abs = resolve(arg);
+				const raw = JSON.parse(readFileSync(abs, "utf-8")) as unknown;
+				const res = await runtime.trustedWrite(raw as Parameters<StoryRuntime["trustedWrite"]>[0]);
+				console.log(
+					`> 受信任写入完成: turnSeq=${res.turnSeq} · 快照=${res.snapshotTaken ? "已拍" : "跳过"}`,
+				);
+				console.log(`  ${JSON.stringify(res.summary)}`);
+			} catch (err) {
+				console.log(`! 写入失败: ${err instanceof Error ? err.message : String(err)}`);
+			}
 			return undefined;
 		}
 		case "agents": {
@@ -991,6 +1056,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 		prompts,
 		...(args.style !== undefined ? { style: args.style } : {}),
 		agents: { story: true, npc: true },
+		queue,
 		pinned,
 		packDirs,
 	};
@@ -1009,6 +1075,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 		onWarning: (m) => console.warn(`[warn] ${m}`),
 		...runtimeExtras(ctx, storyState.storyDir),
 	});
+	attachInteraction(runtime, queue);
 	console.log(
 		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具）`,
 	);
