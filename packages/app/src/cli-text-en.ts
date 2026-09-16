@@ -16,8 +16,8 @@ export const EN = {
 	hint: "Type an action or line of dialogue to begin. /help for commands, blank line to exit.",
 	lockedBadge: " · locked",
 	untitled: "untitled",
-	sessionId: (id: string) => `session: ${id}`,
-	storyDir: (dir: string) => `story dir: ${dir}`,
+	sessionId: (id: string) => `> session: ${id}`,
+	storyDir: (dir: string) => `> story dir: ${dir}`,
 	toolWhitelist: (tools: string) => `tool whitelist: [${tools}] (expected empty: narrator has no DB tools)`,
 	modeRestoredFromMeta: (mode: string) => `> mode: ${mode} (from story.meta.json)`,
 	clockInit: (t: string, cal: string, gran: string) => `> clock: ${t} (${cal}/${gran})`,
@@ -30,6 +30,8 @@ export const EN = {
 	no: "no",
 	none: "none",
 	unset: "unset",
+	/** 列表分隔符（中文版用「、」，英文用「, 」）。 */
+	listSep: ", ",
 
 	// ---- /help ----
 	helpTitle: "Commands:",
@@ -70,6 +72,13 @@ export const EN = {
 	treeNotFound: (arg: string) => `no entry id with prefix: ${arg}`,
 	treeNavigating: (id: string, role: string) => `> navigateTree(${id}) (${role} message)`,
 
+	// ---- /fork ----
+	forkUsage: "usage: /fork <index|entryId>",
+	branchedSession: (id: string, file: string) => `> createBranchedSession -> new sessionId=${id} (file ${file})`,
+	forkedStoryDb: (dir: string, events: number, snaps: number) =>
+		`> forkStoryDb -> new story dir ${dir} (events=${events}, snapshots=${snaps})`,
+	storySwitched: (from: string, to: string) => `> story switched: ${from} -> ${to}`,
+
 	// ---- /status ----
 	statusTitle: "── status ──",
 	statusLine: (time: string, pos: string, mode: string) => `time: ${time} · location: ${pos} · mode: ${mode}`,
@@ -95,6 +104,8 @@ export const EN = {
 	packsStoryLine: (title: string, cal: string, gran: string) => `    ${title} (${cal} / ${gran})`,
 	packsReloaded: (list: string) => `> reloaded: ${list}`,
 	packsReloadEntry: (name: string, count: number) => `${name}(${count} entries)`,
+	reloadNone: "> no world packs loaded",
+	pinUsage: "usage: /pin <pack:type:id>",
 
 	// ---- /agents ----
 	agentsTitle: (s: string, n: string, st: string, mode: string) =>
@@ -117,12 +128,14 @@ export const EN = {
 	promptEffectiveMark: " ← effective",
 	promptMissing: "none",
 	promptChars: (n: number) => `${n} chars`,
-	promptQueryFailed: (msg: string) => `  ${msg}`,
+	promptQueryFailed: (role: string, msg: string) => `  ${role}: ${msg}`,
 	promptCleared: (role: string) => `> cleared the story-layer override for ${role}`,
 	promptSet: (role: string, chars: number, src: string) =>
 		`> set the story-layer override for ${role} (${chars} chars, from ${src})`,
 	promptSetHint: "  note: the story layer outranks pack/global/builtin; takes effect next turn.",
 	promptBadRole: (msg: string) => `! ${msg}`,
+	promptLoadUsage: "usage: /prompt <role> load <file>",
+	promptUsage: "usage: /prompt | /prompt <role> | /prompt <role> load <file> | /prompt <role> clear",
 
 	// ---- /write ----
 	writeUsage: "usage: /write <changeset.json>",
@@ -137,6 +150,7 @@ export const EN = {
 	modeSwitchFailed: (msg: string) => `> switch failed: ${msg}`,
 
 	// ---- /plot ----
+	plotUsage: "usage: /plot <outline>",
 	plotWrongMode: "! not available: /plot is creation-mode only (survival / adventure reject non-player input).",
 	plotWritten: (id: number, text: string) => `> plot directive #${id} written: ${text}`,
 
@@ -202,6 +216,7 @@ export const EN = {
 	inputForceHint: "! to submit as-is, prefix it with /! (a warning will be recorded).",
 
 	// ---- 交互通道 ----
+	interactionConfirmPrompt: (prompt: string) => `${prompt} (y/n)> `,
 	interactionBadConfirm: (answer: string) => `invalid confirmation: ${answer} (expected y/n)`,
 	interactionBadChoice: "choice interaction needs payload.options (string[])",
 	interactionBadIndex: (line: string, max: number) => `invalid option index: ${line} (expected 1-${max})`,

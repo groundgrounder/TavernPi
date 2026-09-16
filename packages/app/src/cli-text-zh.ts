@@ -15,8 +15,8 @@ export const ZH: typeof EN = {
 	hint: "直接输入行动或对话开始。命令见 /help，空行退出。",
 	lockedBadge: " · 已锁定",
 	untitled: "未命名故事",
-	sessionId: (id) => `会话：${id}`,
-	storyDir: (dir) => `故事目录：${dir}`,
+	sessionId: (id) => `> 会话：${id}`,
+	storyDir: (dir) => `> 故事目录：${dir}`,
 	toolWhitelist: (tools) => `工具白名单：[${tools}]（应为空：主叙事不挂 DB 工具）`,
 	modeRestoredFromMeta: (mode) => `> 恢复模式：${mode}（来自 story.meta.json）`,
 	clockInit: (t, cal, gran) => `> clock 初值：${t}（${cal}/${gran}）`,
@@ -29,6 +29,7 @@ export const ZH: typeof EN = {
 	no: "否",
 	none: "无",
 	unset: "未设置",
+	listSep: "、",
 
 	// ---- /help ----
 	helpTitle: "命令：",
@@ -68,6 +69,13 @@ export const ZH: typeof EN = {
 	treeNotFound: (arg) => `找不到 entry id 前缀：${arg}`,
 	treeNavigating: (id, role) => `> navigateTree(${id})（${role} 消息）`,
 
+	// ---- /fork ----
+	forkUsage: "用法：/fork <序号|entryId>",
+	branchedSession: (id, file) => `> createBranchedSession → 新 sessionId=${id}（文件 ${file}）`,
+	forkedStoryDb: (dir, events, snaps) =>
+		`> forkStoryDb → 新故事目录 ${dir}（events=${events}，snapshots=${snaps} 份）`,
+	storySwitched: (from, to) => `> 已切换故事：${from} → ${to}`,
+
 	// ---- /status ----
 	statusTitle: "── 状态 ──",
 	statusLine: (time, pos, mode) => `时间：${time} · 位置：${pos} · 模式：${mode}`,
@@ -93,6 +101,8 @@ export const ZH: typeof EN = {
 	packsStoryLine: (title, cal, gran) => `    ${title}（${cal} / ${gran}）`,
 	packsReloaded: (list) => `> 已重载：${list}`,
 	packsReloadEntry: (name, count) => `${name}(${count} 条目)`,
+	reloadNone: "> 无卡包",
+	pinUsage: "用法：/pin <包名:type:id>",
 
 	// ---- /agents ----
 	agentsTitle: (s, n, st, mode) => `子代理：story ${s} · npc ${n} · stylize ${st}（${mode}模式）`,
@@ -113,11 +123,13 @@ export const ZH: typeof EN = {
 	promptEffectiveMark: " ←生效",
 	promptMissing: "无",
 	promptChars: (n) => `${n} 字符`,
-	promptQueryFailed: (msg) => `  ${msg}`,
+	promptQueryFailed: (role, msg) => `  ${role}：${msg}`,
 	promptCleared: (role) => `> 已清除 ${role} 的 story 层覆盖`,
 	promptSet: (role, chars, src) => `> 已设置 ${role} 的 story 层覆盖（${chars} 字符，来源 ${src}）`,
 	promptSetHint: "  提示：story 层优先于 pack/global/builtin；下一轮生效。",
 	promptBadRole: (msg) => `! ${msg}`,
+	promptLoadUsage: "用法：/prompt <角色> load <文件路径>",
+	promptUsage: "用法：/prompt | /prompt <角色> | /prompt <角色> load <文件> | /prompt <角色> clear",
 
 	// ---- /write ----
 	writeUsage: "用法：/write <changeset.json>",
@@ -132,6 +144,7 @@ export const ZH: typeof EN = {
 	modeSwitchFailed: (msg) => `> 切换失败：${msg}`,
 
 	// ---- /plot ----
+	plotUsage: "用法：/plot <剧情大纲>",
 	plotWrongMode: "! 该模式不可用：/plot 仅创造模式合法（剧情大纲指令；生存 / 冒险拒绝非玩家输入）。",
 	plotWritten: (id, text) => `> 已写入剧情指令 #${id}：${text}`,
 
@@ -198,6 +211,7 @@ export const ZH: typeof EN = {
 
 	// ---- 交互通道 ----
 	interactionBadConfirm: (answer) => `非法确认输入：${answer}（应为 y/n）`,
+	interactionConfirmPrompt: (prompt) => `${prompt}（y/n）> `,
 	interactionBadChoice: "choice 交互缺合法 payload.options（string[]）",
 	interactionBadIndex: (line, max) => `非法选项序号：${line}（应为 1-${max}）`,
 	interactionUnknownKind: (kind) => `未知交互 kind：${kind}`,

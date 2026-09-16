@@ -62,7 +62,7 @@ import {
 	type WorldPack,
 } from "@tavernpi/core";
 import { InputRejectedError } from "@tavernpi/core";
-import { EN } from "./cli-text-en.ts";
+import { EN, EN_ERRORS } from "./cli-text-en.ts";
 
 // ---------------------------------------------------------------------------
 // 常量与参数
@@ -156,11 +156,11 @@ function resolveTreeTarget(sessionManager: SessionManager, arg: string): Extract
 	if (/^\d+$/.test(arg)) {
 		const idx = Number(arg);
 		const entry = entries[idx - 1];
-		if (!entry) throw new Error(`序号 ${arg} 超出范围（共 ${entries.length} 条消息）`);
+		if (!entry) throw new Error(EN.treeOutOfRange(arg, entries.length));
 		return entry;
 	}
 	const hit = entries.find((e) => e.id.startsWith(arg));
-	if (!hit) throw new Error(`找不到 entry id 前缀: ${arg}`);
+	if (!hit) throw new Error(EN.treeNotFound(arg));
 	return hit;
 }
 
@@ -172,7 +172,7 @@ function truncate(text: string, max: number): string {
 // 呈现层工具（呈现美化：显示宽 / 模式文案 / 树形引导线 / 度量徽章）
 // ---------------------------------------------------------------------------
 
-/** 模式中文名（三模式；adventure 追加「已锁定」徽章）。 */
+/** 模式显示名（英文；中文版留给 GUI，见 cli-text-zh.ts）。 */
 const MODE_LABEL: Record<StoryMode, string> = {
 	creation: "creation",
 	survival: "survival",
@@ -226,7 +226,7 @@ const PROMPT_ROLES = [
 	"assist_adventure",
 ] as const;
 
-/** 会话条目类型 → 树形展示的角色标签；非消息条目尽量平实中文。 */
+/** 会话条目类型 → 树形展示的角色标签；非消息条目给平实英文标签。 */
 const ENTRY_ROLE_LABEL: Record<string, string> = {
 	custom: "custom",
 	custom_message: "custom message",
@@ -292,9 +292,9 @@ function weightGauge(weight: number): string {
 	return "▰".repeat(filled) + "▱".repeat(5 - filled);
 }
 
-/** 从地点沿 parent_id 上溯解析父链（如「王城 > 庭院」）；未登记父名断链；无地点返回「未定位」。 */
+/** 从地点沿 parent_id 上溯解析父链（如「王城 > 庭院」）；未登记父名断链；无地点给 EN.unlocated。 */
 function locationChain(loc: LocationRow | undefined, byId: Map<number, LocationRow>): string {
-	if (!loc) return "未定位";
+	if (!loc) return EN.unlocated;
 	const chain: string[] = [];
 	const seen = new Set<number>();
 	let cur: LocationRow | undefined = loc;
@@ -327,14 +327,14 @@ function formatTreeEntry(entry: SessionEntry, currentId: string | null, msgIndex
 		const idx = msgIndex.get(entry.id) ?? "?";
 		line = `#${idx} [${entry.message.role}] ${truncateByWidth(messageText(entry.message), 40)}`;
 	} else if (entry.type === "compaction") {
-		line = `◆ [摘要] ${truncateByWidth(entry.summary, 40)}`;
+		line = `◆ ${EN.treeSummary} ${truncateByWidth(entry.summary, 40)}`;
 	} else if (entry.type === "branch_summary") {
-		line = `◆ [分支摘要] ${truncateByWidth(entry.summary, 40)}`;
+		line = `◆ ${EN.treeBranchSummary} ${truncateByWidth(entry.summary, 40)}`;
 	} else {
 		const role = ENTRY_ROLE_LABEL[entry.type] ?? entry.type;
 		line = `[${role}]`;
 	}
-	return isLeaf ? `▸ ${line}（当前）` : line;
+	return isLeaf ? `▸ ${line} (${EN.treeCurrent})` : line;
 }
 
 /** 收集「故事树可见节点」：簿记条目（模型/思考变更等）透视展开，其可见后代提升到当前层（不增深）。 */
@@ -391,10 +391,10 @@ function printTree(sessionManager: SessionManager): void {
 		}
 		currentId = cur?.id ?? null;
 	}
-	console.log("── 故事树 ──");
+	console.log(EN.treeTitle);
 	const rootNodes = collectTreeNodes(tree);
 	if (rootNodes.length === 0) {
-		console.log("（空故事，尚无叙事条目）");
+		console.log(EN.treeEmpty);
 		return;
 	}
 	const out: string[] = [];
@@ -422,11 +422,13 @@ function printPacks(packs: WorldPack[]): void {
 		console.log(EN.packsNone);
 		return;
 	}
-	console.log("世界包：");
+	console.log(EN.packsTitle);
 	for (const p of packs) {
 		const byType = new Map<string, number>();
 		for (const e of p.entries) byType.set(e.type, (byType.get(e.type) ?? 0) + 1);
-		const typeSummary = [...byType.entries()].map(([t, n]) => `${ENTRY_TYPE_LABEL[t] ?? t} ${n}`).join("、");
+		const typeSummary = [...byType.entries()]
+			.map(([t, n]) => `${ENTRY_TYPE_LABEL[t] ?? t} ${n}`)
+			.join(EN.listSep);
 		console.log(EN.packsEntry(p.name, p.dir));
 		console.log(
 			EN.packsEntryLine(p.entries.length, typeSummary, p.hasCode ? EN.packsHasCode : EN.packsContentOnly),
@@ -600,11 +602,15 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 	const newFile = sessionManager.createBranchedSession(truncateId);
 	const newSessionId = sessionManager.getSessionId();
 	const newStoryDir = join(ctx.storiesRoot, newSessionId);
-	console.log(`> createBranchedSession → 新 sessionId=${newSessionId}（文件 ${newFile}）`);
+	console.log(EN.branchedSession(newSessionId, newFile ?? EN.unset));
 
 	const forkResult = forkStoryDb(oldStoryState.snapshotsDb, chain, newStoryDir);
 	console.log(
-		`> forkStoryDb → 新故事目录 ${newStoryDir}（events=${forkResult.storyDb.reader.listEvents().length}，snapshots=${forkResult.snapshotsDb.listSnapshots().length} 份）`,
+		EN.forkedStoryDb(
+			newStoryDir,
+			forkResult.storyDb.reader.listEvents().length,
+			forkResult.snapshotsDb.listSnapshots().length,
+		),
 	);
 
 	runtime.dispose(); // 级联释放 assist 会话与 broker 注册（不只 session）
@@ -633,7 +639,7 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 		...runtimeExtras(ctx, newStoryDir),
 	});
 	attachInteraction(newRuntime, ctx.queue);
-	console.log(`> 已切换故事: ${oldSessionId} → ${newSessionId}`);
+	console.log(EN.storySwitched(oldSessionId, newSessionId));
 	return newRuntime;
 }
 
@@ -643,29 +649,29 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 async function readlineInteractionHandler(req: InteractionRequest, queue: LineQueue): Promise<unknown> {
 	switch (req.kind) {
 		case "confirm": {
-			const answer = (await queue.nextLine(`${req.prompt}（y/n）> `)).trim().toLowerCase();
+			const answer = (await queue.nextLine(EN.interactionConfirmPrompt(req.prompt))).trim().toLowerCase();
 			if (answer === "y" || answer === "yes") return { confirmed: true };
 			if (answer === "n" || answer === "no") return { confirmed: false };
-			throw new Error(`非法确认输入: ${JSON.stringify(answer)}（应为 y/n）`);
+			throw new Error(EN.interactionBadConfirm(JSON.stringify(answer)));
 		}
 		case "choice": {
 			const options = ((req.payload ?? {}) as { options?: unknown }).options;
 			if (!Array.isArray(options) || options.length === 0 || !options.every((o) => typeof o === "string")) {
-				throw new Error("choice 交互缺合法 payload.options（string[]）");
+				throw new Error(EN.interactionBadChoice);
 			}
 			console.log(req.prompt);
 			options.forEach((opt: string, i: number) => console.log(`  [${i + 1}] ${opt}`));
 			const line = (await queue.nextLine("> ")).trim();
 			const idx = Number(line) - 1;
 			if (!Number.isInteger(idx) || idx < 0 || idx >= options.length) {
-				throw new Error(`非法选项序号: ${JSON.stringify(line)}（应为 1-${options.length}）`);
+				throw new Error(EN.interactionBadIndex(JSON.stringify(line), options.length));
 			}
 			return { option: idx };
 		}
 		case "text":
 			return { text: (await queue.nextLine(`${req.prompt}> `)).trim() };
 		default:
-			throw new Error(`未知交互 kind: ${req.kind}（内置 confirm/choice/text；卡包自定义 包名:kind）`);
+			throw new Error(EN.interactionUnknownKind(req.kind));
 	}
 }
 
@@ -704,10 +710,10 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 				return undefined;
 			}
 			const target = resolveTreeTarget(runtime.sessionManager, arg);
-			console.log(`> navigateTree(${target.id})（${target.message.role} 消息）`);
+			console.log(EN.treeNavigating(target.id, target.message.role));
 			const { session } = runtime;
 			if (session.isStreaming) {
-				console.log("> 正在生成中，此时不能跳转条目（请等这一轮结束）");
+				console.log(EN.navigatingBusy);
 				return undefined;
 			}
 			await session.navigateTree(target.id);
@@ -716,7 +722,7 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 		}
 		case "fork": {
 			if (arg === "") {
-				console.log("用法: /fork <序号|entryId>");
+				console.log(EN.forkUsage);
 				return undefined;
 			}
 			return cmdFork(arg, runtime, ctx);
@@ -736,7 +742,7 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 		}
 		case "pin": {
 			if (arg === "") {
-				console.log("用法: /pin <包名:type:id>");
+				console.log(EN.pinUsage);
 				return undefined;
 			}
 			if (!ctx.pinned.includes(arg)) ctx.pinned.push(arg);
@@ -751,11 +757,11 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 		}
 		case "reload": {
 			if (ctx.packs === undefined) {
-				console.log("> 无卡包");
+				console.log(EN.reloadNone);
 				return undefined;
 			}
 			const { packs, warnings } = ctx.packs.cache.getPacks();
-			console.log(`> 已重载: ${packs.map((p) => `${p.name}(${p.entries.length} 条目)`).join(", ")}`);
+			console.log(EN.packsReloaded(packs.map((p) => EN.packsReloadEntry(p.name, p.entries.length)).join(", ")));
 			for (const w of warnings) console.warn(`[warn] ${w}`);
 			return undefined;
 		}
@@ -768,12 +774,12 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			const storyDir = runtime.storyState.storyDir;
 			const dirs: PromptLayerDirs = { ...ctx.prompts, storyDir };
 			if (parts.length === 0) {
-				console.log("提示词生效层（优先级 story > pack > global > builtin）：");
+				console.log(EN.promptLayers);
 				for (const role of PROMPT_ROLES) {
 					try {
 						console.log(`  ${role}: ${resolvePromptChain(dirs, role).effectiveLayer}`);
 					} catch (err) {
-						console.log(`  ${role}: 查询失败（${err instanceof Error ? err.message : String(err)}）`);
+						console.log(EN.promptQueryFailed(role, err instanceof Error ? err.message : String(err)));
 					}
 				}
 				return undefined;
@@ -787,40 +793,40 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			}
 			if (op === undefined) {
 				const chain = resolvePromptChain(dirs, role);
-				console.log(`${role}（生效层：${chain.effectiveLayer}）`);
+				console.log(EN.promptChain(role, chain.effectiveLayer));
 				for (const l of chain.layers) {
-					const mark = l.effective ? " ←生效" : "";
-					console.log(`  ${l.layer.padEnd(8)}${l.exists ? `${l.contentLength} 字符` : "无"}${mark}`);
+					const mark = l.effective ? EN.promptEffectiveMark : "";
+					console.log(`  ${l.layer.padEnd(8)}${l.exists ? EN.promptChars(l.contentLength) : EN.promptMissing}${mark}`);
 					for (const p of l.paths) console.log(`      ${p}`);
 				}
 				return undefined;
 			}
 			if (op === "clear") {
 				clearStoryPromptOverride(storyDir, role);
-				console.log(`> 已清除 ${role} 的 story 层覆盖`);
+				console.log(EN.promptCleared(role));
 				return undefined;
 			}
 			if (op === "load") {
 				if (file === undefined) {
-					console.log("用法: /prompt <角色> load <文件路径>");
+					console.log(EN.promptLoadUsage);
 					return undefined;
 				}
 				const abs = resolve(file);
 				const content = readFileSync(abs, "utf-8");
 				setStoryPromptOverride(storyDir, role, content);
-				console.log(`> 已设置 ${role} 的 story 层覆盖（${content.length} 字符，来源 ${abs}）`);
-				console.log("  提示：story 层优先于 pack/global/builtin；下一轮生效。");
+				console.log(EN.promptSet(role, content.length, abs));
+				console.log(EN.promptSetHint);
 				return undefined;
 			}
-			console.log("用法: /prompt | /prompt <角色> | /prompt <角色> load <文件> | /prompt <角色> clear");
+			console.log(EN.promptUsage);
 			return undefined;
 		}
 		case "write": {
 			// /write <json 文件> —— 受信任写入：按 Changeset 契约直写 story.db。
 			// 校验失败由 trustedWrite 抛中文错并保证零落库；此处只负责读文件与呈现结果。
 			if (arg === "") {
-				console.log("用法: /write <changeset.json>");
-				console.log("  受信任写入：按变更集格式直接写入故事库（跳过模型，校验不通过则完全不写入）。");
+				console.log(EN.writeUsage);
+				console.log(EN.writeHint);
 				return undefined;
 			}
 			try {
@@ -828,11 +834,11 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 				const raw = JSON.parse(readFileSync(abs, "utf-8")) as unknown;
 				const res = await runtime.trustedWrite(raw as Parameters<StoryRuntime["trustedWrite"]>[0]);
 				console.log(
-					`> 受信任写入完成：第 ${res.turnSeq} 轮 · 快照：${res.snapshotTaken ? "已保存" : "未保存"}`,
+					EN.writeDone(res.turnSeq, res.snapshotTaken ? EN.yes : EN.no),
 				);
 				console.log(`  ${JSON.stringify(res.summary)}`);
 			} catch (err) {
-				console.log(`! 写入失败: ${err instanceof Error ? err.message : String(err)}`);
+				console.log(EN.writeFailed(err instanceof Error ? err.message : String(err)));
 			}
 			return undefined;
 		}
@@ -840,16 +846,21 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			// /agents 查看；/agents <story|npc|stylize> <on|off> 设置（会话级，不持久化）。
 			// 改开关必须重建 runtime——subagent 选项在创建时固化。
 			if (arg === "") {
-				const on = (b: boolean): string => (b ? "开" : "关");
+				const on = (b: boolean): string => (b ? EN.agentsOn : EN.agentsOff);
 				console.log(
-					`子代理：story ${on(ctx.agents.story)} · npc ${on(ctx.agents.npc)} · stylize ${on(stylizeEnabled(ctx, runtime.storyState.storyDir))}（${MODE_LABEL[runtime.mode]}模式）`,
+					EN.agentsTitle(
+						on(ctx.agents.story),
+						on(ctx.agents.npc),
+						on(stylizeEnabled(ctx, runtime.storyState.storyDir)),
+						MODE_LABEL[runtime.mode],
+					),
 				);
-				console.log("  用法：/agents <story|npc|stylize> <on|off>");
+				console.log(EN.agentsUsage);
 				return undefined;
 			}
 			const [name, value] = arg.split(/\s+/);
 			if ((name !== "story" && name !== "npc" && name !== "stylize") || (value !== "on" && value !== "off")) {
-				console.log("用法: /agents <story|npc|stylize> <on|off>");
+				console.log(EN.agentsBadArg("/agents <story|npc|stylize> <on|off>"));
 				return undefined;
 			}
 			const next: CliCtx["agents"] = { ...ctx.agents, [name]: value === "on" };
@@ -860,87 +871,91 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 				stylize: stylizeOn,
 			});
 			if (problems.length > 0) {
-				console.log("! 该开关组合不符合当前模式预设：");
+				console.log(EN.agentsRejected);
 				for (const p of problems) console.log(`    - ${p}`);
 				return undefined;
 			}
 			ctx.agents = next;
 			const rebuilt = await rebuildRuntime(runtime, ctx);
-			const onOff = (b: boolean): string => (b ? "开" : "关");
+			const onOff = (b: boolean): string => (b ? EN.agentsOn : EN.agentsOff);
 			console.log(
-				`子代理：story ${onOff(ctx.agents.story)} · npc ${onOff(ctx.agents.npc)} · stylize ${onOff(stylizeEnabled(ctx, runtime.storyState.storyDir))}（已生效）`,
+				EN.agentsApplied(
+					onOff(ctx.agents.story),
+					onOff(ctx.agents.npc),
+					onOff(stylizeEnabled(ctx, runtime.storyState.storyDir)),
+				),
 			);
 			return rebuilt;
 		}
 		case "models": {
 			// 角色清单与 core settings.ts 的 MODEL_ROLES 对应（那是未导出的内部常量，此处同步维护）。
 			const roles = ["narrator", "data", "story", "npc", "stylize", "chapter_summary", "assist"] as const;
-			console.log("各角色模型（配置：~/.tavernpi/settings.json 的 models）");
+			console.log(EN.modelsTitle);
 			for (const role of roles) {
 				const ref = ctx.settings.models[role];
-				console.log(`  ${role.padEnd(16)}${ref ? `${ref.provider}/${ref.id}` : "未配置 · 用 pi 默认"}`);
+				console.log(`  ${role.padEnd(16)}${ref ? `${ref.provider}/${ref.id}` : EN.modelsUnset}`);
 			}
 			return undefined;
 		}
 		case "mode": {
 			if (arg === "") {
-				console.log(`> 当前模式: ${MODE_LABEL[runtime.mode]}（${runtime.mode}）`);
+				console.log(EN.modeCurrent(MODE_LABEL[runtime.mode], runtime.mode));
 				return undefined;
 			}
 			if (!MODE_SET.includes(arg as StoryMode)) {
-				console.log(`> 非法模式: ${arg}（可选: ${MODE_SET.map((m) => MODE_LABEL[m]).join(" / ")}）`);
+				console.log(EN.modeInvalid(arg, MODE_SET.map((m) => MODE_LABEL[m]).join(" / ")));
 				return undefined;
 			}
 			try {
 				runtime.setMode(arg as StoryMode);
-				console.log(`> 已切换到 ${MODE_LABEL[arg as StoryMode]}（story.meta.json 已持久化）`);
+				console.log(EN.modeSwitched(MODE_LABEL[arg as StoryMode]));
 			} catch (err) {
-				console.log(`> 切换失败: ${err instanceof Error ? err.message : String(err)}`);
+				console.log(EN.modeSwitchFailed(err instanceof Error ? err.message : String(err)));
 			}
 			return undefined;
 		}
 		case "plot": {
 			if (arg === "") {
-				console.log("用法: /plot <剧情大纲>");
+				console.log(EN.plotUsage);
 				return undefined;
 			}
 			if (runtime.mode !== "creation") {
-				console.log(`! 该模式不可用：/plot 仅创造模式合法（剧情大纲指令；生存/冒险拒绝非 user 角色输入）。`);
+				console.log(EN.plotWrongMode);
 				return undefined;
 			}
 			const turnSeq = computeNextTurnSeq(runtime.storyState.storyDb);
 			const directive = runtime.storyState.storyDb.writer.insertDirective({ turnSeq, content: arg });
-			console.log(`> 已写入剧情指令 #${directive.id}: ${arg}`);
+			console.log(EN.plotWritten(directive.id, arg));
 			return undefined;
 		}
 		case "swipe": {
 			// /swipe（重骰）：基于分支重生成最后一个 user 轮次，旧稿留树。
 			if (arg !== "") {
-				console.log("用法: /swipe（无参数，重生成最后一个 user 轮次）");
+				console.log(EN.swipeUsage);
 				return undefined;
 			}
 			try {
 				const report = await runtime.swipe();
 				printTurn(report);
 			} catch (err) {
-				console.log(`> swipe 失败: ${err instanceof Error ? err.message : String(err)}`);
+				console.log(EN.swipeFailed(err instanceof Error ? err.message : String(err)));
 			}
 			return undefined;
 		}
 		case "compact": {
 			// /compact：章节摘要 compaction。
 			if (arg !== "") {
-				console.log("用法: /compact（无参数，触发章节摘要 compaction）");
+				console.log(EN.compactUsage);
 				return undefined;
 			}
 			try {
 				const result = await runtime.session.compact();
-				console.log(`> compaction 完成: ${result.summary.slice(0, 120)}${result.summary.length > 120 ? "…" : ""}`);
-				console.log(`> 摘要替换 ${result.tokensBefore} tokens（压缩条目已写入会话）`);
+				console.log(EN.compactDone(`${result.summary.slice(0, 120)}${result.summary.length > 120 ? "…" : ""}`));
+				console.log(EN.compactReplaced(result.tokensBefore));
 			} catch (err) {
 				const m = err instanceof Error ? err.message : String(err);
 				if (/Nothing to compact|Already compacted/i.test(m)) {
-					console.log(`> compaction 跳过（友好提示）: ${m}`);
+					console.log(EN.compactSkipped(m));
 				} else {
 					throw err;
 				}
@@ -950,17 +965,17 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 		case "assist": {
 			// /assist：带外顾问，只读、草稿制、不进叙事流。输出为草稿，由用户决定是否作为输入发出。
 			if (arg === "") {
-				console.log("用法: /assist <问题/求助>");
+				console.log(EN.assistUsage);
 				return undefined;
 			}
 			try {
 				const reply = await runtime.assist.chat(arg);
-				console.log("\n── 旁路顾问 ──");
-				console.log("只读/草稿制，不进叙事流；以下为草稿，可自行决定是否作为输入发出。");
+				console.log(`\n${EN.assistTitle}`);
+				console.log(EN.assistHint);
 				console.log(reply);
 				console.log("──────────────");
 			} catch (err) {
-				console.log(`> assist 失败: ${err instanceof Error ? err.message : String(err)}`);
+				console.log(EN.assistFailed(err instanceof Error ? err.message : String(err)));
 			}
 			return undefined;
 		}
@@ -968,7 +983,7 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			printHelp();
 			return undefined;
 		default:
-			console.log(`未知命令 /${cmd}（/help 查看）`);
+			console.log(EN.unknownCommand(cmd ?? ""));
 			return undefined;
 	}
 }
@@ -1025,13 +1040,13 @@ function parseArgs(argv: readonly string[]): CliArgs {
 		} else if (a === "--mode") {
 			i++;
 			const v = argv[i];
-			if (!MODE_SET.includes(v as StoryMode)) throw new Error(`--mode 只允许 ${MODE_SET.join(" / ")}`);
+			if (!MODE_SET.includes(v as StoryMode)) throw new Error(EN_ERRORS.badModeArg(MODE_SET.join(" / ")));
 			args.mode = v as StoryMode;
 		} else if (a === "--style") {
 			i++;
 			args.style = argv[i];
 		} else {
-			throw new Error(`未知参数: ${a}`);
+			throw new Error(EN_ERRORS.unknownArg(a ?? ""));
 		}
 	}
 	return args;
@@ -1058,7 +1073,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 		};
 		const meta = readStoryMeta(storyState.storyDir);
 		if (meta?.mode !== undefined) {
-			console.log(`> 恢复模式：${meta.mode}（来自 story.meta.json）`);
+			console.log(EN.modeRestoredFromMeta(meta.mode));
 		}
 		if (packDirs.length === 0 && meta !== undefined) {
 			packDirs = meta.packs.map((p) => p.dir);
@@ -1069,9 +1084,9 @@ export async function main(argv: readonly string[]): Promise<void> {
 		sessionManager = created.sessionManager;
 		storyState = created.storyState;
 		const clock = storyState.storyDb.reader.getClock();
-		console.log(`> clock 初值: ${clock?.current_time}（${clock?.calendar}/${clock?.granularity}）`);
+		console.log(EN.clockInit(clock?.current_time ?? EN.unset, clock?.calendar ?? "", clock?.granularity ?? ""));
 		if (created.packs.length > 0) {
-			console.log(`> 已加载卡包: ${created.packs.map((p) => p.name).join("、")}`);
+			console.log(EN.packsLoaded(created.packs.map((p) => p.name).join(EN.listSep)));
 		}
 	}
 	const sessionId = sessionManager.getSessionId();
@@ -1085,8 +1100,8 @@ export async function main(argv: readonly string[]): Promise<void> {
 	const modelRuntime = await ModelRuntime.create();
 	const eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"));
 
-	console.log(`> sessionId: ${sessionId}`);
-	console.log(`> storyDir: ${storyState.storyDir}`);
+	console.log(EN.sessionId(sessionId));
+	console.log(EN.storyDir(storyState.storyDir));
 	for (const w of settingsWarnings) console.warn(`[warn] ${w}`);
 
 	const rl = createInterface({
@@ -1155,31 +1170,25 @@ export async function main(argv: readonly string[]): Promise<void> {
 	rl.on("SIGINT", () => {
 		sigintCount++;
 		if (sigintCount >= 2) {
-			console.log("\n> 强制退出（未等当前操作完成）");
+			console.log(EN.forceExit);
 			process.exit(130);
 		}
-		console.log(
-			runtime.session.isStreaming
-				? "\n> 已收到 Ctrl+C：当前轮仍在生成，会在它结束后退出；再按一次立即强制退出。"
-				: "\n> 已收到 Ctrl+C：正在退出（再按一次可强制立即退出）。",
-		);
+		console.log(runtime.session.isStreaming ? EN.ctrlCGenerating : EN.ctrlCIdle);
 		rl.close();
 	});
-	console.log(
-		`> 工具白名单: [${runtime.session.getActiveToolNames().join(", ")}]（应为空：主叙事零 DB 工具）`,
-	);
-	// 启动横幅：故事标题 + 模式中文名（adventure 追加「已锁定」徽章）。
+	console.log(EN.toolWhitelist(runtime.session.getActiveToolNames().join(", ")));
+	// 启动横幅：故事标题 + 模式名（adventure 追加 locked 徽章）。
 	const bannerMeta = readStoryMeta(storyState.storyDir);
-	const storyTitle = bannerMeta?.title ?? sessionManager.getSessionName() ?? "未命名故事";
+	const storyTitle = bannerMeta?.title ?? sessionManager.getSessionName() ?? EN.untitled;
 	const modeLabel = MODE_LABEL[runtime.mode];
-	const lockedBadge = runtime.mode === "adventure" ? " · 已锁定" : "";
-	console.log(`═══ 《${storyTitle}》 · ${modeLabel}模式${lockedBadge} ═══`);
+	const lockedBadge = runtime.mode === "adventure" ? EN.lockedBadge : "";
+	console.log(EN.banner(storyTitle, modeLabel, lockedBadge));
 	if (runtime.mode !== "creation") {
-		const modeInfo = runtime.mode === "adventure" ? "锁定，不可切换" : "story/输入校验生效";
-		console.log(`模式说明: ${modeLabel}（${modeInfo}）`);
+		const modeInfo = runtime.mode === "adventure" ? EN.modeNoteLocked : EN.modeNoteNormal;
+		console.log(EN.modeNote(modeLabel, modeInfo));
 	}
 
-	console.log("\n直接输入行动或对话开始。命令见 /help，空行退出。");
+	console.log(`\n${EN.hint}`);
 	try {
 		for (;;) {
 			const line = (await queue.nextLine(`[${MODE_LABEL[runtime.mode]}]> `)).trim();
@@ -1200,9 +1209,9 @@ export async function main(argv: readonly string[]): Promise<void> {
 					printTurn(report);
 				} catch (err) {
 					if (err instanceof InputRejectedError) {
-						console.log(`! 输入被拒绝（输入渠道校验）：${err.reason}`);
-						console.log(`! 建议改写：${err.suggestion}`);
-						console.log(`! 如确需原样提交，以 /! 开头强制提交（将留痕 warning）。`);
+						console.log(EN.inputRejected(err.reason));
+						console.log(EN.inputSuggestion(err.suggestion));
+						console.log(EN.inputForceHint);
 					} else {
 						throw err;
 					}
@@ -1215,7 +1224,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 		runtime.storyState.storyDb.close();
 		runtime.storyState.snapshotsDb.close();
 		console.log(
-			`> 故事目录保留（未删）: ${runtime.storyState.storyDir}\n> 可续写: node packages/app/src/m6-cli.ts --resume ${runtime.sessionManager.getSessionFile()}`,
+			`${EN.storyDirKept(runtime.storyState.storyDir)}\n${EN.resumeHint(`node packages/app/src/m6-cli.ts --resume ${runtime.sessionManager.getSessionFile()}`)}`,
 		);
 	}
 }
