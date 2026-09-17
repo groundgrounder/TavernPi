@@ -14,12 +14,13 @@ export const DEFAULT_STORY_CLOCK: StoryClock = {
 	granularity: "elastic",
 };
 
-/** 每轮时间推进记录。 */
+/** 每轮时间推进记录。span_days = 本轮推进的故事天数（可空；一切时间运算以此为准）。 */
 export interface TimeLogRow {
 	turn_seq: number;
 	from_time: string;
 	to_time: string;
 	span_note: string | null;
+	span_days: number | null;
 }
 
 /** 叙事事件。story_time = 事件发生的故事时间（events.story_time 锚点）。
@@ -63,12 +64,23 @@ export function parseLocationId(value: string): number | null {
 	return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
-/** 地点注册表行。parent_id 表达包含关系（如 王城>庭院），不构成完整拓扑，内核不校验连通性。 */
+/** 地点注册表行。parent_id 表达包含关系（如 王城>庭院），不构成完整拓扑，内核不校验连通性。
+ *  kind = 地理层级标签（如 国/城/区/别墅/房间；卡包自定义词汇，可空）。
+ *  x/y/z = 世界坐标（单位：步，1 单位 = 成人一步；x 东正 / y 北正 / z 上正），可空；
+ *  可空语义：x/y 成对（只给一半非法），z NULL 视为 0。 */
 export interface LocationRow {
 	id: number;
 	name: string;
 	parent_id: number | null;
 	detail: string | null;
+	/** 地理层级标签（可空；未标注为 null，渲染时省略）。 */
+	kind: string | null;
+	/** 世界坐标 x（东为正，单位步）；未标注为 null。 */
+	x: number | null;
+	/** 世界坐标 y（北为正，单位步）；未标注为 null。 */
+	y: number | null;
+	/** 世界坐标 z（上为正，单位步；楼层/地下）；未标注为 null（视为 0）。 */
+	z: number | null;
 	/** 父地点名（LEFT JOIN locations 解析；无父为 null）。 */
 	parent_name: string | null;
 }
@@ -105,7 +117,30 @@ export interface NpcTraitRow {
 	turn_seq: number;
 }
 
-/** 记忆；salience 供检索排序（默认 0，衰减语义待 M2 校准）。 */
+/** 知识来源（记忆的主观维度）：witness=亲历 / hearsay=耳闻 / inference=推断。 */
+export const MEMORY_SOURCES = ["witness", "hearsay", "inference"] as const;
+export type MemorySource = (typeof MEMORY_SOURCES)[number];
+
+/** 知识来源的中文标签（渲染用）。 */
+export const MEMORY_SOURCE_LABELS: Record<MemorySource, string> = {
+	witness: "亲历",
+	hearsay: "耳闻",
+	inference: "推断",
+};
+
+/** 记忆渲染：`内容（来源 · 时间）`；来源/时间缺省则相应省略（时间标签由 time-fuzzy 产出）。 */
+export function renderMemoryText(
+	memory: { content: string; source: MemorySource | null },
+	timeLabel?: string,
+): string {
+	const tags: string[] = [];
+	if (memory.source !== null) tags.push(MEMORY_SOURCE_LABELS[memory.source]);
+	if (timeLabel !== undefined && timeLabel !== "") tags.push(timeLabel);
+	return tags.length === 0 ? memory.content : `${memory.content}（${tags.join(" · ")}）`;
+}
+
+/** 记忆；salience 供检索排序（默认 0，衰减语义待 M2 校准）。
+ *  source = 知识来源（可空 = 未标注）；event_id = 所涉事件引用（可空；耳闻版本允许与事件不符）。 */
 export interface NpcMemoryRow {
 	id: number;
 	npc_id: number;
@@ -113,6 +148,8 @@ export interface NpcMemoryRow {
 	kind: string;
 	content: string;
 	salience: number;
+	source: MemorySource | null;
+	event_id: number | null;
 }
 
 /** 关系/好感。disposition 参考 favor 示例（-100~100，INTEGER）。 */

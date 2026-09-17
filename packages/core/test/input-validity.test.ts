@@ -172,65 +172,70 @@ test("runTurn：survival + invalid 输入 → 抛 InputRejectedError 且 DB 零�
 	}
 });
 
-test("runtime npc 预演 directives 门控：creation 注入「作者指令」/ survival 停止下达（存量不撤销）", async () => {
+test("runtime npc 预演不注入作者指令（剧本是作者视角；存量指令不撤销）", async () => {
 	const root = makeTempDir();
 	try {
-		const runOne = async (mode: "creation" | "survival"): Promise<{ captured: string[]; directivesLeft: number }> => {
-			const sessionManager = SessionManager.create(root, join(root, `sessions-${mode}`));
-			const sessionId = sessionManager.getSessionId();
-			const storyDir = join(root, sessionId);
-			const dbPath = storyDbPath(root, sessionId);
-			const storyState: StoryState = {
-				storyDir,
-				storyDb: openStoryDb(dbPath),
-				snapshotsDb: openSnapshotsDb(snapshotsDbPath(dbPath)),
-			};
-			writeStoryMeta(storyDir, { packs: [], mode, createdAt: new Date().toISOString() });
-			const w = storyState.storyDb.writer;
-			const loc = w.insertLocation({ name: "王城" });
-			w.moveSubject({ turnSeq: 0, subject: "player", toLocationId: loc.id, note: "seed" });
-			const guard = w.insertNpc({ name: "卫兵" });
-			w.moveSubject({ turnSeq: 0, subject: `npc:${guard.id}`, toLocationId: loc.id, note: "seed" });
-			w.insertDirective({ turnSeq: 0, content: "卫兵必须在黎明前交出兵符", status: "active" });
-			// 场景卡：卫兵在场（npc 阶段才会预演注入 directives）
-			const card: SceneCard = { ...sceneCard({ valid: true }), onstage_npc_ids: [guard.id] };
-			const captured: string[] = [];
-			const npcExecutor = async (o: SubagentRunOptions): Promise<SubagentResult<unknown>> => {
-				captured.push(o.userPrompt);
-				return stubResult({});
-			};
-			const runtime = await createStoryRuntime({
-				cwd: root,
-				sessionManager,
-				storyState,
-				npc: { enabled: true, executor: npcExecutor },
-				story: { enabled: true, executor: async () => stubResult(card) },
-				dataExecutor: async () => stubResult({ events: [], time_advance: { to_time: "0000-01-01", span_note: "" }, new_locations: [], location_moves: [], new_npcs: [], npc_updates: [], world_state: [] }),
-			});
-			try {
-				try {
-					await runtime.runTurn("我向卫兵问好。");
-				} catch (err) {
-					// creation/survival 合法输入放行；叙事需模型可捕获（captured 已在 npc 阶段记录）。
-					void err;
-				}
-				return { captured, directivesLeft: storyState.storyDb.reader.listDirectives("active").length };
-			} finally {
-				runtime.dispose();
-				storyState.storyDb.close();
-				storyState.snapshotsDb.close();
-			}
+		const sessionManager = SessionManager.create(root, join(root, "sessions"));
+		const sessionId = sessionManager.getSessionId();
+		const storyDir = join(root, sessionId);
+		const dbPath = storyDbPath(root, sessionId);
+		const storyState: StoryState = {
+			storyDir,
+			storyDb: openStoryDb(dbPath),
+			snapshotsDb: openSnapshotsDb(snapshotsDbPath(dbPath)),
 		};
+		writeStoryMeta(storyDir, { packs: [], mode: "creation", createdAt: new Date().toISOString() });
+		const w = storyState.storyDb.writer;
+		const loc = w.insertLocation({ name: "王城" });
+		w.moveSubject({ turnSeq: 0, subject: "player", toLocationId: loc.id, note: "seed" });
+		const guard = w.insertNpc({ name: "卫兵" });
+		w.moveSubject({ turnSeq: 0, subject: `npc:${guard.id}`, toLocationId: loc.id, note: "seed" });
+		w.insertDirective({ turnSeq: 0, content: "卫兵必须在黎明前交出兵符", status: "active" });
+		// 场景卡：卫兵在场（npc 阶段才会预演）
+		const card: SceneCard = { ...sceneCard({ valid: true }), onstage_npc_ids: [guard.id] };
+		const captured: string[] = [];
+		const npcExecutor = async (o: SubagentRunOptions): Promise<SubagentResult<unknown>> => {
+			captured.push(o.userPrompt);
+			return stubResult({});
+		};
+		const runtime = await createStoryRuntime({
+			cwd: root,
+			sessionManager,
+			storyState,
+			npc: { enabled: true, executor: npcExecutor },
+			story: { enabled: true, executor: async () => stubResult(card) },
+			dataExecutor: async () =>
+				stubResult({
+					events: [],
+					time_advance: { to_time: "0000-01-01", span_note: "" },
+					new_locations: [],
+					location_moves: [],
+					new_npcs: [],
+					npc_updates: [],
+					world_state: [],
+				}),
+		});
+		let directivesLeft = 0;
+		try {
+			try {
+				await runtime.runTurn("我向卫兵问好。");
+			} catch (err) {
+				// 叙事需模型可捕获（stub）；npc 阶段调用已在 captured 记录。
+				void err;
+			}
+			directivesLeft = storyState.storyDb.reader.listDirectives("active").length;
+		} finally {
+			runtime.dispose();
+			storyState.storyDb.close();
+			storyState.snapshotsDb.close();
+		}
 
-		const creation = await runOne("creation");
-		assert.ok(creation.captured.length > 0, "creation 有 npc 预演调用");
-		assert.ok(creation.captured.some((p) => p.includes("作者指令")), "creation：npc 预演注入作者指令");
-		assert.ok(creation.captured.some((p) => p.includes("卫兵必须在黎明前交出兵符")), "creation：指令内容出现");
-
-		const survival = await runOne("survival");
-		assert.ok(survival.captured.length > 0, "survival 有 npc 预演调用（场景卡驱动）");
-		assert.ok(!survival.captured.some((p) => p.includes("作者指令")), "survival：npc 预演不注入作者指令（停止下达）");
-		assert.equal(survival.directivesLeft, 1, "survival：存量指令未撤销");
+		assert.ok(captured.length > 0, "有 npc 预演调用（场景卡驱动）");
+		assert.ok(
+			captured.every((p) => !p.includes("作者指令") && !p.includes("卫兵必须在黎明前交出兵符")),
+			"npc 预演不注入作者指令（任何模式；角色不拿剧本）",
+		);
+		assert.equal(directivesLeft, 1, "存量指令未撤销");
 	} finally {
 		cleanupTempDir(root);
 	}

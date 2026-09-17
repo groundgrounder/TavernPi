@@ -1,5 +1,6 @@
 // Migration 框架（schema 版本化的底座）。
-// core schema 是命名迁移序列（v1 基础 schema → v2 空间基元 → v3 data_status → v4 turn_log.warnings）；
+// core schema 是命名迁移序列（v1 基础 schema → v2 空间基元 → v3 data_status → v4 turn_log.warnings
+// → v5 locations.kind → v6 locations.x/y/z 坐标 → v7 NPC 知识层 → v8 time_log.span_days 可运算时间量）；
 // 卡包 schema.sql 后续以「注册额外命名 migration」接入，与 core 迁移同表（schema_migrations）追踪，
 // 保证幂等与顺序。既有旧库 open 后原地升后续版本；新库顺序应用直达当前版本。
 
@@ -10,6 +11,11 @@ import {
 	CORE_V2_SPATIAL_SQL,
 	CORE_V3_DATA_STATUS_SQL,
 	CORE_V4_TURN_LOG_WARNINGS_SQL,
+	CORE_V5_LOCATION_KIND_SQL,
+	CORE_V6_LOCATION_COORDS,
+	CORE_V7_MEMORY_SOURCE_ALTERS,
+	CORE_V7_NPC_KNOWLEDGE_SQL,
+	CORE_V8_TIME_SPAN_ALTERS,
 } from "./schema.ts";
 
 export interface Migration {
@@ -34,7 +40,10 @@ function columnExists(db: DatabaseSync, table: string, column: string): boolean 
 	return cols.some((c) => c.name === column);
 }
 
-/** core 内置迁移。v1 = 基础 schema；v2 = 空间基元；v3 = data_status；v4 = turn_log.warnings（留痕）。 */
+/** core 内置迁移。v1 = 基础 schema；v2 = 空间基元；v3 = data_status；v4 = turn_log.warnings（留痕）；
+ *  v5 = locations.kind（地理层级标签）；v6 = locations.x/y/z（坐标，单位步）；
+ *  v7 = NPC 知识层（event_npcs 在场名册 + npc_memories.source/event_id）；
+ *  v8 = time_log.span_days（可运算时间量，单位天）。 */
 export const CORE_MIGRATIONS: Migration[] = [
 	{ name: "v1_core_schema", up: (db) => db.exec(CORE_SCHEMA_SQL) },
 	{
@@ -55,6 +64,45 @@ export const CORE_MIGRATIONS: Migration[] = [
 		up: (db) => {
 			if (!columnExists(db, "turn_log", "warnings")) {
 				db.exec(CORE_V4_TURN_LOG_WARNINGS_SQL);
+			}
+		},
+	},
+	{
+		name: "v5_location_kind",
+		up: (db) => {
+			if (!columnExists(db, "locations", "kind")) {
+				db.exec(CORE_V5_LOCATION_KIND_SQL);
+			}
+		},
+	},
+	{
+		name: "v6_location_coordinates",
+		up: (db) => {
+			for (const alter of CORE_V6_LOCATION_COORDS) {
+				if (!columnExists(db, alter.table, alter.column)) {
+					db.exec(alter.sql);
+				}
+			}
+		},
+	},
+	{
+		name: "v7_npc_knowledge",
+		up: (db) => {
+			db.exec(CORE_V7_NPC_KNOWLEDGE_SQL);
+			for (const alter of CORE_V7_MEMORY_SOURCE_ALTERS) {
+				if (!columnExists(db, alter.table, alter.column)) {
+					db.exec(alter.sql);
+				}
+			}
+		},
+	},
+	{
+		name: "v8_time_span",
+		up: (db) => {
+			for (const alter of CORE_V8_TIME_SPAN_ALTERS) {
+				if (!columnExists(db, alter.table, alter.column)) {
+					db.exec(alter.sql);
+				}
 			}
 		},
 	},

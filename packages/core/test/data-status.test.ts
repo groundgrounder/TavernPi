@@ -15,7 +15,16 @@ test("v3 迁移：全新库顺序应用含 v3_data_status，重复调用幂等",
 	try {
 		const db = new DatabaseSync(join(dir, "story.db"));
 		const applied = migrate(db);
-		assert.deepEqual(applied, ["v1_core_schema", "v2_spatial_primitives", "v3_data_status", "v4_turn_log_warnings"]);
+		assert.deepEqual(applied, [
+			"v1_core_schema",
+			"v2_spatial_primitives",
+			"v3_data_status",
+			"v4_turn_log_warnings",
+			"v5_location_kind",
+			"v6_location_coordinates",
+			"v7_npc_knowledge",
+			"v8_time_span",
+		]);
 		assert.ok(hasMigration(db, "v3_data_status"));
 		assert.deepEqual(migrate(db), [], "重复调用幂等");
 		// data_status 表存在且可读写
@@ -30,7 +39,7 @@ test("v3 迁移：全新库顺序应用含 v3_data_status，重复调用幂等",
 	}
 });
 
-test("v3 迁移：旧 v2 库原地升级（补 v3+v4），openStoryDb 重开自动升级", () => {
+test("v3 迁移：旧 v2 库原地升级（补 v3~v8），openStoryDb 重开自动升级", () => {
 	const dir = makeTempDir();
 	const dbPath = join(dir, "story.db");
 	const db = new DatabaseSync(dbPath);
@@ -48,7 +57,18 @@ test("v3 迁移：旧 v2 库原地升级（补 v3+v4），openStoryDb 重开自�
 		);
 
 		const applied = migrate(db);
-		assert.deepEqual(applied, ["v3_data_status", "v4_turn_log_warnings"], "旧 v2 库补 v3+v4");
+		assert.deepEqual(
+			applied,
+			[
+				"v3_data_status",
+				"v4_turn_log_warnings",
+				"v5_location_kind",
+				"v6_location_coordinates",
+				"v7_npc_knowledge",
+				"v8_time_span",
+			],
+			"旧 v2 库补 v3~v8",
+		);
 		db.close();
 
 		// openStoryDb 重开：v3/v4 已记录，无新迁移；listDataStatus 可读、turn_log.warnings 可写

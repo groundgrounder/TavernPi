@@ -262,43 +262,14 @@ test("runOnstageRehearsals：npc_id 串台（返回别人的 id）→ 重试 →
 	}
 });
 
-test("runOnstageRehearsals：directives 非空 → 预演 userPrompt 含「作者指令」节（下达）", async () => {
+test("runOnstageRehearsals：预演 userPrompt 只有 NPC 自己的信息（档案 + 亲历事件 + 感知面），无世界摘要/作者指令", async () => {
 	const dir = makeTempDir();
 	try {
 		const story = openTempStory(dir);
 		const ids = seedNpcStageStory(story);
+		// 艾琳亲历一个事件（event_npcs 名册）：应出现在「你亲历的事件」节
+		story.writer.insertEvent({ turnSeq: 4, summary: "城门洞开", npcIds: [ids.onstageId], participants: "艾琳" });
 		const plan = computeScenePlan(story, 5); // onstage = [艾琳]
-
-		const prompts: string[] = [];
-		const executor = async (opts: SubagentRunOptions) => {
-			prompts.push(opts.userPrompt);
-			return stubResult(validRehearsal(requestedNpcId(opts.userPrompt)));
-		};
-
-		const directives = ["梅子酒今晚卖完就收摊", "不得与玩家起正面冲突"];
-		const result = await runOnstageRehearsals(plan.onstage, 5, "玩家走进来", { storyDb: story, cwd: dir, executor, directives });
-		assert.equal(result.length, 1);
-		assert.equal(prompts.length, 1);
-		assert.match(prompts[0]!, /## 作者指令（剧本要求）/);
-		for (const d of directives) {
-			assert.ok(prompts[0]!.includes(d), `指令「${d}」逐条列出`);
-		}
-		// 指令节在玩家输入之后、指令节之前
-		const userIdx = prompts[0]!.indexOf("## 本轮玩家输入");
-		const authorIdx = prompts[0]!.indexOf("## 作者指令");
-		assert.ok(userIdx !== -1 && authorIdx > userIdx);
-		story.close();
-	} finally {
-		cleanupTempDir(dir);
-	}
-});
-
-test("runOnstageRehearsals：directives 缺省 → 预演 userPrompt 不含作者指令节（M3 形态不变）", async () => {
-	const dir = makeTempDir();
-	try {
-		const story = openTempStory(dir);
-		const ids = seedNpcStageStory(story);
-		const plan = computeScenePlan(story, 5);
 
 		let prompt = "";
 		const executor = async (opts: SubagentRunOptions) => {
@@ -308,7 +279,19 @@ test("runOnstageRehearsals：directives 缺省 → 预演 userPrompt 不含作�
 
 		const result = await runOnstageRehearsals(plan.onstage, 5, "玩家走进来", { storyDb: story, cwd: dir, executor });
 		assert.equal(result.length, 1);
+		// 有：自身档案 + 亲历事件 + 感知面 + 玩家输入
+		assert.match(prompt, /## 角色档案/);
+		assert.match(prompt, /## 你亲历的事件/);
+		assert.match(prompt, /turn4 城门洞开/);
+		assert.match(prompt, /## 你能感知到的/);
+		assert.match(prompt, /同处一地的其他人: \(无\)/);
+		assert.match(prompt, /## 本轮玩家输入/);
+		// 无：全量世界摘要（近期事件/世界状态/阶段目标/其他地点）
+		assert.doesNotMatch(prompt, /近期事件|世界状态:|当前阶段|地图:|地点树/);
+		// 无：作者指令（剧本是作者视角，角色不拿剧本）
 		assert.doesNotMatch(prompt, /作者指令/);
+		// 无：视野外的 NPC（罗德在市集，不在艾琳的视野内）
+		assert.doesNotMatch(prompt, /罗德/);
 		story.close();
 	} finally {
 		cleanupTempDir(dir);

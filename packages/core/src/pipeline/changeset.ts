@@ -13,13 +13,16 @@
 import type { TSchema } from "typebox";
 import { z } from "zod";
 import type { StoryDb } from "../db/story-db.ts";
-import { PLAYER_LOCATION_KEY } from "../db/types.ts";
+import { MEMORY_SOURCES, PLAYER_LOCATION_KEY } from "../db/types.ts";
 
 const eventSchema = z.object({
 	summary: z.string().min(1),
 	detail: z.string().optional(),
 	type: z.string().optional(),
 	participants: z.string().optional(),
+	// 在场名册（结构化）：事件的亲历 NPC id 列表——NPC「亲历过什么」的事实底稿（event_npcs）。
+	// 与 participants 自由文本并存：文本供叙事，本字段供查询。
+	participant_npc_ids: z.array(z.number().int().positive()).optional(),
 	location_name: z.string().optional(),
 	story_time: z.string().optional(),
 });
@@ -28,6 +31,14 @@ const newLocationSchema = z.object({
 	name: z.string().min(1),
 	parent_name: z.string().optional(),
 	detail: z.string().optional(),
+	// 地理层级标签（如 城/区/房间；自由文本）。用于地图按层级组织渲染（焦点切片）。
+	kind: z.string().optional(),
+	// 世界坐标（单位：步；1 单位 = 成人一步；x 东正 / y 北正 / z 上正）。
+	// 纪律：x/y 必须成对；z 依附 x/y。生成时锚定父坐标——先经 get_location 查父地点坐标，
+	// 新地点落在父的邻域内（同层地点的坐标量级应彼此可比）。
+	x: z.number().optional(),
+	y: z.number().optional(),
+	z: z.number().optional(),
 });
 
 const locationMoveSchema = z.object({
@@ -52,6 +63,11 @@ const npcUpdateSchema = z.object({
 				kind: z.string().min(1),
 				content: z.string().min(1),
 				salience: z.number().optional(),
+				// 知识来源（主观维度）：witness=亲历 / hearsay=耳闻 / inference=推断；缺省=未标注。
+				// 耳闻版本照叙事文本的传闻写（允许与客观事件不一致——失真即戏剧）。
+				source: z.enum(MEMORY_SOURCES).optional(),
+				// 所涉事件（events.id，必须已存在——本轮新事件尚未落库，不能自引用）。
+				event_id: z.number().int().positive().optional(),
 			}),
 		)
 		.optional(),
@@ -86,6 +102,9 @@ export const changesetZodSchema = z.object({
 		.object({
 			to_time: z.string().min(1),
 			span_note: z.string().optional(),
+			// 本轮推进的故事天数（「天」是历法无关的通用量：「三年后」→ 1095、「一炷香」→ 0.03）。
+			// 一切时间运算（记忆时间精度衰减、离线推演间隔）以此为准；不确定就省略（该轮按 0 计）。
+			span_days: z.number().nonnegative().optional(),
 		})
 		.optional(),
 	new_locations: z.array(newLocationSchema).default([]),
@@ -153,6 +172,7 @@ export function validateChangesetSemantics(storyDb: StoryDb, cs: Changeset): Cha
 	const hasLocation = (name: string): boolean => resolvableLocations.has(name);
 
 	const registeredNpcs = new Set(storyDb.reader.listNpcs().map((n) => n.id));
+	const registeredEventIds = new Set(storyDb.reader.listEvents().map((e) => e.id));
 
 	for (const [i, ev] of cs.events.entries()) {
 		if (ev.location_name !== undefined && !hasLocation(ev.location_name)) {
@@ -160,6 +180,14 @@ export function validateChangesetSemantics(storyDb: StoryDb, cs: Changeset): Cha
 				item: `events[${i}]`,
 				message: `events.location_name 未登记且未在本变更集 new_locations 中: ${JSON.stringify(ev.location_name)}`,
 			});
+		}
+		for (const [j, npcId] of (ev.participant_npc_ids ?? []).entries()) {
+			if (!registeredNpcs.has(npcId)) {
+				problems.push({
+					item: `events[${i}].participant_npc_ids[${j}]`,
+					message: `events.participant_npc_ids 引用不存在的 NPC #${npcId}`,
+				});
+			}
 		}
 	}
 	for (const [i, move] of cs.location_moves.entries()) {
@@ -197,10 +225,31 @@ export function validateChangesetSemantics(storyDb: StoryDb, cs: Changeset): Cha
 				message: `new_locations.parent_name 未登记且未在本变更集 new_locations 中: ${JSON.stringify(loc.parent_name)}`,
 			});
 		}
+		// 坐标纪律：x/y 成对；z 依附 x/y（结构性，不依赖世界观尺度）
+		if ((loc.x === undefined) !== (loc.y === undefined)) {
+			problems.push({
+				item: `new_locations[${i}]`,
+				message: `new_locations.x/y 必须成对提供（当前只有 ${loc.x !== undefined ? "x" : "y"}，只给一半无法定位）`,
+			});
+		}
+		if (loc.z !== undefined && loc.x === undefined) {
+			problems.push({
+				item: `new_locations[${i}]`,
+				message: "new_locations.z 依附于 x/y，不得单独提供",
+			});
+		}
 	}
 	for (const [i, update] of cs.npc_updates.entries()) {
 		if (!registeredNpcs.has(update.npc_id)) {
 			problems.push({ item: `npc_updates[${i}]`, message: `npc_updates.npc_id 不存在: #${update.npc_id}` });
+		}
+		for (const [j, mem] of (update.memories ?? []).entries()) {
+			if (mem.event_id !== undefined && !registeredEventIds.has(mem.event_id)) {
+				problems.push({
+					item: `npc_updates[${i}].memories[${j}]`,
+					message: `npc_updates.memories.event_id 不存在: #${mem.event_id}（本轮新事件尚未落库，不能自引用；指向已有事件或省略）`,
+				});
+			}
 		}
 		for (const [j, rel] of (update.relations ?? []).entries()) {
 			if (!registeredNpcs.has(rel.other_npc_id)) {
@@ -367,7 +416,15 @@ export function applyChangeset(
 		const locationIdByName = new Map(storyDb.reader.listLocations().map((l) => [l.name, l.id]));
 		for (const loc of cs.new_locations) {
 			const parentId = loc.parent_name !== undefined ? locationIdByName.get(loc.parent_name) : undefined;
-			const row = writer.insertLocation({ name: loc.name, parentId, detail: loc.detail });
+			const row = writer.insertLocation({
+				name: loc.name,
+				parentId,
+				detail: loc.detail,
+				kind: loc.kind,
+				x: loc.x,
+				y: loc.y,
+				z: loc.z,
+			});
 			if (!locationIdByName.has(row.name)) {
 				locationIdByName.set(row.name, row.id);
 				summary.newLocations++;
@@ -395,6 +452,7 @@ export function applyChangeset(
 				detail: ev.detail,
 				type: ev.type,
 				participants: ev.participants,
+				npcIds: ev.participant_npc_ids,
 				location: ev.location_name,
 				locationId,
 				storyTime: ev.story_time,
@@ -414,6 +472,8 @@ export function applyChangeset(
 					kind: mem.kind,
 					content: mem.content,
 					salience: mem.salience,
+					source: mem.source,
+					eventId: mem.event_id,
 				});
 			}
 			for (const trait of update.traits ?? []) {
@@ -463,7 +523,12 @@ export function applyChangeset(
 		}
 
 		if (cs.time_advance !== undefined) {
-			writer.advanceClock({ turnSeq: ctx.turnSeq, toTime: cs.time_advance.to_time, spanNote: cs.time_advance.span_note });
+			writer.advanceClock({
+				turnSeq: ctx.turnSeq,
+				toTime: cs.time_advance.to_time,
+				spanNote: cs.time_advance.span_note,
+				spanDays: cs.time_advance.span_days,
+			});
 			summary.timeAdvanced = true;
 		}
 	});

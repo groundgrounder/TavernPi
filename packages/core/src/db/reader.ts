@@ -2,6 +2,8 @@
 // 按后续 pipeline 需要：clock 读取、turn_seq 范围查询、全表读、NPC 复合读。
 
 import { DatabaseSync } from "node:sqlite";
+import { buildLocationPath, type LocationPath } from "./location-path.ts";
+import { parseTimeYear } from "./time-fuzzy.ts";
 import { PLAYER_LOCATION_KEY } from "./types.ts";
 import type {
 	DataStatusRow,
@@ -54,8 +56,25 @@ export class DbReader {
 	listTimeLog(options: { fromTurn?: number; toTurn?: number } = {}): TimeLogRow[] {
 		const { where, params } = buildRangeWhere(options, "turn_seq");
 		return this.db
-			.prepare(`SELECT turn_seq, from_time, to_time, span_note FROM time_log${where} ORDER BY turn_seq`)
+			.prepare(`SELECT turn_seq, from_time, to_time, span_note, span_days FROM time_log${where} ORDER BY turn_seq`)
 			.all(...params) as unknown as TimeLogRow[];
+	}
+
+	/** 某轮结束时的故事时间（time_log.to_time）；无记录返回 undefined。 */
+	turnEndTime(turnSeq: number): string | undefined {
+		const row = this.db.prepare("SELECT to_time FROM time_log WHERE turn_seq = ?").get(turnSeq) as
+			| { to_time: string }
+			| undefined;
+		return row?.to_time;
+	}
+
+	/** 自 fromTurnSeq（不含）至 toTurnSeq（含）累计推进的故事天数（time_log.span_days 求和）。
+	 *  未标注 span_days 的轮按 0 计（保守：衰减不增长）；负值归零。 */
+	daysSinceTurn(fromTurnSeq: number, toTurnSeq: number): number {
+		const row = this.db
+			.prepare("SELECT COALESCE(SUM(span_days), 0) AS d FROM time_log WHERE turn_seq > ? AND turn_seq <= ?")
+			.get(fromTurnSeq, toTurnSeq) as { d: number | null };
+		return Math.max(0, row.d ?? 0);
 	}
 
 	// ------------------------------------------------------------------
@@ -94,6 +113,19 @@ export class DbReader {
 			.all() as unknown as PhaseRow[];
 	}
 
+	/** 某 NPC 亲历的事件（event_npcs 名册 JOIN events；返回按 id 升序 = 时间序）。
+	 *  limit 取最近 N 条（内部倒序取再正序返回）。 */
+	listNpcEvents(npcId: number, limit = 10): EventRow[] {
+		const rows = this.db
+			.prepare(
+				`SELECT e.id, e.turn_seq, e.story_time, e.type, e.summary, e.detail, e.participants, e.location, e.location_id, e.created_entry_id
+				 FROM event_npcs en JOIN events e ON e.id = en.event_id
+				 WHERE en.npc_id = ? ORDER BY e.id DESC LIMIT ?`,
+			)
+			.all(npcId, limit) as unknown as EventRow[];
+		return rows.reverse();
+	}
+
 	/** world_state 全表读（按 key 升序）。 */
 	listWorldState(): WorldStateRow[] {
 		return this.db.prepare("SELECT key, value, turn_seq FROM world_state ORDER BY key").all() as unknown as WorldStateRow[];
@@ -107,7 +139,7 @@ export class DbReader {
 	listLocations(): LocationRow[] {
 		return this.db
 			.prepare(
-				`SELECT l.id, l.name, l.parent_id, l.detail, p.name AS parent_name
+				`SELECT l.id, l.name, l.parent_id, l.detail, l.kind, l.x, l.y, l.z, p.name AS parent_name
 				 FROM locations l LEFT JOIN locations p ON p.id = l.parent_id ORDER BY l.id`,
 			)
 			.all() as unknown as LocationRow[];
@@ -117,21 +149,37 @@ export class DbReader {
 	getLocation(id: number): LocationRow | undefined {
 		return this.db
 			.prepare(
-				`SELECT l.id, l.name, l.parent_id, l.detail, p.name AS parent_name
+				`SELECT l.id, l.name, l.parent_id, l.detail, l.kind, l.x, l.y, l.z, p.name AS parent_name
 				 FROM locations l LEFT JOIN locations p ON p.id = l.parent_id WHERE l.id = ?`,
 			)
 			.get(id) as LocationRow | undefined;
 	}
 
-	/** 玩家当前位置（读 world_state 约定键 player_location 并解析为地点行）；未定位返回 undefined。 */
-	getPlayerLocation(): LocationRow | undefined {
+	/** 读取 world_state 约定键 player_location 解析出的地点 id；未定位/值非法返回 null。 */
+	private readPlayerLocationId(): number | null {
 		const ws = this.db.prepare("SELECT value FROM world_state WHERE key = ?").get(PLAYER_LOCATION_KEY) as
 			| { value: string }
 			| undefined;
-		if (!ws) return undefined;
+		if (!ws) return null;
 		const n = Number(ws.value);
-		const id = Number.isInteger(n) && n >= 0 ? n : null;
+		return Number.isInteger(n) && n >= 0 ? n : null;
+	}
+
+	/** 玩家当前位置（读 world_state 约定键 player_location 并解析为地点行）；未定位返回 undefined。 */
+	getPlayerLocation(): LocationRow | undefined {
+		const id = this.readPlayerLocationId();
 		return id === null ? undefined : this.getLocation(id);
+	}
+
+	/** 单个地点的位置路径（从根到叶；位置读取侧的统一表示）；未登记返回 undefined。 */
+	getLocationPath(id: number): LocationPath | undefined {
+		return buildLocationPath(this.listLocations(), id);
+	}
+
+	/** 玩家当前位置的路径；未定位返回 undefined。 */
+	getPlayerLocationPath(): LocationPath | undefined {
+		const id = this.readPlayerLocationId();
+		return id === null ? undefined : buildLocationPath(this.listLocations(), id);
 	}
 
 	/** 位置变更记录（按 turn_seq 倒序，最近在前；地点名已解析）。 */
@@ -151,6 +199,43 @@ export class DbReader {
 	// ------------------------------------------------------------------
 	// NPC
 	// ------------------------------------------------------------------
+
+	/** 时间线上最新已推进的轮次（time_log 最大 turn_seq；空库为 0）。
+	 *  记忆时间精度衰减的「当前」基准——与 span_days 同源（time_log）。 */
+	latestTurnSeq(): number {
+		const row = this.db.prepare("SELECT MAX(turn_seq) AS t FROM time_log").get() as { t: number | null };
+		return row.t ?? 0;
+	}
+
+	/**
+	 * 记忆的时间视图（供时间精度衰减渲染）：
+	 * - timeText = 时间锚：优先所涉事件的 story_time（更精确，可能含时段如「傍晚」），
+	 *   否则取记录轮结束时的时钟值（time_log.to_time）；
+	 * - daysAgo = 距当前轮累计推进的故事天数（span_days 求和）；
+	 * - currentYear = 当前故事年份（分层时间串首段；解析不出省略）。
+	 * 时间锚无从获得（无事件 story_time 且该轮无 time_log）时返回 undefined。
+	 */
+	memoryTimeView(
+		memory: { turn_seq: number; event_id: number | null },
+		currentTurnSeq: number,
+	): { timeText: string; daysAgo: number; currentYear?: number } | undefined {
+		let timeText: string | undefined;
+		if (memory.event_id !== null) {
+			const ev = this.db.prepare("SELECT story_time FROM events WHERE id = ?").get(memory.event_id) as
+				| { story_time: string | null }
+				| undefined;
+			if (ev?.story_time != null && ev.story_time.trim() !== "") timeText = ev.story_time;
+		}
+		timeText ??= this.turnEndTime(memory.turn_seq);
+		if (timeText === undefined) return undefined;
+		const clock = this.getClock();
+		const currentYear = clock === undefined ? undefined : parseTimeYear(clock.current_time);
+		return {
+			timeText,
+			daysAgo: this.daysSinceTurn(memory.turn_seq, currentTurnSeq),
+			...(currentYear === undefined ? {} : { currentYear }),
+		};
+	}
 
 	/** NPC 全表读（按 id 升序；current_location 名已解析）。 */
 	listNpcs(): NpcRow[] {
@@ -185,7 +270,7 @@ export class DbReader {
 			.all(npcId) as unknown as NpcTraitRow[];
 		const memories = this.db
 			.prepare(
-				"SELECT id, npc_id, turn_seq, kind, content, salience FROM npc_memories WHERE npc_id = ? ORDER BY salience DESC, id",
+				"SELECT id, npc_id, turn_seq, kind, content, salience, source, event_id FROM npc_memories WHERE npc_id = ? ORDER BY salience DESC, id",
 			)
 			.all(npcId) as unknown as NpcMemoryRow[];
 		const relations = this.db

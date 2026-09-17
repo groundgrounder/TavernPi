@@ -12,6 +12,7 @@ import {
 	type EventRow,
 	type LocationLogRow,
 	type LocationRow,
+	type MemorySource,
 	type NpcMemoryRow,
 	type NpcRelationRow,
 	type NpcRow,
@@ -103,22 +104,26 @@ export class DbWriter {
 	}
 
 	/**
-	 * 推进时间：写 time_log（from→to）并同步 clock 单例。spanNote = 时间跨度说明。
+	 * 推进时间：写 time_log（from→to）并同步 clock 单例。spanNote = 时间跨度说明；
+	 * spanDays = 本轮推进的故事天数（可空；记忆时间精度衰减等时间运算的依据）。
 	 * from_time 由 writer 内部读取 clock 单例的当前值 —— time_log.from_time 必须
 	 * ≡ 写入时 clock.current_time，来源一致由 DB 层保证，调用方无参数可伪造。
 	 *
 	 * 注意：「不倒流」校验刻意**不在 DB 层**——历法可插拔，TEXT 时间比较不可靠，
 	 * 属 pipeline 层职责。防后人误加 DB 层时间序校验。
 	 */
-	advanceClock(input: { turnSeq: number; toTime: string; spanNote?: string }): TimeLogRow {
+	advanceClock(input: { turnSeq: number; toTime: string; spanNote?: string; spanDays?: number }): TimeLogRow {
 		assertTurnSeq(input.turnSeq);
+		if (input.spanDays !== undefined && (!Number.isFinite(input.spanDays) || input.spanDays < 0)) {
+			throw new TypeError(`advanceClock: spanDays 须为非负有限数，收到 ${String(input.spanDays)}`);
+		}
 		const cur = this.db
 			.prepare('SELECT "current_time", calendar, granularity FROM clock WHERE id = 1')
 			.get() as StoryClock | undefined;
 		const fromTime = cur?.current_time ?? DEFAULT_STORY_CLOCK.current_time;
 		this.db
-			.prepare("INSERT INTO time_log (turn_seq, from_time, to_time, span_note) VALUES (?, ?, ?, ?)")
-			.run(input.turnSeq, fromTime, input.toTime, input.spanNote ?? null);
+			.prepare("INSERT INTO time_log (turn_seq, from_time, to_time, span_note, span_days) VALUES (?, ?, ?, ?, ?)")
+			.run(input.turnSeq, fromTime, input.toTime, input.spanNote ?? null, input.spanDays ?? null);
 		this.upsertClock({
 			current_time: input.toTime,
 			calendar: cur?.calendar ?? DEFAULT_STORY_CLOCK.calendar,
@@ -129,6 +134,7 @@ export class DbWriter {
 			from_time: fromTime,
 			to_time: input.toTime,
 			span_note: input.spanNote ?? null,
+			span_days: input.spanDays ?? null,
 		};
 	}
 
@@ -136,7 +142,8 @@ export class DbWriter {
 	// 叙事世界
 	// ------------------------------------------------------------------
 
-	/** 追加事件。type 默认 'event'（取值词汇待 M2 校准）。locationId 提供则做登记校验。 */
+	/** 追加事件。type 默认 'event'（取值词汇待 M2 校准）。locationId 提供则做登记校验。
+	 *  npcIds = 在场名册（event_npcs 结构化引用；只写已存在的 NPC id，调用方保证——FK 兜底）。 */
 	insertEvent(input: {
 		turnSeq: number;
 		summary: string;
@@ -144,6 +151,7 @@ export class DbWriter {
 		storyTime?: string;
 		type?: string;
 		participants?: string;
+		npcIds?: number[];
 		location?: string;
 		locationId?: number;
 		createdEntryId?: string;
@@ -168,8 +176,18 @@ export class DbWriter {
 				input.locationId ?? null,
 				input.createdEntryId ?? null,
 			);
+		const eventId = Number(res.lastInsertRowid);
+		if (input.npcIds !== undefined && input.npcIds.length > 0) {
+			// 名册是集合语义：同一（事件, NPC）重复写入忽略（幂等）
+			this.transaction(() => {
+				const stmt = this.db.prepare("INSERT OR IGNORE INTO event_npcs (event_id, npc_id) VALUES (?, ?)");
+				for (const npcId of input.npcIds!) {
+					stmt.run(eventId, npcId);
+				}
+			});
+		}
 		return {
-			id: Number(res.lastInsertRowid),
+			id: eventId,
 			turn_seq: input.turnSeq,
 			story_time: input.storyTime ?? null,
 			type: input.type ?? "event",
@@ -223,10 +241,27 @@ export class DbWriter {
 	/**
 	 * 登记地点（幂等变体：按 name 去重，已存在则直接返回既有行——seed/卡包可重复执行）。
 	 * parentId 提供时校验其已登记（登记校验契约）。
+	 * kind = 地理层级标签（如 国/城/区/别墅/房间；卡包自定义词汇，可空）。
+	 * x/y/z = 世界坐标（单位步；x 东正 / y 北正 / z 上正）。坐标纪律：x/y 必须成对；z 依附 x/y。
+	 * 幂等语义：同名已存在即返回既有行，**不改动既有行的任何字段**（含 kind / 坐标）。
 	 */
-	insertLocation(input: { name: string; parentId?: number; detail?: string }): LocationRow {
+	insertLocation(input: {
+		name: string;
+		parentId?: number;
+		detail?: string;
+		kind?: string;
+		x?: number;
+		y?: number;
+		z?: number;
+	}): LocationRow {
 		if (input.name.trim() === "") {
 			throw new Error("insertLocation: name 不能为空");
+		}
+		if ((input.x === undefined) !== (input.y === undefined)) {
+			throw new Error("insertLocation: 坐标 x/y 必须成对提供（只给一半无法定位）");
+		}
+		if (input.z !== undefined && input.x === undefined) {
+			throw new Error("insertLocation: 坐标 z 依附于 x/y，不得单独提供");
 		}
 		const existing = this.db.prepare("SELECT id FROM locations WHERE name = ?").get(input.name) as
 			| { id: number }
@@ -238,8 +273,16 @@ export class DbWriter {
 			assertLocationRegistered(this.db, input.parentId, "insertLocation(parentId)");
 		}
 		const res = this.db
-			.prepare("INSERT INTO locations (name, parent_id, detail) VALUES (?, ?, ?)")
-			.run(input.name, input.parentId ?? null, input.detail ?? null);
+			.prepare("INSERT INTO locations (name, parent_id, detail, kind, x, y, z) VALUES (?, ?, ?, ?, ?, ?, ?)")
+			.run(
+				input.name,
+				input.parentId ?? null,
+				input.detail ?? null,
+				input.kind ?? null,
+				input.x ?? null,
+				input.y ?? null,
+				input.z ?? null,
+			);
 		return this.getLocationRow(Number(res.lastInsertRowid));
 	}
 
@@ -298,7 +341,7 @@ export class DbWriter {
 	private getLocationRow(id: number): LocationRow {
 		const row = this.db
 			.prepare(
-				`SELECT l.id, l.name, l.parent_id, l.detail, p.name AS parent_name
+				`SELECT l.id, l.name, l.parent_id, l.detail, l.kind, l.x, l.y, l.z, p.name AS parent_name
 				 FROM locations l LEFT JOIN locations p ON p.id = l.parent_id WHERE l.id = ?`,
 			)
 			.get(id) as LocationRow | undefined;
@@ -362,12 +405,31 @@ export class DbWriter {
 		};
 	}
 
-	/** 写入记忆。salience 默认 0（衰减语义待 M2 校准）。 */
-	insertNpcMemory(input: { npcId: number; turnSeq: number; kind: string; content: string; salience?: number }): NpcMemoryRow {
+	/** 写入记忆。salience 默认 0（衰减语义待 M2 校准）。
+	 *  source = 知识来源（witness 亲历 / hearsay 耳闻 / inference 推断，可空）；eventId = 所涉事件（可空）。 */
+	insertNpcMemory(input: {
+		npcId: number;
+		turnSeq: number;
+		kind: string;
+		content: string;
+		salience?: number;
+		source?: MemorySource;
+		eventId?: number;
+	}): NpcMemoryRow {
 		assertTurnSeq(input.turnSeq);
 		const res = this.db
-			.prepare("INSERT INTO npc_memories (npc_id, turn_seq, kind, content, salience) VALUES (?, ?, ?, ?, ?)")
-			.run(input.npcId, input.turnSeq, input.kind, input.content, input.salience ?? 0);
+			.prepare(
+				"INSERT INTO npc_memories (npc_id, turn_seq, kind, content, salience, source, event_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			)
+			.run(
+				input.npcId,
+				input.turnSeq,
+				input.kind,
+				input.content,
+				input.salience ?? 0,
+				input.source ?? null,
+				input.eventId ?? null,
+			);
 		return {
 			id: Number(res.lastInsertRowid),
 			npc_id: input.npcId,
@@ -375,6 +437,8 @@ export class DbWriter {
 			kind: input.kind,
 			content: input.content,
 			salience: input.salience ?? 0,
+			source: input.source ?? null,
+			event_id: input.eventId ?? null,
 		};
 	}
 

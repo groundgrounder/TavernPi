@@ -48,16 +48,42 @@ export {
 	type RelatedNpcSet,
 } from "./db/view.ts";
 
+// 位置路径（位置读取侧的统一表示与渲染；CLI / studio 的位置展示复用）
+export {
+	buildLocationPath,
+	describeSpatialRelation,
+	locationPointOf,
+	renderLocationNode,
+	renderLocationPath,
+	renderLocationPoint,
+	type LocationPath,
+	type LocationPathNode,
+	type LocationPoint,
+	type SpatialRelation,
+} from "./db/location-path.ts";
+
+// 时间精度衰减（记忆的拟人化渲染：距今越久越模糊，重大事件作节点不衰减）
+export {
+	fuzzyTimeLabel,
+	memoryTimeLabel,
+	parseTimeYear,
+	PIVOTAL_SALIENCE,
+} from "./db/time-fuzzy.ts";
+
 // 行类型与常量
 export {
 	DEFAULT_STORY_CLOCK,
+	MEMORY_SOURCE_LABELS,
+	MEMORY_SOURCES,
 	PLAYER_LOCATION_KEY,
 	parseLocationId,
+	renderMemoryText,
 	type DataStatusRow,
 	type DirectiveRow,
 	type EventRow,
 	type LocationLogRow,
 	type LocationRow,
+	type MemorySource,
 	type NpcMemoryRow,
 	type NpcRelationRow,
 	type NpcRow,

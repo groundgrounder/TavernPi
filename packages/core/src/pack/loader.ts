@@ -61,6 +61,14 @@ const locationSpecialized = {
 	features: z.array(z.string()),
 	// v0：父地点条目 id（同包引用，父子地点）；seed 时先种父再种子。消费在 seed.ts。
 	parent: z.string().optional(),
+	// 地理层级标签（如 国/城/区/别墅/房间；卡包自定义词汇，自由文本不校验取值）。
+	// 用于地图渲染按层级组织（焦点切片）与展示；不填则渲染时省略。消费在 seed.ts / 渲染层。
+	kind: z.string().optional(),
+	// 世界坐标（单位：步，1 单位 = 成人一步；x 东正 / y 北正 / z 上正）。
+	// 纪律：x/y 必须成对；z 依附 x/y（加载层校验，见 validateInPackRefs）。缺省不填 = 未标注坐标。
+	x: z.number().optional(),
+	y: z.number().optional(),
+	z: z.number().optional(),
 };
 
 const objectSpecialized = {
@@ -100,7 +108,7 @@ type ParsedEntry = z.infer<typeof entrySchema>;
 /** 各类型特化字段名（data = 仅这些字段，不含通用字段）。 */
 const SPECIALIZED_FIELDS: Record<EntryType, readonly string[]> = {
 	character: ["identity", "personality", "voice", "dialogue_examples"],
-	location: ["overview", "features", "parent"],
+	location: ["overview", "features", "parent", "kind", "x", "y", "z"],
 	object: ["overview", "properties"],
 	faction: ["overview", "goals", "members"],
 	plot: ["overview", "beats", "status"],
@@ -467,6 +475,14 @@ function validateInPackRefs(dir: string, packName: string, entries: CollectionEn
 						});
 					}
 				}
+			}
+			// 坐标纪律：x/y 成对；z 依附 x/y
+			const x = entry.data.x;
+			if ((x === undefined) !== (entry.data.y === undefined)) {
+				issues.push({ file, message: "location 坐标 x/y 必须成对提供（只给一半无法定位）" });
+			}
+			if (entry.data.z !== undefined && x === undefined) {
+				issues.push({ file, message: "location 坐标 z 依附于 x/y，不得单独提供" });
 			}
 		}
 	}

@@ -23,6 +23,7 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { renderLocationLevels, renderLocationPath } from "./db/location-path.ts";
 import type { StoryDb } from "./db/story-db.ts";
 import { createDbView, type DbView } from "./db/view.ts";
 import { MODE_PRESETS, type StoryMode } from "./mode.ts";
@@ -81,24 +82,19 @@ export function createAssistTools(viewFactory: () => DbView, opts: AssistToolOpt
 		defineTool({
 			name: "get_player_location",
 			label: "读取玩家位置",
-			description: "返回玩家当前所在地（含父地点链，如 王城 > 庭院）（只读）。",
+			description: "返回玩家当前所在地的完整路径（从根到叶，如 大雍（国） > #2 王城（城） > 庭院）（只读）。",
 			parameters: EMPTY_PARAMS,
 			execute: async () => {
 				const view = viewFactory();
-				const player = view.getPlayerLocation();
-				const locations = view.listLocations();
-				const byId = new Map(locations.map((l) => [l.id, l]));
-				const names: string[] = player ? [player.name] : [];
-				let cur = player;
-				while (cur && cur.parent_id !== null) {
-					const parent = byId.get(cur.parent_id);
-					if (!parent) break;
-					names.unshift(parent.name);
-					cur = parent;
-				}
+				const path = view.getPlayerLocationPath();
 				return {
-					content: [{ type: "text", text: player ? `当前玩家位置: ${names.join(" > ")}（地点 #${player.id}）` : "(玩家尚未定位)" }],
-					details: { player: player ?? null },
+					content: [
+						{
+							type: "text",
+							text: path !== undefined ? `当前玩家位置: ${renderLocationPath(path, { withIds: true })}` : "(玩家尚未定位)",
+						},
+					],
+					details: { path: path ?? null },
 				};
 			},
 		}),
@@ -108,26 +104,16 @@ export function createAssistTools(viewFactory: () => DbView, opts: AssistToolOpt
 		defineTool({
 			name: "list_locations",
 			label: "列出地点",
-			description: "列出全部已登记地点（含 id）为地点树摘要（只读）。",
+			description: "逐层列出全部已登记地点（含 id；只读）。",
 			parameters: EMPTY_PARAMS,
 			execute: async () => {
 				const view = viewFactory();
 				const locations = view.listLocations();
-				const children = new Map<number | null, typeof locations>();
-				for (const loc of locations) {
-					const list = children.get(loc.parent_id) ?? [];
-					list.push(loc);
-					children.set(loc.parent_id, list);
-				}
-				const lines: string[] = [];
-				const walk = (parent: number | null, depth: number): void => {
-					for (const loc of children.get(parent) ?? []) {
-						lines.push(`${"  ".repeat(depth)}#${loc.id} ${loc.name}`);
-						walk(loc.id, depth + 1);
-					}
+				const lines = renderLocationLevels(locations);
+				return {
+					content: [{ type: "text", text: lines.length === 0 ? "(无地点)" : lines.join("\n") }],
+					details: { locations },
 				};
-				walk(null, 0);
-				return { content: [{ type: "text", text: lines.length === 0 ? "(无地点)" : lines.join("\n") }], details: { locations } };
 			},
 		}),
 	);

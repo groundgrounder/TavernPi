@@ -1,6 +1,6 @@
 // 卡包 seed 与 migration 接入单测（条目 seed DB +「卡包 SQL 通道」）：
-// characters card_ref 幂等不覆盖 / locations parent 父子先种父再种子 / seed.sql 执行 /
-// migration 幂等重跑 / 多包共存（各自前缀表 + 各自条目 seed）。
+// characters card_ref 幂等不覆盖 / locations parent 父子先种父再种子 + kind 层级标签 /
+// seed.sql 执行 / migration 幂等重跑 / 多包共存（各自前缀表 + 各自条目 seed）。
 
 import assert from "node:assert/strict";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import { characterEntry, cleanupTempDir, createPack, entryYaml, locationEntry, m
 import { loadPacks } from "../src/pack/loader.ts";
 import { packMigrations } from "../src/pack/seed.ts";
 import { hasMigration, migrate } from "../src/db/migrate.ts";
+import { renderLocationPath } from "../src/db/location-path.ts";
 import { openStoryDb } from "../src/db/story-db.ts";
 
 test("seed：characters 条目自动 seed npcs（card_ref = 包名:条目id，status='alive'）", () => {
@@ -93,6 +94,84 @@ test("seed：location parent 父子——先种父再种子，子 parent_id 指�
 		} finally {
 			story.close();
 		}
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("seed：location kind 随条目写入注册表（可选；路径渲染带层级标签）", () => {
+	const root = makeTempDir();
+	try {
+		const dir = createPack(root, {
+			name: "shouling",
+			entries: [
+				{ type: "locations", id: "wangcheng", yaml: locationEntry("王城", { kind: "城" }) },
+				{ type: "locations", id: "tomb", yaml: locationEntry("皇陵", { parent: "wangcheng", kind: "建筑" }) },
+				{ type: "locations", id: "plain", yaml: locationEntry("无名地") },
+			],
+		});
+		const packs = loadPacks([dir]);
+		const story = openStoryDb(join(root, "story.db"));
+		try {
+			migrate(story.rawDb, packMigrations(packs));
+			const locations = story.reader.listLocations();
+			const city = locations.find((l) => l.name === "王城");
+			const tomb = locations.find((l) => l.name === "皇陵");
+			const plain = locations.find((l) => l.name === "无名地");
+			assert.equal(city?.kind, "城");
+			assert.equal(tomb?.kind, "建筑");
+			assert.equal(tomb?.parent_id, city?.id);
+			assert.equal(plain?.kind, null, "未标注 kind 的地点为 null");
+
+			// 路径渲染：kind 存在时带括号，缺失时省略
+			const path = story.reader.getLocationPath(tomb!.id);
+			assert.ok(path);
+			assert.equal(renderLocationPath(path), "王城（城） > 皇陵（建筑）");
+			assert.equal(renderLocationPath(path, { withIds: true }), `#${city!.id} 王城（城） > #${tomb!.id} 皇陵（建筑）`);
+		} finally {
+			story.close();
+		}
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+test("seed：location 坐标随条目写入（x/y 成对；缺省不填）", () => {
+	const root = makeTempDir();
+	try {
+		const dir = createPack(root, {
+			name: "shouling",
+			entries: [
+				{ type: "locations", id: "wangcheng", yaml: locationEntry("王城", { kind: "城", x: 0, y: 0 }) },
+				{ type: "locations", id: "dongshi", yaml: locationEntry("东市", { parent: "wangcheng", x: 200, y: -100 }) },
+			],
+		});
+		const packs = loadPacks([dir]);
+		const story = openStoryDb(join(root, "story.db"));
+		try {
+			migrate(story.rawDb, packMigrations(packs));
+			const city = story.reader.listLocations().find((l) => l.name === "王城");
+			const east = story.reader.listLocations().find((l) => l.name === "东市");
+			assert.equal(city?.x, 0);
+			assert.equal(city?.y, 0);
+			assert.equal(city?.z, null, "未提供的 z 落 NULL");
+			assert.equal(east?.x, 200);
+			assert.equal(east?.y, -100);
+		} finally {
+			story.close();
+		}
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("check：location 坐标 x/y 不成对被拒（加载层 fail-loud）", () => {
+	const root = makeTempDir();
+	try {
+		const dir = createPack(root, {
+			name: "shouling",
+			entries: [{ type: "locations", id: "bad", yaml: locationEntry("半坐标", { x: 100 }) }],
+		});
+		assert.throws(() => loadPacks([dir]), /x\/y 必须成对/);
 	} finally {
 		cleanupTempDir(root);
 	}

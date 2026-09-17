@@ -4,6 +4,10 @@ name: 墓道
 keys: [墓道]
 always_on: false
 position: recent
+kind: 甬道
+x: 0
+y: -300
+z: -50
 refs: []
 parent: royal-tomb
 overview: |

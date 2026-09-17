@@ -77,12 +77,16 @@ my-world/
 | 类型 | 特化字段 |
 |---|---|
 | `character` | `identity`、`personality`、`voice?`、`dialogue_examples?` |
-| `location` | `overview`、`features[]` |
+| `location` | `overview`、`features[]`、`parent?`、`kind?`、`x?`、`y?`、`z?` |
 | `object` | `overview`、`properties[]` |
 | `faction` | `overview`、`goals[]`、`members[]`（refs） |
 | `plot` | `overview`、`beats[]`、`status` |
 
 > zod strict 的意义：**笔误优于静默吞掉**。多打了字段、拼错了字段名，check 会直接报错指出文件与行，而不是默默忽略。
+
+**location 的地理层级（可选）**：`parent` 指向同包另一个 location 条目，构成嵌套层级（如 房间 ⊂ 别墅 ⊂ 小区 ⊂ 城市 ⊂ 国家，任意深度）；`kind` 是该地点的层级标签（词汇自定，如 `国` / `城` / `区` / `别墅` / `房间`），渲染地图时显示为 `王城（城）`。两者都可以不写——不写就是普通地点；写了，故事引擎会按层级组织地图视图（叙事在哪一层，地图就取哪一层）。
+
+**location 的世界坐标（可选）**：`x` / `y` / `z` 是地点的世界坐标，**单位统一为「步」**（1 单位 = 成人一步）；方向约定：`x` 东为正、`y` 北为正、`z` 上为正（楼层 / 地下）。`x` / `y` 必须成对提供，`z` 依附于它们（check 会拦半套坐标）。坐标用于叙事里的远近 / 方位推理（引擎会算出「相距约 300 步 · 东」给叙事模型）与地图展示。建议**同一片区的地点成片标注**（只标一半会让距离算不出来）；不写就是「未标注」，引擎自动省略。
 
 ---
 

@@ -41,12 +41,24 @@ const ctx = {} as unknown as ExtensionContext;
 	const dbPath = join(dir, "story.db");
 	const db = buildV1Db(dbPath);
 	try {
-		// 升级：仅补 v2（v3/v4 紧随其后；v1 已记录跳过）
+		// 升级：仅补 v2（v3~v8 紧随其后；v1 已记录跳过）
 		const applied = migrate(db);
-		assert.deepEqual(applied, ["v2_spatial_primitives", "v3_data_status", "v4_turn_log_warnings"]);
+		assert.deepEqual(applied, [
+			"v2_spatial_primitives",
+			"v3_data_status",
+			"v4_turn_log_warnings",
+			"v5_location_kind",
+			"v6_location_coordinates",
+			"v7_npc_knowledge",
+			"v8_time_span",
+		]);
 		assert.ok(hasMigration(db, "v2_spatial_primitives"));
 		assert.ok(hasMigration(db, "v3_data_status"));
 		assert.ok(hasMigration(db, "v4_turn_log_warnings"));
+		assert.ok(hasMigration(db, "v5_location_kind"));
+		assert.ok(hasMigration(db, "v6_location_coordinates"));
+		assert.ok(hasMigration(db, "v7_npc_knowledge"));
+		assert.ok(hasMigration(db, "v8_time_span"));
 
 		// 新表存在
 		const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
@@ -89,12 +101,21 @@ const ctx = {} as unknown as ExtensionContext;
 	}
 });
 
-test("新库（无 v1 记录）直接建到当前版本：v1+v2+v3+v4 顺序应用", () => {
+test("新库（无 v1 记录）直接建到当前版本：v1~v8 顺序应用", () => {
 	const dir = makeTempDir();
 	const db = new DatabaseSync(join(dir, "story.db"));
 	try {
 		const applied = migrate(db);
-		assert.deepEqual(applied, ["v1_core_schema", "v2_spatial_primitives", "v3_data_status", "v4_turn_log_warnings"]);
+		assert.deepEqual(applied, [
+			"v1_core_schema",
+			"v2_spatial_primitives",
+			"v3_data_status",
+			"v4_turn_log_warnings",
+			"v5_location_kind",
+			"v6_location_coordinates",
+			"v7_npc_knowledge",
+			"v8_time_span",
+		]);
 		const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
 			(r) => r.name,
 		);
@@ -241,12 +262,13 @@ test("insertLocation 幂等变体按 name 去重；parent 未登记抛错", () =
 // 工具层：get_location / move_to
 // ---------------------------------------------------------------------------
 
-test("工具层：move_to 经 provider 拿 turn_seq（模型不接触），get_location 返回玩家位置与地点树", async () => {
+test("工具层：move_to 经 provider 拿 turn_seq（模型不接触），get_location 返回玩家位置切片（路径/同层/下级）", async () => {
 	const dir = makeTempDir();
 	try {
 		const story = openTempStory(dir);
-		const city = story.writer.insertLocation({ name: "王城" });
-		story.writer.insertLocation({ name: "庭院", parentId: city.id });
+		const realm = story.writer.insertLocation({ name: "大雍", kind: "国" });
+		const city = story.writer.insertLocation({ name: "王城", parentId: realm.id, kind: "城" });
+		story.writer.insertLocation({ name: "庭院", parentId: city.id, kind: "院" });
 
 		let turn = 0;
 		const tools = createDbTools(story, { getCurrentTurnSeq: () => turn });
@@ -261,11 +283,11 @@ test("工具层：move_to 经 provider 拿 turn_seq（模型不接触），get_l
 			/当前轮次未注入/,
 		);
 
-		// get_location：玩家未定位时提示
+		// get_location：玩家未定位时提示 + 世界概览（根 + 一层）
 		const g1 = await getLocation.execute("c1", {}, undefined, undefined, ctx);
 		const g1Text = (g1.content[0] as { text: string }).text;
 		assert.ok(g1Text.includes("玩家尚未定位"), g1Text);
-		assert.ok(g1Text.includes("王城"), "地点树应含王城");
+		assert.ok(g1Text.includes("大雍（国）"), "世界概览应含大雍");
 
 		// move_to：turn_seq 由 provider 提供（模型不接触，参数 schema 无 turn_seq）
 		turn = 5;
@@ -275,10 +297,24 @@ test("工具层：move_to 经 provider 拿 turn_seq（模型不接触），get_l
 		assert.equal((m.details as { turn_seq: number }).turn_seq, 5);
 		assert.equal(story.reader.getPlayerLocation()?.name, "王城");
 
-		// get_location 现在显示玩家位置
+		// get_location：玩家位置切片 = 路径（带 id）+ 同层 + 下级
 		const g2 = await getLocation.execute("c4", {}, undefined, undefined, ctx);
 		const g2Text = (g2.content[0] as { text: string }).text;
-		assert.ok(g2Text.includes("当前玩家位置: 王城"), g2Text);
+		assert.ok(g2Text.includes("玩家位置: #1 大雍（国） > #2 王城（城）"), g2Text);
+		assert.ok(g2Text.includes("大雍（国）: #2 王城（城） ← 玩家所在"), "同层行应标出玩家所在");
+		assert.ok(g2Text.includes("王城（城）: #3 庭院（院）"), "下级行应含庭院");
+
+		// get_location：指定地点 + depth 展开（任意层级查询）
+		const g3 = await getLocation.execute("c6", { location_id: realm.id, depth: 9 }, undefined, undefined, ctx);
+		const g3Text = (g3.content[0] as { text: string }).text;
+		assert.ok(g3Text.includes("位置: #1 大雍（国）"), g3Text);
+		assert.ok(g3Text.includes("大雍（国）: #2 王城（城）"), g3Text);
+		assert.ok(g3Text.includes("王城（城）: #3 庭院（院）"), "depth 展开应到庭院");
+
+		// get_location：未登记地点查询 fail-loud（不得编造 id）
+		const g4 = await getLocation.execute("c7", { location_id: 999 }, undefined, undefined, ctx);
+		const g4Text = (g4.content[0] as { text: string }).text;
+		assert.ok(g4Text.includes("未登记"), g4Text);
 
 		// 未登记地点 move_to 拒绝
 		await assert.rejects(

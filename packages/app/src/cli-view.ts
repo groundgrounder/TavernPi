@@ -7,7 +7,16 @@
 // - 措辞出自 cli-text-en.ts / cli-text-zh.ts，本模块只负责摆。
 
 import type { SessionEntry, SessionManager, SessionTreeNode } from "@earendil-works/pi-coding-agent";
-import type { DbView, LocationRow, NpcRow, NpcTraitRow, SnapshotRestoreResult, StoryMode, TurnResult, WorldPack } from "@tavernpi/core";
+import {
+	renderLocationPath,
+	type DbView,
+	type NpcRow,
+	type NpcTraitRow,
+	type SnapshotRestoreResult,
+	type StoryMode,
+	type TurnResult,
+	type WorldPack,
+} from "@tavernpi/core";
 import { EN, EN_LABELS } from "./cli-text-en.ts";
 import { displayWidth, formatElapsed, GLYPH, padToWidth, truncateByWidth, type Tone, type Ui } from "./ui.ts";
 
@@ -195,18 +204,10 @@ export function renderTree(ui: Ui, sessionManager: SessionManager): string[] {
 // ---------------------------------------------------------------------------
 
 /** 从地点沿 parent_id 上溯解析父链（如「王城 > 庭院」）；未登记父名断链；无地点给 unlocated。 */
-function locationChain(loc: LocationRow | undefined, byId: Map<number, LocationRow>): string {
-	if (!loc) return EN.unlocated;
-	const chain: string[] = [];
-	const seen = new Set<number>();
-	let cur: LocationRow | undefined = loc;
-	while (cur && !seen.has(cur.id)) {
-		seen.add(cur.id);
-		chain.push(cur.name);
-		cur = cur.parent_id === null ? undefined : byId.get(cur.parent_id);
-	}
-	chain.reverse();
-	return chain.join(" > ");
+/** 玩家位置链（统一走 core 的位置路径渲染：`大雍（国） > 王城（城） > 茶棚`）。 */
+function locationChain(view: DbView): string {
+	const path = view.getPlayerLocationPath();
+	return path !== undefined ? renderLocationPath(path) : EN.unlocated;
 }
 
 /** 权重（0–1）映射为 5 格度量徽章，如 0.6 → ▰▰▰▱▱。 */
@@ -234,8 +235,6 @@ export function renderStatus(ui: Ui, input: StatusInput): string[] {
 	const turns = view.getTurnLog();
 	const snaps = input.snapshotCount;
 	const dataStatus = view.listDataStatus();
-	const playerLoc = view.getPlayerLocation();
-	const locById = new Map<number, LocationRow>(view.listLocations().map((l) => [l.id, l]));
 	const npcs = view.listNpcs();
 	const npcNameById = new Map<number, string>(npcs.map((n) => [n.id, n.name]));
 
@@ -244,7 +243,7 @@ export function renderStatus(ui: Ui, input: StatusInput): string[] {
 	out.push(
 		...ui.fields([
 			[EN.labelTime, time],
-			[EN.labelLocation, locationChain(playerLoc, locById)],
+			[EN.labelLocation, locationChain(view)],
 			[EN.labelMode, modeLabel(input.mode)],
 			[EN.labelCounts, EN.statusCounts(turns.length, events.length, snaps, dataStatus.length)],
 			[

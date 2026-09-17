@@ -8,6 +8,7 @@
 
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { renderLocationOverview, renderLocationSlice } from "./location-path.ts";
 import type { NpcComposite } from "./reader.ts";
 import type { StoryDb } from "./story-db.ts";
 import type { LocationRow } from "./types.ts";
@@ -27,40 +28,6 @@ function requireTurnSeq(getCurrentTurnSeq: (() => number) | undefined): number {
 		);
 	}
 	return getCurrentTurnSeq();
-}
-
-/** 渲染 locations 为缩进树（按 parent_id 递归；root = parent_id 为 null 的条目）。 */
-function renderLocationTree(locations: LocationRow[]): string[] {
-	const children = new Map<number | null, LocationRow[]>();
-	for (const loc of locations) {
-		const list = children.get(loc.parent_id) ?? [];
-		list.push(loc);
-		children.set(loc.parent_id, list);
-	}
-	const lines: string[] = [];
-	const walk = (parent: number | null, depth: number): void => {
-		for (const loc of children.get(parent) ?? []) {
-			lines.push(`${"  ".repeat(depth)}#${loc.id} ${loc.name}`);
-			walk(loc.id, depth + 1);
-		}
-	};
-	walk(null, 0);
-	return lines;
-}
-
-/** 渲染地点名路径（如 王城 > 庭院）+ 地点 id。 */
-function renderLocationPath(location: LocationRow, locations: LocationRow[]): string {
-	const byId = new Map<number, LocationRow>();
-	for (const loc of locations) byId.set(loc.id, loc);
-	const names: string[] = [location.name];
-	let cur: LocationRow = location;
-	while (cur.parent_id !== null) {
-		const parent = byId.get(cur.parent_id);
-		if (!parent) break;
-		names.unshift(parent.name);
-		cur = parent;
-	}
-	return `${names.join(" > ")}（地点 #${location.id}）`;
 }
 
 /** 为指定 storyDb 创建 db 工具集。
@@ -206,18 +173,56 @@ export function createDbTools(storyDb: StoryDb | (() => StoryDb), options: DbToo
 
 	const getLocationTool = defineTool({
 		name: "get_location",
-		label: "读取地点与玩家位置",
+		label: "查看地图与位置",
 		description:
-			"返回玩家当前所在地（含父地点链，如 王城 > 庭院）与 locations 注册表的地点树摘要（含各地点 id）。调用 move_to 之前必须先经本工具查询 location_id，不得编造或猜测地点 id。",
-		parameters: EMPTY_PARAMS,
-		execute: async () => {
+			"查看地图（按地理层级组织，如 国 > 城 > 片 > 点）。缺省：玩家当前位置的路径 + 同层邻居 + 下一层。传 location_id：查看指定地点（含上级路径与向下展开），depth 控制展开层数（默认 1；0 = 只看同层；想看整棵子树可给大值如 9）。调用 move_to 之前必须先用本工具查询目标 location_id，不得编造或猜测地点 id。",
+		parameters: Type.Object(
+			{
+				location_id: Type.Optional(Type.Integer({ description: "要查看的地点 id（缺省 = 玩家当前位置）" })),
+				depth: Type.Optional(Type.Integer({ description: "向下展开层数（默认 1；0 = 只给同层）" })),
+			},
+			{ additionalProperties: false },
+		),
+		execute: async (_toolCallId, params) => {
 			const storyDb = getStoryDb();
 			const locations = storyDb.reader.listLocations();
+			// details 形状显式声明：focus_id 各分支为 number | null
+			// （TS 从首个 return 采样 details 泛型，不声明会让 null 分支与 number 分支互相不兼容）。
+			type Details = { focus_id: number | null; locations: LocationRow[] };
+
+			// 指定地点：未登记 fail-loud（登记校验契约）
+			if (params.location_id !== undefined) {
+				const target = storyDb.reader.getLocation(params.location_id);
+				if (target === undefined) {
+					const details: Details = { focus_id: null, locations };
+					return {
+						content: [
+							{ type: "text", text: `地点 #${params.location_id} 未登记（先用 get_location 查询已有地点，不得编造 id）` },
+						],
+						details,
+					};
+				}
+				const details: Details = { focus_id: target.id, locations };
+				const lines = renderLocationSlice(locations, target.id, { depth: params.depth ?? 1 });
+				return { content: [{ type: "text", text: lines.join("\n") }], details };
+			}
+
+			// 缺省：玩家位置切片
 			const player = storyDb.reader.getPlayerLocation();
-			const playerText = player ? renderLocationPath(player, locations) : "(玩家尚未定位)";
-			const treeLines = renderLocationTree(locations);
-			const text = `当前玩家位置: ${playerText}\n地点注册表:\n${treeLines.length === 0 ? "(空)" : treeLines.join("\n")}`;
-			return { content: [{ type: "text", text }], details: { player: player ?? null, locations } };
+			if (player === undefined) {
+				const details: Details = { focus_id: null, locations };
+				const lines = ["玩家尚未定位。"];
+				const overview = renderLocationOverview(locations);
+				if (overview.length > 0) lines.push("世界地图:", ...overview);
+				return { content: [{ type: "text", text: lines.join("\n") }], details };
+			}
+			const details: Details = { focus_id: player.id, locations };
+			const lines = renderLocationSlice(locations, player.id, {
+				depth: params.depth ?? 1,
+				mark: "← 玩家所在",
+				pathLabel: "玩家位置",
+			});
+			return { content: [{ type: "text", text: lines.join("\n") }], details };
 		},
 	});
 

@@ -112,6 +112,64 @@ test("validateChangesetSemantics：new_locations 先登记后引用可通过；�
 	}
 });
 
+test("validateChangesetSemantics：坐标纪律——x/y 必须成对、z 依附 x/y", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		seedStory(story);
+
+		// 只给 x（缺 y）→ 问题
+		const onlyX = changesetZodSchema.parse({ new_locations: [{ name: "东市", x: 100 }] });
+		const p1 = validateChangesetSemantics(story, onlyX);
+		assert.ok(p1.some((p) => p.message.includes("x/y 必须成对")), JSON.stringify(p1));
+
+		// 只给 z（缺 x/y）→ 问题
+		const onlyZ = changesetZodSchema.parse({ new_locations: [{ name: "东市", z: 3 }] });
+		const p2 = validateChangesetSemantics(story, onlyZ);
+		assert.ok(p2.some((p) => p.message.includes("z 依附")), JSON.stringify(p2));
+
+		// 成对给（含 z）→ 无问题
+		const ok = changesetZodSchema.parse({ new_locations: [{ name: "东市", x: 100, y: 200, z: 3 }] });
+		assert.deepEqual(validateChangesetSemantics(story, ok), []);
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("validateChangesetSemantics：participant_npc_ids / memories.event_id 引用校验", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		const { rodId, dohnId } = seedStory(story);
+		const prior = story.writer.insertEvent({ turnSeq: 0, summary: "旧事" });
+
+		// participant_npc_ids 引用不存在 NPC
+		const badNpc = changesetZodSchema.parse({ events: [{ summary: "x", participant_npc_ids: [999] }] });
+		const p1 = validateChangesetSemantics(story, badNpc);
+		assert.ok(p1.some((p) => p.message.includes("participant_npc_ids 引用不存在的 NPC")), JSON.stringify(p1));
+
+		// memories.event_id 不存在
+		const badEvent = changesetZodSchema.parse({
+			npc_updates: [{ npc_id: rodId, memories: [{ kind: "e", content: "c", event_id: 999 }] }],
+		});
+		const p2 = validateChangesetSemantics(story, badEvent);
+		assert.ok(p2.some((p) => p.message.includes("memories.event_id 不存在")), JSON.stringify(p2));
+
+		// 合法：名册引用已有 NPC + 记忆引用已有事件（耳闻来源）
+		const ok = changesetZodSchema.parse({
+			events: [{ summary: "新事", participant_npc_ids: [dohnId] }],
+			npc_updates: [
+				{ npc_id: rodId, memories: [{ kind: "e", content: "听说了新事", source: "hearsay", event_id: prior.id }] },
+			],
+		});
+		assert.deepEqual(validateChangesetSemantics(story, ok), []);
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
 test("validateChangesetSemantics：sys_ 内核保留键禁写（编排器簿记键命名空间）", () => {
 	const dir = makeTempDir();
 	try {
@@ -142,18 +200,22 @@ test("applyChangeset：全字段应用到临时 story.db 逐表断言", () => {
 	try {
 		const story = openTempStory(dir);
 		const { rodId, dohnId } = seedStory(story);
+		// 已有事件：供 memories.event_id 引用（本轮新事件尚未落库，不能自引用）
+		const prior = story.writer.insertEvent({ turnSeq: 0, summary: "序章：旧事" });
 
 		const cs: Changeset = changesetZodSchema.parse({
-			events: [{ summary: "城门洞开", detail: "主角推开了城门", location_name: "王城" }],
-			time_advance: { to_time: "0000-01-02", span_note: "一日" },
-			new_locations: [{ name: "庭院", parent_name: "王城", detail: "内院" }],
+			events: [
+				{ summary: "城门洞开", detail: "主角推开了城门", location_name: "王城", participants: "罗德", participant_npc_ids: [rodId] },
+			],
+			time_advance: { to_time: "0000-01-02", span_note: "一日", span_days: 1 },
+			new_locations: [{ name: "庭院", parent_name: "王城", detail: "内院", kind: "院", x: 120, y: -80 }],
 			location_moves: [{ subject: "player", to_location_name: "王城", note: "进城" }],
 			new_npcs: [{ name: "艾琳", status: "alive", location_name: "王城" }],
 			npc_updates: [
 				{
 					npc_id: rodId,
 					status: "alive",
-					memories: [{ kind: "event", content: "见过主角", salience: 1 }],
+					memories: [{ kind: "event", content: "见过主角", salience: 1, source: "witness", event_id: prior.id }],
 					traits: [{ trait: "勇敢", weight: 0.8, source: "narrative" }],
 					relations: [{ other_npc_id: dohnId, disposition: 30 }],
 				},
@@ -177,27 +239,37 @@ test("applyChangeset：全字段应用到临时 story.db 逐表断言", () => {
 			phaseEnded: 1,
 		});
 
-		// events（location_id 解析到王城）
+		// events（location_id 解析到王城；在场名册随事件落库）
 		const events = story.reader.listEvents();
-		assert.equal(events.length, 1);
-		assert.equal(events[0]?.summary, "城门洞开");
+		assert.equal(events.length, 2, "序章旧事 + 城门洞开");
+		const gateEvent = events.find((e) => e.summary === "城门洞开");
+		assert.ok(gateEvent, "城门洞开应已落库");
 		const wangCheng = story.reader.listLocations().find((l) => l.name === "王城");
-		assert.equal(events[0]?.location_id, wangCheng?.id);
-		assert.equal(events[0]?.created_entry_id, "entry-1");
+		assert.equal(gateEvent?.location_id, wangCheng?.id);
+		assert.equal(gateEvent?.created_entry_id, "entry-1");
+		// 名册（event_npcs）：罗德亲历「城门洞开」——「某 NPC 亲历过什么」直接可查
+		assert.deepEqual(story.reader.listNpcEvents(rodId).map((e) => e.summary), ["城门洞开"]);
+		assert.deepEqual(story.reader.listNpcEvents(dohnId), [], "多恩不在名册");
 
-		// locations（庭院.parent = 王城）
+		// locations（庭院.parent = 王城；kind 层级标签与坐标随 new_locations 落库）
 		const tingYuan = story.reader.listLocations().find((l) => l.name === "庭院");
 		assert.equal(tingYuan?.parent_id, wangCheng?.id);
+		assert.equal(tingYuan?.kind, "院");
+		assert.equal(tingYuan?.x, 120);
+		assert.equal(tingYuan?.y, -80);
+		assert.equal(tingYuan?.z, null, "未提供的 z 落 NULL");
 
 		// npcs（艾琳落位王城）
 		const aiLin = story.reader.listNpcs().find((n) => n.name === "艾琳");
 		assert.ok(aiLin, "艾琳应已登记");
 		assert.equal(aiLin?.current_location, wangCheng?.id);
 
-		// npc_updates（罗德：记忆/特征/关系）
+		// npc_updates（罗德：记忆/特征/关系；记忆带来源与事件引用）
 		const rod = story.reader.getNpc(rodId);
 		assert.equal(rod.memories.length, 1);
 		assert.equal(rod.memories[0]?.content, "见过主角");
+		assert.equal(rod.memories[0]?.source, "witness");
+		assert.equal(rod.memories[0]?.event_id, prior.id);
 		assert.equal(rod.traits.length, 1);
 		assert.equal(rod.traits[0]?.trait, "勇敢");
 		assert.equal(rod.relations.length, 1);
@@ -208,6 +280,12 @@ test("applyChangeset：全字段应用到临时 story.db 逐表断言", () => {
 
 		// world_state
 		assert.equal(story.reader.listWorldState().find((w) => w.key === "weather")?.value, "晴");
+
+		// time_log：span_days（可运算时间量）随 time_advance 落库
+		const tl = story.reader.listTimeLog();
+		assert.equal(tl.length, 1);
+		assert.equal(tl[0]?.span_days, 1);
+		assert.equal(tl[0]?.span_note, "一日");
 
 		// phases：第一章 active，序章 ended
 		const phases = story.reader.listPhases();

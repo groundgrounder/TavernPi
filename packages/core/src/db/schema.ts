@@ -186,3 +186,69 @@ CREATE TABLE IF NOT EXISTS data_status (
  * 走 v2 ALTER 先例：列存在性守卫幂等（migrate.ts 内处理）。
  */
 export const CORE_V4_TURN_LOG_WARNINGS_SQL = "ALTER TABLE turn_log ADD COLUMN warnings TEXT";
+
+/**
+ * v5「location-kind」（地理层级标签）——旧表补列。
+ * locations.kind = 该地点在地理层级中的层级标签（如 国/城/区/别墅/房间）。
+ * 词汇由卡包自定义（内核不约束取值）；未标注为 NULL，渲染时省略。
+ * 用途：按层级组织地图渲染与「焦点切片」视图（agent 按叙事粒度选择地图层级）。
+ * 走 v4 ALTER 先例：列存在性守卫幂等（migrate.ts 内处理）。
+ */
+export const CORE_V5_LOCATION_KIND_SQL = "ALTER TABLE locations ADD COLUMN kind TEXT";
+
+/**
+ * v6「location-coordinates」（地理坐标）——旧表补列。
+ * locations.x / y / z = 世界坐标，**单位：步**（1 单位 = 成人一步，内核统一约定，不随卡包变）。
+ * 方向约定：x 东为正、y 北为正、z 上为正（楼层/地下用 z）。
+ * 可空（未标注 = NULL；z NULL 视为 0）；写入须 x/y 成对（纵深防御见 writer）。
+ * 用途：叙事里的远近/方位推理（距离由内核算好供给 LLM）与地图展示；层级管「在谁里面」，坐标管「哪个方向、多远」。
+ */
+export const CORE_V6_LOCATION_COORDS: ReadonlyArray<{ table: string; column: string; sql: string }> = [
+	{ table: "locations", column: "x", sql: "ALTER TABLE locations ADD COLUMN x REAL" },
+	{ table: "locations", column: "y", sql: "ALTER TABLE locations ADD COLUMN y REAL" },
+	{ table: "locations", column: "z", sql: "ALTER TABLE locations ADD COLUMN z REAL" },
+];
+
+/**
+ * v7「npc-knowledge」（NPC 知识层）——新表 + 旧表补列。
+ *
+ * 两个维度落地的数据面（「客观发生了什么」× 「NPC 自己经历了什么」）：
+ * - event_npcs：事件的在场名册（客观维度）——谁亲历了该事件。events.participants 的自由文本
+ *   保留（叙事需要），本表是结构化引用，供「某 NPC 亲历过什么」直接查询。
+ * - npc_memories.source / event_id：知识的来源（主观维度）——witness=亲历 / hearsay=耳闻 /
+ *   inference=推断（封闭枚举，可空 = 未标注）；event_id 可选指向所涉事件。
+ *   耳闻版本允许与客观事件不一致（写在 content 里）——失真即戏剧，不视为数据错误。
+ */
+export const CORE_V7_NPC_KNOWLEDGE_SQL = `
+-- ---------- 在场名册（NPC × 事件） ----------
+CREATE TABLE IF NOT EXISTS event_npcs (
+  event_id INTEGER NOT NULL REFERENCES events(id),
+  npc_id INTEGER NOT NULL REFERENCES npcs(id),
+  PRIMARY KEY (event_id, npc_id)
+);
+CREATE INDEX IF NOT EXISTS idx_event_npcs_npc ON event_npcs (npc_id);
+`;
+
+export const CORE_V7_MEMORY_SOURCE_ALTERS: ReadonlyArray<{ table: string; column: string; sql: string }> = [
+	{
+		table: "npc_memories",
+		column: "source",
+		sql: "ALTER TABLE npc_memories ADD COLUMN source TEXT CHECK (source IN ('witness', 'hearsay', 'inference'))",
+	},
+	{
+		table: "npc_memories",
+		column: "event_id",
+		sql: "ALTER TABLE npc_memories ADD COLUMN event_id INTEGER REFERENCES events(id)",
+	},
+];
+
+/**
+ * v8「time-span」（可运算的时间量）——旧表补列。
+ * time_log.span_days = 该轮推进的故事天数（REAL，可空；如「三年后」→ 1095、「一炷香」→ 0.03）。
+ * 「天」是历法无关的通用量：时间是给人看的文本，本列是给引擎算的量——
+ * 记忆时间精度衰减（距今多久）、离线推演间隔等一切「时间运算」都以此为准。
+ * 未标注（NULL）的轮按 0 天计（保守：衰减不增长）。
+ */
+export const CORE_V8_TIME_SPAN_ALTERS: ReadonlyArray<{ table: string; column: string; sql: string }> = [
+	{ table: "time_log", column: "span_days", sql: "ALTER TABLE time_log ADD COLUMN span_days REAL" },
+];

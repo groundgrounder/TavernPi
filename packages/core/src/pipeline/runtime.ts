@@ -985,9 +985,6 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				eventLog,
 				maxAttempts: npcOpts.maxAttempts,
 				executor: npcOpts.executor,
-				directives: storyOpts.enabled && MODE_PRESETS[mode].directivesAllowed
-					? storyState.storyDb.reader.listDirectives("active").map((d) => d.content)
-					: undefined,
 			};
 			const [rehearsals, deltas] = await Promise.all([
 				onstageNpcs.length > 0

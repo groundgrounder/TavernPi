@@ -5,6 +5,7 @@
 // 净化规则见 resolveRelatedNpcSet；world_state 隐藏规则见 isSysBookkeepingKey。
 
 import type { DbReader, NpcComposite } from "./reader.ts";
+import type { LocationPath } from "./location-path.ts";
 import type {
 	DataStatusRow,
 	DirectiveRow,
@@ -248,8 +249,19 @@ export class DbView {
 		return this.reader.getLocation(id);
 	}
 
+	/** 单地点路径（从根到叶）：越集（未到过）返回 undefined（到过地点的祖先链必在集内，见 resolveVisitedLocationIds）。 */
+	getLocationPath(id: number): LocationPath | undefined {
+		if (this.filter === "user-related" && !this.visitedLocationIds.has(id)) return undefined;
+		return this.reader.getLocationPath(id);
+	}
+
 	getPlayerLocation(): LocationRow | undefined {
 		return this.reader.getPlayerLocation();
+	}
+
+	/** 玩家当前位置的路径（玩家自身位置始终可见，直接透传）。 */
+	getPlayerLocationPath(): LocationPath | undefined {
+		return this.reader.getPlayerLocationPath();
 	}
 
 	/** 位移记录：user-related 下只给玩家自己的——别人的行程是别人的事。 */

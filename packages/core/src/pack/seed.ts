@@ -9,7 +9,8 @@
 //     已存在即跳过不覆盖（玩家与 data 的演化优先）；v0 只插 name + card_ref + status='alive'，
 //     其余由 data 演化。
 //   - locations → locations 注册表：沿用 writer.insertLocation 按 name 幂等；location 条目
-//     data.parent（同包条目 id 引用）先种父再种子，父 location_id 按 name 查。
+//     data.parent（同包条目 id 引用）先种父再种子，父 location_id 按 name 查；data.kind（地理
+//     层级标签，可选）随条目写入注册表，供地图渲染按层级组织。
 //
 // story.yaml 的 calendar/granularity/opening/defaultStyle 本 lane 只解析进 StoryMeta（loader），
 // 消费在 Lane C。
@@ -69,12 +70,16 @@ function seedPackEntries(db: DatabaseSync, pack: WorldPack): void {
 		writer.insertNpc({ name: entry.name, cardRef, status: "alive" });
 	}
 
-	// locations → locations 注册表（按 name 幂等；parent 同包引用先种父再种子）
+	// locations → locations 注册表（按 name 幂等；parent 同包引用先种父再种子；kind/坐标可选）
 	const locationEntries = pack.entries.filter((e): e is CollectionEntry & { type: "location" } => e.type === "location");
 	const idByName = new Map(reader.listLocations().map((l) => [l.name, l.id]));
 	for (const entry of orderLocationsParentFirst(locationEntries)) {
 		const parentId = resolveLocationParentId(entry, pack, idByName);
-		const row = writer.insertLocation({ name: entry.name, parentId, detail: entry.body });
+		const kind = typeof entry.data.kind === "string" ? entry.data.kind : undefined;
+		const x = typeof entry.data.x === "number" ? entry.data.x : undefined;
+		const y = typeof entry.data.y === "number" ? entry.data.y : undefined;
+		const z = typeof entry.data.z === "number" ? entry.data.z : undefined;
+		const row = writer.insertLocation({ name: entry.name, parentId, detail: entry.body, kind, x, y, z });
 		idByName.set(row.name, row.id);
 	}
 }

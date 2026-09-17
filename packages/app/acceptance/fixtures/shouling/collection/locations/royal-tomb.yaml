@@ -4,6 +4,9 @@ name: 王陵
 keys: [王陵, 陵]
 always_on: true
 position: system
+kind: 陵寝
+x: 0
+y: 0
 refs: []
 overview: |
   大雍开国帝王的陵寝，依山而建，石阶三百级，陵门终年落锁。地上享殿、碑亭俱在，地下玄宫深邃，历代守陵人轮值守护。

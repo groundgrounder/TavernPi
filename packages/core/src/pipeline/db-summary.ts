@@ -1,48 +1,22 @@
 // DB 摘要渲染（读取渲染由 harness 负责）：把故事 DB 的权威事实渲染成紧凑确定性文本，
 // 供 before_agent_start 注入主叙事系统提示（{{db_summary}}）与 data subagent 的 userPrompt。
 //
-// 内容：当前故事时间、玩家位置路径、地点树、NPC 表（特征前 5 + salience 最高 3 条记忆）、
+// 内容：当前故事时间、玩家位置与「焦点切片」（路径 + 同层 + 下级——按地理层级组织，
+// agent 按叙事粒度选择地图层级）、NPC 表（位置走路径 + 特征前 5 + salience 最高 3 条记忆）、
 // 近期事件 N 条、world_state（排除 player_location 保留键）、active phase。
-// renderLocationTree/renderLocationPath 复制自 db/tools.ts（模块私有，不导出；为保持 tools.ts
-// 不动而在本模块内复制，注释与来源一致）。
+// 地点渲染统一走 db/location-path.ts（路径/切片的唯一实现；此前本模块与 tools.ts 各复制一份）。
 
 import type { StoryDb } from "../db/story-db.ts";
-import type { LocationRow } from "../db/types.ts";
-import { PLAYER_LOCATION_KEY } from "../db/types.ts";
-
-/** 渲染 locations 为缩进树（按 parent_id 递归；root = parent_id 为 null 的条目）。复制自 db/tools.ts。 */
-function renderLocationTree(locations: LocationRow[]): string[] {
-	const children = new Map<number | null, LocationRow[]>();
-	for (const loc of locations) {
-		const list = children.get(loc.parent_id) ?? [];
-		list.push(loc);
-		children.set(loc.parent_id, list);
-	}
-	const lines: string[] = [];
-	const walk = (parent: number | null, depth: number): void => {
-		for (const loc of children.get(parent) ?? []) {
-			lines.push(`${"  ".repeat(depth)}#${loc.id} ${loc.name}`);
-			walk(loc.id, depth + 1);
-		}
-	};
-	walk(null, 0);
-	return lines;
-}
-
-/** 渲染地点名路径（如 王城 > 庭院）+ 地点 id。复制自 db/tools.ts。 */
-function renderLocationPath(location: LocationRow, locations: LocationRow[]): string {
-	const byId = new Map<number, LocationRow>();
-	for (const loc of locations) byId.set(loc.id, loc);
-	const names: string[] = [location.name];
-	let cur: LocationRow = location;
-	while (cur.parent_id !== null) {
-		const parent = byId.get(cur.parent_id);
-		if (!parent) break;
-		names.unshift(parent.name);
-		cur = parent;
-	}
-	return `${names.join(" > ")}（地点 #${location.id}）`;
-}
+import {
+	buildLocationPath,
+	describeSpatialRelation,
+	renderLocationOverview,
+	renderLocationPath,
+	renderLocationSlice,
+} from "../db/location-path.ts";
+import { memoryTimeLabel } from "../db/time-fuzzy.ts";
+import { PLAYER_LOCATION_KEY, renderMemoryText } from "../db/types.ts";
+import { PLAYER_NPC_ID_KEY } from "../db/view.ts";
 
 /** 渲染故事 DB 权威摘要。recentEvents 控制近期事件条数（默认 10）。 */
 export function renderDbSummary(storyDb: StoryDb, opts: { recentEvents?: number } = {}): string {
@@ -55,17 +29,30 @@ export function renderDbSummary(storyDb: StoryDb, opts: { recentEvents?: number 
 		`当前故事时间: ${clock ? `${clock.current_time}（历法 ${clock.calendar}，粒度 ${clock.granularity}）` : "(未初始化)"}`,
 	);
 
+	// 地点：焦点切片（焦点 = 玩家位置）——路径 + 同层邻居 + 下一层。
+	// 叙事焦点在哪一层，地图就取哪一层（agent 按叙事粒度选择地图层级）。
 	const locations = reader.listLocations();
-	const player = reader.getPlayerLocation();
-	lines.push(`玩家位置: ${player ? renderLocationPath(player, locations) : "(玩家尚未定位)"}`);
-
-	if (locations.length > 0) {
-		lines.push("地点树:");
-		lines.push(...renderLocationTree(locations));
+	const playerPath = reader.getPlayerLocationPath();
+	if (playerPath !== undefined) {
+		const focusId = playerPath[playerPath.length - 1]!.id;
+		lines.push(...renderLocationSlice(locations, focusId, { mark: "← 你在这里", pathLabel: "玩家位置" }));
+	} else {
+		lines.push("玩家位置: (玩家尚未定位)");
+		const overview = renderLocationOverview(locations);
+		if (overview.length > 0) {
+			lines.push("世界地图:", ...overview);
+		}
 	}
 
 	const npcs = reader.listNpcs();
 	if (npcs.length > 0) {
+		// 玩家锚定行（player_npc_id 指向的 npcs 行）就是玩家角色本身，不给「与你…」关系描述。
+		const playerAnchor = reader.listWorldState().find((w) => w.key === PLAYER_NPC_ID_KEY);
+		const playerNpcId =
+			playerAnchor !== undefined && /^\d+$/.test(playerAnchor.value) ? Number(playerAnchor.value) : null;
+		// 记忆时间精度衰减的「当前」基准 = 最新已记录轮（readonly；span_days 累加见 reader.memoryTimeView）
+		const currentTurn = reader.latestTurnSeq();
+
 		lines.push("NPC:");
 		for (const npc of npcs) {
 			const composite = reader.getNpc(npc.id);
@@ -73,9 +60,30 @@ export function renderDbSummary(storyDb: StoryDb, opts: { recentEvents?: number 
 			const memoriesText =
 				composite.memories
 					.slice(0, 3)
-					.map((m) => m.content)
+					.map((m) => {
+						const timeView = reader.memoryTimeView(m, currentTurn);
+						return renderMemoryText(m, timeView === undefined ? undefined : memoryTimeLabel(m, timeView));
+					})
 					.join("；") || "(无)";
-			const locText = npc.current_location_name !== null ? `位置 ${npc.current_location_name}` : "位置 (未定位)";
+			const npcPath = npc.current_location === null ? undefined : buildLocationPath(locations, npc.current_location);
+			let locText = "位置 (未定位)";
+			if (npcPath !== undefined) {
+				locText = `位置 ${renderLocationPath(npcPath)}`;
+				// 相对玩家的空间关系：层级判据（LCA）给「同在「X」/不同地图」；坐标可算时补「相距约 N 步 · X 方」。
+				// 嵌套上下位（npc 位置是玩家路径的前缀，或反之）本身在路径里已表达，不重复「同在」；
+				// 但距离方位是路径答不了的，照给。
+				if (playerPath !== undefined && npc.id !== playerNpcId) {
+					const relation = describeSpatialRelation(playerPath, npcPath);
+					const parts: string[] = [];
+					if (relation.kind === "same" || relation.kind === "cousin" || relation.kind === "unrelated") {
+						parts.push(relation.text);
+					}
+					if (relation.distance !== null) {
+						parts.push(`相距约 ${relation.distance.steps} 步 · ${relation.distance.bearing}方`);
+					}
+					if (parts.length > 0) locText += `（与你${parts.join("，")}）`;
+				}
+			}
 			lines.push(`#${npc.id} ${npc.name}（status: ${npc.status}，${locText}）`);
 			lines.push(`  特征[${traitsText}]`);
 			lines.push(`  记忆[${memoriesText}]`);
@@ -86,7 +94,9 @@ export function renderDbSummary(storyDb: StoryDb, opts: { recentEvents?: number 
 	if (events.length > 0) {
 		lines.push(`近期事件（最近 ${recentEvents} 条）:`);
 		for (const e of events.slice(-recentEvents)) {
-			lines.push(`- turn${e.turn_seq} ${e.summary}`);
+			// 事件与时间耦合：有 story_time 则显式给出（主叙事的时间线锚点）
+			const timeTag = e.story_time !== null && e.story_time.trim() !== "" ? `[${e.story_time}] ` : "";
+			lines.push(`- ${timeTag}turn${e.turn_seq} ${e.summary}`);
 		}
 	}
 

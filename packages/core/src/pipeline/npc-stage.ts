@@ -22,7 +22,8 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { z } from "zod";
 import type { TSchema } from "typebox";
 import type { StoryDb } from "../db/story-db.ts";
-import type { NpcRow } from "../db/types.ts";
+import { memoryTimeLabel } from "../db/time-fuzzy.ts";
+import { renderMemoryText, type NpcRow } from "../db/types.ts";
 import { loadPrompt, renderPlaceholders, type PromptLayerDirs } from "../prompts/loader.ts";
 import {
 	runSubagent,
@@ -32,7 +33,6 @@ import {
 	type SubagentUsage,
 } from "../subagent/runtime.ts";
 import type { PipelineEventLog } from "./events.ts";
-import { renderDbSummary } from "./db-summary.ts";
 
 // ---------------------------------------------------------------------------
 // 在场预演 schema（token 预算机械强制——M3 定案值）
@@ -180,14 +180,13 @@ export interface NpcStageOptions {
 	maxAttempts?: number;
 	/** 缺省 runSubagent；测试/验收故障注入通道。 */
 	executor?: (opts: SubagentRunOptions) => Promise<SubagentResult<unknown>>;
-	/** 活跃作者指令（场景分析 → npc 下达；剧本要求，预演须优先遵循但仍过 OOC 自检）。 */
-	directives?: string[];
 }
 
 const ZERO_USAGE: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, costTotal: 0 };
 
 const REHEARSAL_INSTRUCTIONS = [
 	"以该 NPC 的视角预演：严格依据其特征/记忆/关系，不得违背既有设定。",
+	"信息边界：你只知道「角色档案」与「你能感知到的」两节的内容。它不在场的事件、它不认识的人、剧情走向，你都不知道——不确定的内容宁缺毋滥。",
 	"行动要点与台词线索用简短 bullet，非散文。",
 	"unaware_of 必填它此刻不应知道的事（玩家内心、未目击事件、离线他处发生的事）——无上帝视角。",
 	"OOC 自检必经：对照特征与记忆检查拟议行动/台词，有风险则 ooc_check.passed=false 并给出 risks 与修正版。",
@@ -196,6 +195,7 @@ const REHEARSAL_INSTRUCTIONS = [
 
 const OFFSCREEN_INSTRUCTIONS = [
 	"只演化 NPC 自身（位置/活动/记忆/关系/alive↔absent）。",
+	"信息边界：每个 NPC 的推演只依据它自己的特征/记忆/所在地点，不得使用其他 NPC 的信息。",
 	"禁止：致死任何 NPC；制造直接影响玩家的既成事实（火灾/死亡/物品失窃等玩家将面对的变化）；引入玩家相关事件。",
 	"推演须与性格/记忆/所在地点连贯，时间跨度与距上次推演轮数匹配。",
 	"不必每个 NPC 都产出（无变化可省略 delta）。",
@@ -206,26 +206,49 @@ const OFFSCREEN_INSTRUCTIONS = [
 // 提示词组装
 // ---------------------------------------------------------------------------
 
-/** 单个在场 NPC 的预演 userPrompt：档案 + 场景上下文 + 玩家输入 + 作者指令（可选）+ 任务指令。 */
-function buildRehearsalUserPrompt(
-	storyDb: StoryDb,
-	npc: NpcRow,
-	turnSeq: number,
-	userInput: string,
-	directives?: string[],
-): string {
+/**
+ * 单个在场 NPC 的预演 userPrompt：**只有它自己的**——角色档案（特征/记忆/关系）+
+ * 它亲历的事件（事实底稿）+ 此刻能感知到的（时间、同处一地的人）+ 本轮玩家输入 + 任务指令。
+ *
+ * 信息边界（NPC 视角，刻意的最小面）：
+ * - 不给全量世界摘要——它不在场的事件、它不认识的人、阶段目标都超出它的视野；
+ * - 不给作者指令——剧本是作者视角的东西，角色拿到剧本就成了提线木偶（OOC 自检也失去意义）。
+ * 「不知道」靠数据不给实现，而不是把全貌摆在面前、再让提示词要求它装作不知道。
+ */
+function buildRehearsalUserPrompt(storyDb: StoryDb, npc: NpcRow, turnSeq: number, userInput: string): string {
 	const composite = storyDb.reader.getNpc(npc.id);
 	const traitsText = composite.traits.map((t) => `${t.trait}=${t.weight}`).join(", ") || "(无)";
 	const memoriesText =
 		[...composite.memories]
 			.sort((a, b) => b.salience - a.salience)
 			.slice(0, 5)
-			.map((m) => `${m.content}（salience ${m.salience}）`)
+			.map((m) => {
+				// 记忆的时间精度衰减（拟人）：距今天数由 time_log.span_days 累加；重大事件不衰减
+				const timeView = storyDb.reader.memoryTimeView(m, turnSeq);
+				return renderMemoryText(m, timeView === undefined ? undefined : memoryTimeLabel(m, timeView));
+			})
 			.join("；") || "(无)";
 	const relationsText =
 		composite.relations
 			.map((r) => `与 #${r.npc_a === npc.id ? r.npc_b : r.npc_a} 好感 ${r.disposition}`)
 			.join("；") || "(无)";
+
+	// 亲历事件（event_npcs 名册）：事实底稿——记忆写漏的，它也亲身经历过
+	const ownEvents = storyDb.reader.listNpcEvents(npc.id, 5);
+
+	// 此刻能感知到的：时间 + 同处一地的人（视野内；死者不在场）
+	const clock = storyDb.reader.getClock();
+	const others = storyDb.reader
+		.listNpcs()
+		.filter(
+			(n) =>
+				n.id !== npc.id &&
+				n.status !== "dead" &&
+				n.current_location !== null &&
+				n.current_location === npc.current_location,
+		)
+		.map((n) => n.name);
+
 	const parts: string[] = [];
 	parts.push(
 		`## 角色档案\nNPC #${npc.id} ${npc.name}（status: ${npc.status}，位置: ${npc.current_location_name ?? "未定位"}）`,
@@ -233,11 +256,13 @@ function buildRehearsalUserPrompt(
 	parts.push(`特征[${traitsText}]`);
 	parts.push(`记忆[${memoriesText}]`);
 	parts.push(`关系[${relationsText}]`);
-	parts.push(`## 场景上下文（turn ${turnSeq}）\n${renderDbSummary(storyDb, { recentEvents: 5 })}`);
-	parts.push(`## 本轮玩家输入\n${userInput}`);
-	if (directives !== undefined && directives.length > 0) {
-		parts.push(`## 作者指令（剧本要求）\n${directives.map((d) => `- ${d}`).join("\n")}`);
+	if (ownEvents.length > 0) {
+		parts.push(`## 你亲历的事件\n${ownEvents.map((e) => `- turn${e.turn_seq} ${e.summary}`).join("\n")}`);
 	}
+	parts.push(
+		`## 你能感知到的\n- 当前故事时间: ${clock?.current_time ?? "(未初始化)"}\n- 同处一地的其他人: ${others.length > 0 ? others.join("、") : "(无)"}`,
+	);
+	parts.push(`## 本轮玩家输入\n${userInput}`);
 	parts.push(`## 指令\n${REHEARSAL_INSTRUCTIONS}`);
 	return parts.join("\n\n");
 }
@@ -267,7 +292,10 @@ function buildOffscreenUserPrompt(storyDb: StoryDb, npcs: NpcRow[], turnSeq: num
 				[...composite.memories]
 					.sort((a, b) => b.salience - a.salience)
 					.slice(0, 3)
-					.map((m) => m.content)
+					.map((m) => {
+						const timeView = storyDb.reader.memoryTimeView(m, turnSeq);
+						return renderMemoryText(m, timeView === undefined ? undefined : memoryTimeLabel(m, timeView));
+					})
 					.join("；") || "(无)";
 			const lastTurnRaw = worldState.get(offscreenLastTurnKey(npc.id));
 			const lastTurn = lastTurnRaw === undefined ? 0 : Number(lastTurnRaw);
@@ -295,7 +323,7 @@ async function runOneRehearsal(
 	const systemPrompt = renderPlaceholders(loadPrompt("npc_onstage", opts.prompts).content, {
 		npc_name: npc.name,
 	}).text;
-	let userPrompt = buildRehearsalUserPrompt(opts.storyDb, npc, turnSeq, userInput, opts.directives);
+	let userPrompt = buildRehearsalUserPrompt(opts.storyDb, npc, turnSeq, userInput);
 
 	for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
 		const attemptStartedAt = Date.now();
