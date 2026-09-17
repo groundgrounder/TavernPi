@@ -76,3 +76,18 @@ npm run m6:accept     # 故事驱动验收（真实 LLM，需 auth.json）
 ```
 
 里程碑交付状态与验收证据见 `packages/app/acceptance/m6.ts`（自断言脚本，需真实 LLM）。
+
+## 许可证
+
+**GPL-3.0-or-later**（GNU General Public License v3.0 或更高版本），全文见 `LICENSE`；各包 `package.json` 的 `license` 字段同此。
+
+```
+Copyright (C) 2026 groundgrounder
+本程序是自由软件：你可以依据自由软件基金会发布的 GNU 通用公共许可证（第 3 版或任意更高版本）条款
+重新发布和/或修改它。本程序不提供任何担保，亦不承诺适用于特定用途——详见 `LICENSE`。
+```
+
+- **为何是 v3 而非 v2**：依赖树与本许可证兼容——pi SDK 全系 MIT，其余为 MIT / Apache-2.0 / BSD-3-Clause / ISC / 0BSD / BlueOak-1.0.0；其中 **Apache-2.0 与 GPLv2 不兼容**，故取 GPLv3。
+- **历史**：更早的版本曾以 MIT 发布。已发出的授权不可撤回——那些版本对已获得副本者仍永久适用 MIT；GPL 自本变更起适用于其后的版本。
+- **分发布局注意**：`@tavernpi/core` 是可供同进程嵌入的库（如 tavern studio）。按 GPLv3 第 5 条，分发基于本项目的作品（例如把内核嵌进某个 GUI 外壳并分发二进制）时，整个作品须以 GPLv3 兼容条款发布并提供对应源码。相关约束已记入 `tavern-studio/创作规划.md`。
+
