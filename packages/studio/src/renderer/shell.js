@@ -173,6 +173,25 @@
 					? await transport.request("story:open", { sessionFile: listed.sessionFile, ...(storiesRoot !== undefined ? { storiesRoot } : {}) })
 					: undefined;
 
+			// ---- 阶段 2：并发守卫 + 中止（缺口 1「零落库」的唯一端到端覆盖）----
+			// 开一轮不 await，趁生成中做两件事：① 试切故事（必须被拒）；② 中止它。
+			const turnId2 = `s0-abort-${Date.now()}`;
+			currentTurnId = turnId2;
+			const pending2 = transport.request("turn:run", { turnId: turnId2, input: "我继续往里走。" });
+			const switchWhileStreaming = await transport
+				.request("story:create", storiesRoot !== undefined ? { storiesRoot } : {})
+				.then(() => "allowed（缺陷：生成中竟允许切故事，在飞 runtime 会被 dispose）")
+				.catch((e) => String(e && e.message ? e.message : e));
+			await new Promise((resolve) => setTimeout(resolve, 1200));
+			const abortRequest = await transport
+				.request("turn:abort", { turnId: turnId2 })
+				.then(() => "accepted")
+				.catch((e) => `failed: ${e && e.message ? e.message : e}`);
+			const abortOutcome = await pending2
+				.then(() => "resolved（缺陷：中止后仍按成功返回）")
+				.catch((e) => String(e && e.message ? e.message : e));
+			currentTurnId = undefined;
+
 			return {
 				ok: true,
 				storiesBefore,
@@ -189,6 +208,9 @@
 				listedSessionFile: listed !== undefined && listed.sessionFile !== undefined,
 				reopenedSessionId: reopened !== undefined ? reopened.sessionId : "",
 				reopenedMode: reopened !== undefined ? reopened.mode : "",
+				switchWhileStreaming,
+				abortRequest,
+				abortOutcome,
 				warnings,
 				elapsedMs: Date.now() - started,
 			};
@@ -229,6 +251,9 @@
 					listedSessionFile: false,
 					reopenedSessionId: "",
 					reopenedMode: "",
+					switchWhileStreaming: "",
+					abortRequest: "",
+					abortOutcome: "",
 					warnings: [],
 					elapsedMs: 0,
 				};

@@ -68,6 +68,11 @@ export interface PushMap {
 export type PushChannelName = keyof PushMap;
 export type PushPayload<C extends PushChannelName> = PushMap[C];
 
-/** 轮中交互的回应（renderer → main，兑现内核 broker 的 pending Promise）。 */
+/**
+ * 轮中交互的回应（renderer → main，兑现内核 broker 的 pending Promise）。
+ * **尚未并入 ChannelMap**：并进去就必须有一个真 handler（否则 createIpcHost 启动即失败），
+ * 而 studio 目前刻意不挂 broker handler——没挂时卡包工具会按内核既有语义降级（不崩、不挂死）。
+ * S1 接通轮中交互时把它作为 channel 加进 ChannelMap 并配 handler。
+ */
 export const INTERACTION_RESPOND = "interaction:respond" as const;
 export type InteractionRespondRequest = { requestId: string; payload: unknown };

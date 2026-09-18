@@ -49,8 +49,10 @@ function createWindow(preloadPath: string, show: boolean): BrowserWindow {
 	});
 }
 
+/** 验收模式参数（模块级：异常兜底也要知道该不该给出结构化失败并退出）。 */
+const s0 = parseS0Args(process.argv);
+
 async function main(): Promise<void> {
-	const s0 = parseS0Args(process.argv);
 	await app.whenReady();
 
 	// session 要一个推送出口，host 要一组 handler —— 两者互相需要，用「晚绑定」的引用来打破环：
@@ -61,6 +63,13 @@ async function main(): Promise<void> {
 		{ cwd: app.getPath("userData") },
 	);
 	host = createIpcHost(electronIpc(), buildHostHandlers(session));
+
+	// 先注册退出钩子再开窗：反过来的话，窗口在 loadFile 期间被关掉就会漏掉事件，
+	// 结果是一个没有窗口却活着的进程（只能靠杀）。
+	app.on("window-all-closed", () => {
+		session.dispose();
+		app.quit();
+	});
 
 	const win = createWindow(join(import.meta.dirname, "../preload.cjs"), s0 === undefined);
 	await win.loadFile(join(import.meta.dirname, "../renderer/index.html"), {
@@ -73,11 +82,16 @@ async function main(): Promise<void> {
 		app.exit(code);
 		return;
 	}
-
-	app.on("window-all-closed", () => {
-		session.dispose();
-		app.quit();
-	});
 }
 
-void main();
+// 顶层必须自己接住异常：验收模式下若只打日志，隐藏窗口会常驻、进程永不退出——
+// 调用方（人或 CI）只能一直等。故验收一律给出结构化失败并以非零码退出。
+void main().catch((err: unknown) => {
+	const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
+	if (s0 !== undefined) {
+		console.log(`S0_SHELL_RESULT ${JSON.stringify({ ok: false, error: message }, null, 2)}`);
+		app.exit(1);
+		return;
+	}
+	console.error(`STUDIO_MAIN_ERROR ${message}`);
+});

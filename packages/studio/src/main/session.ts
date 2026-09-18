@@ -10,12 +10,12 @@
 // 现在过早引入多实例只会让「哪个 case 指向哪个 runtime」变成 bug 来源。
 
 import {
-	TurnAbortedError,
 	defaultGlobalPromptsDir,
 	forkFrom,
 	listStories,
 	loadSettings,
 	openStory,
+	rebuildRuntime,
 	resolvePromptChain,
 	saveSettings,
 	type OpenedStory,
@@ -87,6 +87,7 @@ export class StudioSession {
 	}
 
 	async create(req: StoryCreateRequest): Promise<StoryOpenResult> {
+		this.assertIdle("切换故事");
 		return this.adopt(
 			await openStory({
 				cwd: this.options.cwd,
@@ -101,6 +102,7 @@ export class StudioSession {
 	}
 
 	async open(req: { storiesRoot?: string; sessionFile: string }): Promise<StoryOpenResult> {
+		this.assertIdle("切换故事");
 		return this.adopt(
 			await openStory({
 				cwd: this.options.cwd,
@@ -132,9 +134,10 @@ export class StudioSession {
 			this.sink.push("turn:done", { turnId: req.turnId, narrativeText: result.narrativeText, ok: true });
 			return result;
 		} catch (err) {
-			if (err instanceof TurnAbortedError) {
-				this.sink.push("turn:done", { turnId: req.turnId, narrativeText: "", ok: false });
-			}
+			// **任何失败都要收尾推送**：UI 靠 turn:done 结束「生成中」态，漏推会一直转圈。
+			// 失败原因本身经请求的 rejection 回给调用方（那是契约里的错误通道），不再另推 warning——
+			// 否则一次失败会被 UI 记两遍。
+			this.sink.push("turn:done", { turnId: req.turnId, narrativeText: "", ok: false });
 			throw err;
 		} finally {
 			this.inflight.delete(req.turnId);
@@ -153,6 +156,7 @@ export class StudioSession {
 
 	async swipe(req: { turnId: string }): Promise<TurnResult> {
 		const opened = this.requireOpen();
+		this.assertIdle("重骰");
 		if (this.inflight.has(req.turnId)) {
 			throw new Error(`该轮次已在生成中: ${req.turnId}`);
 		}
@@ -163,6 +167,9 @@ export class StudioSession {
 			const result = await opened.runtime.swipe({ signal: controller.signal });
 			this.sink.push("turn:done", { turnId: req.turnId, narrativeText: result.narrativeText, ok: true });
 			return result;
+		} catch (err) {
+			this.sink.push("turn:done", { turnId: req.turnId, narrativeText: "", ok: false });
+			throw err;
 		} finally {
 			this.inflight.delete(req.turnId);
 			if (this.currentTurnId === req.turnId) this.currentTurnId = undefined;
@@ -175,6 +182,7 @@ export class StudioSession {
 	 */
 	async navigate(req: { entryId: string }): Promise<{ clock: string; eventCount: number }> {
 		const opened = this.requireOpen();
+		this.assertIdle("回溯");
 		await opened.runtime.session.navigateTree(req.entryId);
 		this.sink.push("story:changed", { sessionId: opened.sessionManager.getSessionId() });
 		return {
@@ -186,6 +194,7 @@ export class StudioSession {
 	/** 从指定条目分叉。内核 forkFrom 会换掉 storyState 与 eventLog，故重挂推送订阅。 */
 	async fork(req: { entryId: string }): Promise<{ sessionId: string }> {
 		const opened = this.requireOpen();
+		this.assertIdle("分叉");
 		const info = await forkFrom(opened, req.entryId);
 		this.detach();
 		this.attach();
@@ -202,9 +211,22 @@ export class StudioSession {
 		return { settings, warnings };
 	}
 
-	/** 写模型配置（内核 saveSettings 自己校验；校验不过或文件读不懂时抛错，绝不半路覆盖）。 */
-	writeSettings(settings: unknown): void {
+	/**
+	 * 写模型配置，并**立即重建 runtime** 让新配置生效。
+	 * 不重建的话：盘上写了、UI 显示「已保存」，而运行中的 runtime 还持着旧配置——改了不生效且无人提示，
+	 * 正是「静默无效」。生成中一律拒绝：重建会 dispose 掉正在跑轮的 runtime。
+	 */
+	async writeSettings(settings: unknown): Promise<void> {
+		const opened = this.assertIdle("写模型配置");
 		saveSettings(settings as TavernSettings, this.options.settingsPath);
+		if (opened === undefined) {
+			return; // 还没打开故事：只落盘，下次 openStory 自然读到
+		}
+		// 重建用的是装配态里的 settings，故先把它刷新成刚落盘的那份。
+		const { settings: reloaded, warnings } = loadSettings(this.options.settingsPath);
+		opened.settings = reloaded;
+		opened.settingsWarnings = warnings;
+		await rebuildRuntime(opened);
 	}
 
 	/** 提示词覆盖链（「当前生效层」展示用）。 */
@@ -277,6 +299,22 @@ export class StudioSession {
 			throw new Error("尚未打开故事（先 story:create 或 story:open）");
 		}
 		return this.opened;
+	}
+
+	/**
+	 * 需要「空闲」的操作（切故事 / 重建 / 回溯 / 重骰 / 分叉 / 写配置）统一走这里。
+	 * 缺了这道闸门会怎样：生成中切故事 → 把正在跑轮的 runtime dispose 掉；生成中回溯 → 动正在写的会话树。
+	 * 两种都是内核明确禁止的（CLI 侧本来就有 isStreaming 守卫，studio 不能少）。
+	 */
+	private assertIdle(action: string): OpenedStory | undefined {
+		if (this.inflight.size > 0) {
+			throw new Error(`${action}被拒：有 ${this.inflight.size} 轮正在生成，请先中止（turn:abort）再操作`);
+		}
+		const opened = this.opened;
+		if (opened !== undefined && opened.runtime.session.isStreaming) {
+			throw new Error(`${action}被拒：主叙事仍在流式中，请稍候再试`);
+		}
+		return opened;
 	}
 
 	private promptDirs(): PromptLayerDirs {

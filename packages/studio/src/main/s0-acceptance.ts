@@ -47,6 +47,10 @@ interface RendererReport {
 	listedSessionFile: boolean;
 	reopenedSessionId: string;
 	reopenedMode: string;
+	/** 阶段 2：生成中切故事的尝试结果（正常应是被拒的错误消息）。 */
+	switchWhileStreaming: string;
+	abortRequest: string;
+	abortOutcome: string;
 	warnings: string[];
 	elapsedMs: number;
 }
@@ -67,13 +71,20 @@ async function awaitRendererReport(win: BrowserWindow, timeoutMs: number): Promi
 	}
 }
 
-/** 独立读盘：不复用内核读取路径。 */
+/** 独立读盘：不复用内核读取路径。读不到不崩——记为一条失败判据。 */
 function readDbEvidence(storyDir: string): {
 	turns: Array<{ turnSeq: number; userInput: string; narrativeText: string }>;
 	events: number;
 	snapshotBytes: number;
+	error?: string;
 } {
-	const db = new DatabaseSync(join(storyDir, "story.db"));
+	const snapshotBytes = safeSize(join(storyDir, "snapshots.db"));
+	let db: DatabaseSync;
+	try {
+		db = new DatabaseSync(join(storyDir, "story.db"));
+	} catch (err) {
+		return { turns: [], events: 0, snapshotBytes, error: (err as Error).message };
+	}
 	try {
 		const rows = db
 			.prepare("SELECT turn_seq, user_input, narrative_text FROM turn_log ORDER BY turn_seq")
@@ -82,8 +93,10 @@ function readDbEvidence(storyDir: string): {
 		return {
 			turns: rows.map((r) => ({ turnSeq: r.turn_seq, userInput: r.user_input, narrativeText: r.narrative_text })),
 			events: events.c,
-			snapshotBytes: safeSize(join(storyDir, "snapshots.db")),
+			snapshotBytes,
 		};
+	} catch (err) {
+		return { turns: [], events: 0, snapshotBytes, error: (err as Error).message };
 	} finally {
 		db.close();
 	}
@@ -116,6 +129,11 @@ export async function runS0Acceptance(ctx: {
 
 	const storyDir = join(ctx.storiesRoot, report.sessionId);
 	const db = readDbEvidence(storyDir);
+	checks.push({
+		name: "盘上 story.db 可读（独立读取无错误）",
+		ok: db.error === undefined,
+		...(db.error !== undefined ? { detail: db.error } : {}),
+	});
 	checks.push({ name: "turn_log 含本轮行", ok: db.turns.some((t) => t.turnSeq === report.turnSeq) });
 	const row = db.turns.find((t) => t.turnSeq === report.turnSeq);
 	checks.push({
@@ -132,6 +150,25 @@ export async function runS0Acceptance(ctx: {
 		detail: report.reopenedSessionId === "" ? "未打开" : `${report.reopenedSessionId} · ${report.reopenedMode}`,
 	});
 
+	// ---- 阶段 2：并发守卫 + 中止 ----
+	// 判据必须精确到守卫自己的措辞：原先写 `/被拒|生成中/`，而「放行」分支的文案里也含「生成中」——
+	// 守卫被删掉时这条照样会绿（假阳性）。改成匹配守卫的消息本体，并额外排除「放行」字样。
+	checks.push({
+		name: "生成中切故事被拒（不会 dispose 在飞 runtime）",
+		ok: report.switchWhileStreaming.includes("切换故事被拒") && !report.switchWhileStreaming.startsWith("allowed"),
+		detail: report.switchWhileStreaming.slice(0, 120),
+	});
+	checks.push({
+		name: "turn:abort 被接受且本轮以中止收场",
+		ok: report.abortRequest === "accepted" && /已中止/.test(report.abortOutcome),
+		detail: `${report.abortRequest} · ${report.abortOutcome.slice(0, 120)}`,
+	});
+	checks.push({
+		name: "中止后盘上零新增（缺口 1 的「零落库」承诺，端到端）",
+		ok: db.turns.length === 1 && db.turns[0]?.turnSeq === report.turnSeq,
+		detail: `turn_log ${db.turns.length} 行（应为 1）`,
+	});
+
 	const ok = checks.every((c) => c.ok);
 	console.log(
 		`S0_SHELL_RESULT ${JSON.stringify(
@@ -146,6 +183,8 @@ export async function runS0Acceptance(ctx: {
 					deltas: report.deltas,
 					pipelineRoles: report.pipelineRoles,
 					reopenedSessionId: report.reopenedSessionId,
+					switchWhileStreaming: report.switchWhileStreaming.slice(0, 80),
+					abortOutcome: report.abortOutcome.slice(0, 80),
 					elapsedMs: report.elapsedMs,
 				},
 				db: { turns: db.turns.length, events: db.events, snapshotBytes: db.snapshotBytes },

@@ -48,19 +48,36 @@ npm test && npm run typecheck                    # 全仓判据
 2. 本机默认导出 `ELECTRON_RUN_AS_NODE=1`，Electron 会退化成纯 Node——窗口起不来、`--version`
    打印 Node 版本、`import { app } from "electron"` 不可用。npm scripts 里已带 `env -u`。
 
-## S0 收尾验收证据（2026-09-18，真跑）
+## S0 收尾验收证据（2026-09-18，真跑；14 项判据全绿）
 
 ```
 ok: true
-renderer: sessionId 01a0b4ed… · creation · turnSeq 1 · 510 字
-          流式增量 337 片 · turn:done 1 次 · pipeline: story_scene,data,narrator · 17.8s
-db:       turn_log 1 行 · events 1 条 · snapshots.db 4096B
-逐项：渲染流程完成 ✓ / 流式到达 ✓ / turn:done 到达 ✓ / pipeline 事件到达 ✓ /
-      turn_log 含本轮 ✓ / **盘上终稿与渲染终稿逐字符一致（510/510）** ✓ / 本轮落快照 ✓ / data 落库 ✓
+renderer: sessionId 01a0b4ef… · creation · turnSeq 1 · 443 字
+          流式 312 片 · turn:done 2 次 · pipeline: story_scene,data,narrator · 15.7s
+          story:open 续写 → 同一 sessionId · 生成中切故事 → 被拒 · 中止 → TurnAbortedError
+db:       turn_log 1 行 · events 1 · snapshots.db 4096B
 ```
 
-判据是**盘上 `story.db`**（主进程用 raw SQLite 直读，不复用内核读取路径——免得用被验对象证明自己），
-不是「界面上出现了什么字」。
+判据分三组：
+
+1. **链路**：渲染流程完成 / 流式增量到达 / turn:done 到达（终稿覆写路径）/ pipeline 事件到达。
+2. **盘上事实**（主进程用 raw SQLite 直读，不复用内核读取路径——免得用被验对象证明自己）：
+   story.db 可读 / turn_log 含本轮 / **盘上终稿与渲染终稿逐字符一致** / 本轮落快照 / data 落库 /
+   story:list 给出会话文件路径 / story:open 续写打通。
+3. **并发与中止**（缺口 1 的端到端覆盖）：生成中切故事被拒 / turn:abort 被接受且本轮以中止收场 /
+   **中止后盘上零新增（turn_log 仍 1 行）**。
+
+第 3 组做过变异检验：把 `StudioSession.create` 的并发守卫删掉后，那条判据立刻变红，
+并且中止本身崩成 `database is not open`——正是守卫要防的「生成中换故事会把在飞 runtime 连库一起
+dispose」。还原后复绿。
+
+## 已知边界
+
+- **验收期间会看到两行 `Error occurred in handler for '…'`**：那是 Electron 对 ipcMain.handle
+  rejection 的常规日志，正是上面两条「刻意让守卫/中止失败」的探针产生的——预期之内，不是缺陷。
+- **轮中交互未接通**：studio 未挂 broker handler，卡包代码工具向 UI 发起交互时会按内核既有语义降级
+  （不崩、不挂死，但交互不可用）。S1 接 `interaction:respond`。
+- **阅读流尚未从 turn_log 取**：S0 壳只把终稿画在气泡里；S1 才按「DB 是事实源」做分页阅读流。
 
 ## 三条纪律
 
