@@ -9,12 +9,42 @@ import { DatabaseSync } from "node:sqlite";
 import type { ExtensionContext, SessionBeforeTreeEvent, SessionTreeEvent } from "@earendil-works/pi-coding-agent";
 import { openStoryDb, StoryDb, type StoryDb as StoryDbHandle } from "../src/db/story-db.ts";
 import { DEFAULT_STORY_CLOCK } from "../src/db/types.ts";
+import { migrate, type Migration } from "../src/db/migrate.ts";
+import { loadPacks } from "../src/pack/loader.ts";
+import { packMigrations } from "../src/pack/seed.ts";
 import { openSnapshotsDb, snapshotsDbPath, takeSnapshot } from "../src/snapshot/snapshots-db.ts";
 import { cleanupTempFiles, removeWalFiles, resetToEmptyStoryDb, restoreSnapshot } from "../src/snapshot/restore.ts";
 import { buildAncestorChain } from "../src/snapshot/ancestors.ts";
 import { createSnapshotHooks } from "../src/snapshot/hooks.ts";
 import { forkStoryDb } from "../src/snapshot/fork.ts";
+import { characterEntry, createPack } from "./fixtures/pack-fixtures.ts";
 import { cleanupTempDir, makeTempDir } from "./helpers.ts";
+
+/** 一个最小世界包：`<包名>_*` 自定义表 + seed.sql + character 条目（→ npcs seed）。 */
+function packWithSchemaAndSeed(root: string): Migration[] {
+	const packDir = createPack(root, {
+		name: "my_world",
+		schemaSql: "CREATE TABLE my_world_flags (id INTEGER PRIMARY KEY, label TEXT NOT NULL);\n",
+		seedSql: "INSERT INTO my_world_flags (id, label) VALUES (1, 'seeded');\n",
+		entries: [{ type: "characters", id: "a-qing", yaml: characterEntry("阿青") }],
+	});
+	return packMigrations(loadPacks([packDir]));
+}
+
+/** 库内表名清单（断言包内表是否重建）。 */
+function tableNames(story: StoryDbHandle): string[] {
+	return (story.rawDb.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
+		(r) => r.name,
+	);
+}
+
+/** my_world_flags 的 seed 行（断言 seed.sql 是否重建）。 */
+function seedFlagLabel(story: StoryDbHandle): string | undefined {
+	const row = story.rawDb.prepare("SELECT label FROM my_world_flags WHERE id = 1").get() as
+		| { label: string }
+		| undefined;
+	return row?.label;
+}
 
 // ---------------------------------------------------------------------------
 // 祖先链
@@ -150,6 +180,56 @@ test("resetToEmptyStoryDb：恢复到干净初始库（migrate 后 + 默认 cloc
 		// 默认 clock（DEFAULT_STORY_CLOCK 初值）
 		assert.deepEqual({ ...reset.reader.getClock() }, DEFAULT_STORY_CLOCK);
 		reset.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("resetToEmptyStoryDb：重放卡包迁移——空库兜底不丢包内表与 seed 行", () => {
+	const dir = makeTempDir();
+	try {
+		const migrations = packWithSchemaAndSeed(dir);
+		const story = openStoryDb(join(dir, "story.db"));
+		migrate(story.rawDb, migrations); // createStory 的包迁移形态（逐包 migrate(rawDb, [m])）
+		assert.equal(story.reader.listNpcs().length, 1, "包 character 条目已 seed 进 npcs");
+		story.writer.insertEvent({ turnSeq: 1, summary: "s1" });
+
+		const reset = resetToEmptyStoryDb(story, migrations);
+
+		// 空库兜底语义不变：事实与默认时钟回到初始态
+		assert.equal(reset.reader.listEvents().length, 0);
+		assert.equal(reset.reader.listWorldState().length, 0);
+		assert.deepEqual({ ...reset.reader.getClock() }, DEFAULT_STORY_CLOCK);
+		// 包内表 / seed.sql / 条目 seed 必须重建（删库时 schema_migrations 一并消失，不重放即永久丢失）
+		assert.ok(tableNames(reset).includes("my_world_flags"), `包内表应重建，实得: ${tableNames(reset).join(", ")}`);
+		assert.equal(seedFlagLabel(reset), "seeded", "seed.sql 行应重建");
+		assert.equal(reset.reader.listNpcs().length, 1, "条目 seed（characters → npcs）应重建");
+		reset.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("forkStoryDb：空链（从故事开头 fork）重放卡包迁移——包内表与 seed 不丢", () => {
+	const dir = makeTempDir();
+	try {
+		const migrations = packWithSchemaAndSeed(dir);
+		const story = openStoryDb(join(dir, "story.db"));
+		migrate(story.rawDb, migrations);
+		story.writer.insertEvent({ turnSeq: 1, summary: "s1" });
+		const snap = openSnapshotsDb(snapshotsDbPath(story.path)); // 空 snapshots.db → 无链上快照
+
+		const fork = forkStoryDb(snap, [], join(dir, "fork"), migrations);
+
+		assert.equal(fork.storyDb.reader.listEvents().length, 0, "空链 fork = 故事初始态");
+		assert.ok(tableNames(fork.storyDb).includes("my_world_flags"), "fork 产物应有包内表");
+		assert.equal(seedFlagLabel(fork.storyDb), "seeded", "fork 产物应有 seed 行");
+		assert.equal(fork.storyDb.reader.listNpcs().length, 1, "fork 产物应有条目 seed");
+
+		snap.close();
+		story.close();
+		fork.storyDb.close();
+		fork.snapshotsDb.close();
 	} finally {
 		cleanupTempDir(dir);
 	}
@@ -382,6 +462,81 @@ test("hooks：data 全 failed（M2 合法态，失败轮无快照）→ 空库�
 
 		assert.equal(hooks.state.lastRestoreResult?.ok, true, "全 failed → 空库兜底放行");
 		assert.equal(current.reader.listEvents().length, 0, "空库兜底 = 故事初始态");
+		snap.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("hooks：空库兜底经 getExtraMigrations 重放卡包迁移（包表与 seed 随兜底重建）", () => {
+	const dir = makeTempDir();
+	try {
+		const migrations = packWithSchemaAndSeed(dir);
+		const story = openStoryDb(join(dir, "story.db"));
+		migrate(story.rawDb, migrations);
+		story.writer.insertEvent({ turnSeq: 1, summary: "s1" });
+		story.writer.recordTurnLog({ turnSeq: 1, sessionEntryId: "e1", userInput: "u", narrativeText: "n" });
+		// 只有 failed 轮（M2 合法态：失败轮不拍快照）→ 命中空库兜底放行
+		story.writer.recordDataStatus({ turnSeq: 1, status: "failed", attempts: 3, error: "校验失败" });
+		const snap = openSnapshotsDb(snapshotsDbPath(story.path)); // 空 snapshots.db
+
+		let current: StoryDbHandle = story;
+		const hooks = createSnapshotHooks({
+			snapshotsDb: snap,
+			getStoryDb: () => current,
+			setStoryDb: (db) => {
+				current = db;
+			},
+			getEntryAncestors: () => [],
+			getExtraMigrations: () => migrations,
+		});
+
+		hooks.sessionBeforeTree(bt("e1"), fakeCtx);
+		hooks.sessionTree(tt("e1"), fakeCtx);
+
+		assert.equal(hooks.state.lastRestoreResult?.ok, true, "全 failed → 空库兜底放行");
+		assert.equal(current.reader.listEvents().length, 0, "空库兜底 = 故事初始态");
+		assert.ok(tableNames(current).includes("my_world_flags"), "兜底后包内表必须重建（否则世界结构静默丢失）");
+		assert.equal(seedFlagLabel(current), "seeded", "兜底后 seed.sql 行必须重建");
+		assert.equal(current.reader.listNpcs().length, 1, "兜底后条目 seed 必须重建");
+		current.close();
+		snap.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("hooks：getExtraMigrations 抛错（取包失败）→ 判恢复失败，旧库分毫未动且句柄留用", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openStoryDb(join(dir, "story.db"));
+		story.writer.insertEvent({ turnSeq: 1, summary: "s1" });
+		story.writer.recordTurnLog({ turnSeq: 1, sessionEntryId: "e1", userInput: "u", narrativeText: "n" });
+		story.writer.recordDataStatus({ turnSeq: 1, status: "failed", attempts: 3, error: "校验失败" });
+		const snap = openSnapshotsDb(snapshotsDbPath(story.path));
+
+		let current: StoryDbHandle = story;
+		const hooks = createSnapshotHooks({
+			snapshotsDb: snap,
+			getStoryDb: () => current,
+			setStoryDb: (db) => {
+				current = db;
+			},
+			getEntryAncestors: () => [],
+			getExtraMigrations: () => {
+				throw new Error("卡包重载校验失败");
+			},
+		});
+
+		hooks.sessionBeforeTree(bt("e1"), fakeCtx);
+		hooks.sessionTree(tt("e1"), fakeCtx);
+
+		// 取迁移先于删库：失败即中止，库未被删、未被替换，也没多开连接（句柄仍可用 → 留用）
+		assert.equal(hooks.state.lastRestoreResult?.ok, false);
+		assert.ok(hooks.state.lastRestoreResult?.error?.includes("卡包重载校验失败"));
+		assert.equal(current, story, "句柄仍可用时不重开");
+		assert.equal(current.reader.listEvents().length, 1, "旧库事实未动");
+		current.close();
 		snap.close();
 	} finally {
 		cleanupTempDir(dir);

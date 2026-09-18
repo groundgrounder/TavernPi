@@ -12,6 +12,7 @@
 
 import { existsSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { migrate, type Migration } from "../db/migrate.ts";
 import { openStoryDb, type StoryDb } from "../db/story-db.ts";
 
 /**
@@ -73,16 +74,44 @@ export function restoreSnapshot(storyDb: StoryDb, dump: Uint8Array): StoryDb {
 }
 
 /**
+ * 以「故事初始态」新建 story.db：core 迁移（openStoryDb 内）**+ 卡包命名迁移重放**
+ * （`<包名>_schema` / `<包名>_seed`，与 createStory 的迁移形态一致，幂等有序）。
+ *
+ * 为什么必须重放卡包迁移：本函数产出的是全新库文件，`schema_migrations` 随旧库一起消失，
+ * 只跑 core 迁移会让包内 `<包名>_*` 表与 seed 行永久缺失——静默丢掉整个世界的结构。
+ * （openStoryDb 已跑并记录 core 迁移，migrate 对已应用项幂等跳过，这里只补卡包那批。）
+ *
+ * 失败语义：迁移抛错时关闭半开连接并向上抛（不给调用方半成品句柄）。
+ * 取包失败由调用方处理——宁可响亮报错，不可静默降级成「只有内核表的故事」。
+ */
+export function openInitialStoryDb(dbPath: string, extraMigrations: Migration[] = []): StoryDb {
+	const fresh = openStoryDb(dbPath);
+	if (extraMigrations.length > 0) {
+		try {
+			migrate(fresh.rawDb, extraMigrations);
+		} catch (error) {
+			fresh.close();
+			throw error;
+		}
+	}
+	return fresh;
+}
+
+/**
  * 空库初始状态兜底（祖先链无快照 / 导航到根级 user 消息 newLeafId=null 时，
  * 且故事尚无历史——turn_log 为空。有历史的无快照属外部损伤，见 hooks.ts 的拒绝逻辑）。
- * 语义 = 新迁移的干净库 + 默认 clock（与 fork 空链初始状态一致）。
+ * 语义 = 新迁移的干净库 + 默认 clock + 卡包表（与 fork 空链初始状态一致）。
+ *
+ * extraMigrations：卡包命名迁移（编排层从卡包缓存现取）。**空库兜底必须传**——本函数第一步
+ * 就是删 story.db，不重放则包内表与 seed 行永久丢失。调用方须在调用**之前**取好迁移，
+ * 这样取包失败时旧库还没被删。
  */
-export function resetToEmptyStoryDb(storyDb: StoryDb): StoryDb {
+export function resetToEmptyStoryDb(storyDb: StoryDb, extraMigrations: Migration[] = []): StoryDb {
 	const dbPath = storyDb.path;
 	storyDb.close();
 	removeWalFiles(dbPath);
 	if (existsSync(dbPath)) {
 		rmSync(dbPath, { force: true });
 	}
-	return openStoryDb(dbPath);
+	return openInitialStoryDb(dbPath, extraMigrations);
 }

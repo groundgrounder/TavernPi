@@ -6,8 +6,13 @@
 //   session_tree（handler 异常会被 pi 吞掉）：执行原子恢复；失败**不能依赖异常传播**，
 //     结果显式写入 state.lastRestoreResult，失败时重开旧库回容器（防死句柄楔死），
 //     并保持失败标志置位供上层 UI 警示。
+//
+// 空库兜底（pending.kind === "empty"）会删库重建，故必须重放卡包迁移（getExtraMigrations）——
+// 否则包内 `<包名>_*` 表与 seed 行永久缺失。迁移在删库**之前**取：取包失败即中止本次恢复，
+// 旧库分毫未动（响亮失败，不静默降级为「只有内核表的故事」）。
 
 import type { ExtensionContext, SessionBeforeTreeEvent, SessionTreeEvent } from "@earendil-works/pi-coding-agent";
+import type { Migration } from "../db/migrate.ts";
 import { openStoryDb, type StoryDb } from "../db/story-db.ts";
 import { resetToEmptyStoryDb, restoreSnapshot } from "./restore.ts";
 import type { SnapshotsDb } from "./snapshots-db.ts";
@@ -46,6 +51,14 @@ export interface SnapshotHooksOptions {
 	onWarning?: (message: string) => void;
 	/** 恢复执行器（默认 restoreSnapshot / resetToEmptyStoryDb）。测试与编排可注入。 */
 	restoreImpl?: (storyDb: StoryDb, pending: PendingRestore) => StoryDb;
+	/**
+	 * 空库兜底时要重放的额外迁移（卡包 `<包名>_schema` / `<包名>_seed`）。
+	 * 空库兜底删掉 story.db，`schema_migrations` 随之消失——不传则包内表与 seed 行永久缺失
+	 * （编排层 runtime 从卡包缓存现取；不接卡包的库消费者须自担此缺口）。
+	 * 用 getter 而非数组：恢复发生在导航时刻，包可能已被热更新/修复。
+	 * 抛错 = 本次恢复判失败，**旧库未被触碰**（取值先于删库）。
+	 */
+	getExtraMigrations?: () => Migration[];
 }
 
 export interface SnapshotHooks {
@@ -56,7 +69,8 @@ export interface SnapshotHooks {
 
 export function createSnapshotHooks(options: SnapshotHooksOptions): SnapshotHooks {
 	const state: SnapshotHookState = { lastRestoreResult: undefined, warnings: [] };
-	const restoreImpl = options.restoreImpl ?? defaultRestoreImpl;
+	const restoreImpl: (storyDb: StoryDb, pending: PendingRestore) => StoryDb =
+		options.restoreImpl ?? ((storyDb, pending) => defaultRestoreImpl(storyDb, pending, options));
 	let pending: PendingRestore | undefined;
 
 	function pushWarning(message: string): void {
@@ -146,13 +160,17 @@ export function createSnapshotHooks(options: SnapshotHooksOptions): SnapshotHook
 			// lastRestoreResult 供上层 UI 警示；rename 前旧库文件未被触碰。
 			const message = error instanceof Error ? error.message : String(error);
 			state.lastRestoreResult = { ok: false, error: message };
-			// 死句柄回退（M1 条件项）：restoreSnapshot 消费（关闭）了传入句柄——失败后必须
-			// 用 openStoryDb 重开旧库并回容器，否则 reader/writer 再调即抛 database is not open，
-			// 系统楔死。重开若也失败，错误并入 lastRestoreResult。
+			// 死句柄回退（M1 条件项）：restoreSnapshot / resetToEmptyStoryDb 消费（关闭）了传入句柄
+			// ——失败后必须用 openStoryDb 重开旧库并回容器，否则 reader/writer 再调即抛
+			// database is not open，系统楔死。重开若也失败，错误并入 lastRestoreResult。
+			// 但「失败」未必意味着句柄已死：getExtraMigrations 取包失败发生在删库之前，句柄仍可用
+			// （见 defaultRestoreImpl）——此时据实留用，不另开一条连接。
 			try {
 				const current = options.getStoryDb();
-				const revived = openStoryDb(current.path);
-				options.setStoryDb(revived);
+				if (!isStoryDbOpen(current)) {
+					const revived = openStoryDb(current.path);
+					options.setStoryDb(revived);
+				}
 			} catch (reviveError) {
 				const reviveMessage = reviveError instanceof Error ? reviveError.message : String(reviveError);
 				state.lastRestoreResult = { ok: false, error: `${message}；且重开旧库失败: ${reviveMessage}` };
@@ -163,9 +181,23 @@ export function createSnapshotHooks(options: SnapshotHooksOptions): SnapshotHook
 	return { state, sessionBeforeTree, sessionTree };
 }
 
-function defaultRestoreImpl(storyDb: StoryDb, pending: PendingRestore): StoryDb {
+/** 句柄是否仍可用（轻探一条语句）。恢复执行器有「消费传入句柄」的契约，但前置步骤失败时
+ *  （如 getExtraMigrations 取包失败）句柄分毫未动——据此避免多开一条无用连接。 */
+function isStoryDbOpen(storyDb: StoryDb): boolean {
+	try {
+		storyDb.rawDb.prepare("SELECT 1").get();
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function defaultRestoreImpl(storyDb: StoryDb, pending: PendingRestore, options: SnapshotHooksOptions): StoryDb {
 	if (pending.kind === "snapshot") {
 		return restoreSnapshot(storyDb, pending.dump);
 	}
-	return resetToEmptyStoryDb(storyDb);
+	// 顺序要紧：先取卡包迁移（可能抛）再进 resetToEmptyStoryDb（第一步就删库）。
+	// 反过来的话，取包失败时库已被删——「响亮失败」就成了「响亮地丢数据」。
+	const extraMigrations = options.getExtraMigrations?.() ?? [];
+	return resetToEmptyStoryDb(storyDb, extraMigrations);
 }
