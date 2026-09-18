@@ -1,0 +1,11 @@
+{
+  "name": "@tavernpi/studio",
+  "version": "0.0.0",
+  "license": "GPL-3.0-or-later",
+  "private": true,
+  "type": "module",
+  "description": "tavern studio：tavernpi 内核的 GUI 外壳（Electron 同进程嵌入内核，不走 RPC）。本包当前只有契约层与通道骨架。",
+  "dependencies": {
+    "@tavernpi/core": "0.0.0"
+  }
+}

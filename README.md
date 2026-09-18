@@ -62,18 +62,24 @@ node packages/tools/src/cli.ts templates           # SQL 表模板库（可抄�
 ```
 packages/
 ├── core/   # @tavernpi/core：turn pipeline 编排 + DB 层 + 快照 + subagent 体系
-│           # + 提示词分层 + 卡包加载 + 模式预设/视图过滤 + assist + 对外 API
+│           # + 提示词分层 + 卡包加载 + 模式预设/视图过滤 + assist + 会话装配（openStory/forkFrom）
+│           # + 中止桥 + 对外 API
 ├── app/    # CLI（m6:cli）+ 验收脚本（acceptance/m6.ts）+ spike 工件
-└── tools/  # @tavernpi/tools：卡包校验/骨架/模板 CLI
+├── tools/  # @tavernpi/tools：卡包校验/骨架/模板 CLI
+└── studio/ # @tavernpi/studio：GUI 外壳（Electron 同进程嵌入内核）——当前是骨架，未接 UI
+            # 契约层 + IPC 通道 + 边界判据；规划与考察见其 docs/
 ```
 
 ## 开发
 
 ```bash
-npm test              # core 单测（node --test）
-npm run typecheck     # core + app
+npm test              # core / app / studio 单测（node --test）
+npm run typecheck     # core + app + tools + studio（main / renderer 两份配置）
 npm run m6:accept     # 故事驱动验收（真实 LLM，需 auth.json）
 ```
+
+内核对外 API 的分组与收窄原则见 `packages/core/src/index.ts` 头部注释；studio 对内核的依赖契约
+（channel 面、渲染边界、装配 API）见 `packages/studio/README.md` 与其 `docs/`。
 
 里程碑交付状态与验收证据见 `packages/app/acceptance/m6.ts`（自断言脚本，需真实 LLM）。
 
@@ -89,5 +95,5 @@ Copyright (C) 2026 groundgrounder
 
 - **为何是 v3 而非 v2**：依赖树与本许可证兼容——pi SDK 全系 MIT，其余为 MIT / Apache-2.0 / BSD-3-Clause / ISC / 0BSD / BlueOak-1.0.0；其中 **Apache-2.0 与 GPLv2 不兼容**，故取 GPLv3。
 - **历史**：更早的版本曾以 MIT 发布。已发出的授权不可撤回——那些版本对已获得副本者仍永久适用 MIT；GPL 自本变更起适用于其后的版本。
-- **分发布局注意**：`@tavernpi/core` 是可供同进程嵌入的库（如 tavern studio）。按 GPLv3 第 5 条，分发基于本项目的作品（例如把内核嵌进某个 GUI 外壳并分发二进制）时，整个作品须以 GPLv3 兼容条款发布并提供对应源码。相关约束已记入 `tavern-studio/创作规划.md`。
+- **分发布局注意**：`@tavernpi/core` 是可供同进程嵌入的库（如 tavern studio）。按 GPLv3 第 5 条，分发基于本项目的作品（例如把内核嵌进某个 GUI 外壳并分发二进制）时，整个作品须以 GPLv3 兼容条款发布并提供对应源码。相关约束已记入 `packages/studio/docs/创作规划.md`。
 
