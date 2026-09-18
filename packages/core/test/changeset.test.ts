@@ -425,6 +425,12 @@ test("filterConflictingItems：npc_updates 嵌套子数组按元素剔除（父�
 		assert.ok(problems.some((p) => p.item === "npc_updates[0].relations[0]"));
 
 		const { filtered, dropped } = filterConflictingItems(cs, problems);
+		// 入参不得被动：嵌套 relations 的剔除必须落在副本上（原地 splice 会经共享引用改到入参）
+		assert.deepEqual(
+			cs.npc_updates[0]!.relations?.map((r) => r.other_npc_id),
+			[999, rodId],
+			"入参 relations 不得被剔除",
+		);
 		// 父元素保留，坏关系被剔除
 		assert.equal(filtered.npc_updates.length, 1);
 		assert.equal(filtered.npc_updates[0]!.memories?.length, 1, "好记忆保留");
@@ -439,6 +445,49 @@ test("filterConflictingItems：npc_updates 嵌套子数组按元素剔除（父�
 		const summary = applyChangeset(story, filtered, { turnSeq: 1 });
 		assert.equal(summary.npcUpdates, 1);
 		assert.equal(story.reader.getNpc(rodId).relations.length, 1);
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("filterConflictingItems：入参在任何深度都不被修改（顶层字段 / 数组元素 / 嵌套子数组）", () => {
+	const dir = makeTempDir();
+	try {
+		const story = openTempStory(dir);
+		const { rodId } = seedStory(story);
+		const cs = changesetZodSchema.parse({
+			events: [
+				{ summary: "好事件" },
+				{ summary: "坏事件（未知地点）", location_name: "不存在的地方" },
+			],
+			npc_updates: [
+				{
+					npc_id: rodId,
+					memories: [
+						{ kind: "event", content: "好记忆" },
+						{ kind: "event", content: "坏记忆（引用不存在的既有事件）", event_id: 999 },
+					],
+				},
+			],
+			time_advance: { to_time: "0000-00-30", span_note: "倒流" },
+		});
+		const problems = validateChangesetSemantics(story, cs);
+		assert.equal(problems.length, 3, `三类问题各一，实得: ${problems.map((p) => p.item).join(", ")}`);
+
+		const { filtered } = filterConflictingItems(cs, problems);
+
+		// 三种剔除形态（顶层整体 / 数组元素 / 嵌套子数组）都不许回写进参
+		assert.equal(cs.time_advance?.to_time, "0000-00-30", "入参 time_advance 不得被剔除");
+		assert.equal(cs.events.length, 2, "入参 events 不得被剔除");
+		assert.deepEqual(
+			cs.npc_updates[0]!.memories?.map((m) => m.content),
+			["好记忆", "坏记忆（引用不存在的既有事件）"],
+			"入参嵌套子数组不得被剔除",
+		);
+		assert.equal(filtered.time_advance, undefined, "顶层字段剔除");
+		assert.deepEqual(filtered.events.map((e) => e.summary), ["好事件"], "坏元素剔除、好元素重排");
+		assert.deepEqual(filtered.npc_updates[0]!.memories?.map((m) => m.content), ["好记忆"], "嵌套子数组剔除");
 		story.close();
 	} finally {
 		cleanupTempDir(dir);

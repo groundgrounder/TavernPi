@@ -302,7 +302,8 @@ function parseItemPath(item: string): Array<{ field: string; index?: number }> {
  * - 顶层字段（time_advance / phase_start / phase_end）：整体剔除；
  * - 数组字段元素（events[i] 等）：按索引剔除，剩余元素重排；
  * - npc_updates[i].<memories|traits|relations>[j]：从该元素内剔除对应子项（父元素本身被剔除时子项剔除作废）。
- * 返回剔除后的变更集（浅拷贝，不修改入参）与剔除清单。
+ * 返回剔除后的变更集与剔除清单。**入参在任何深度都不被修改**：顶层数组、数组元素对象都克隆，
+ * 嵌套子数组以「过滤后的副本」替换（嵌套子数组的剔除若原地 splice，会经共享引用改到入参上）。
  */
 export function filterConflictingItems(
 	cs: Changeset,
@@ -312,14 +313,15 @@ export function filterConflictingItems(
 	const paths = new Map<string, Array<{ field: string; index?: number }>>();
 	for (const p of problems) paths.set(p.item, parseItemPath(p.item));
 
+	// 元素对象也克隆：嵌套子数组的替换落在克隆体上，入参不受影响。
 	const filtered: Changeset = {
 		...cs,
-		events: [...cs.events],
-		location_moves: [...cs.location_moves],
-		new_locations: [...cs.new_locations],
-		new_npcs: [...cs.new_npcs],
-		npc_updates: [...cs.npc_updates],
-		world_state: [...cs.world_state],
+		events: cs.events.map((e) => ({ ...e })),
+		location_moves: cs.location_moves.map((m) => ({ ...m })),
+		new_locations: cs.new_locations.map((l) => ({ ...l })),
+		new_npcs: cs.new_npcs.map((n) => ({ ...n })),
+		npc_updates: cs.npc_updates.map((u) => ({ ...u })),
+		world_state: cs.world_state.map((w) => ({ ...w })),
 	};
 
 	// 顶层字段整体剔除
@@ -356,11 +358,12 @@ export function filterConflictingItems(
 				flagging.push(p);
 			}
 		}
-		// 子项剔除按下标降序（先删高位，低位不位移）
+		// 子项剔除：父元素是上面克隆过的对象，故用「过滤后的新数组」整体替换，绝不原地 splice。
 		for (const entry of nestedDrops.values()) {
 			if (dropIndices.has(entry.parentIndex)) continue; // 父元素整体剔除 → 子项剔除作废
-			const sub = arr[entry.parentIndex]![entry.subField] as Array<unknown>;
-			for (const idx of [...entry.indices].sort((a, b) => b - a)) sub.splice(idx, 1);
+			const parent = arr[entry.parentIndex]!;
+			const sub = parent[entry.subField] as Array<unknown>;
+			parent[entry.subField] = sub.filter((_, i) => !entry.indices.has(i));
 		}
 		if (dropIndices.size > 0) {
 			filtered[field] = arr.filter((_, i) => !dropIndices.has(i)) as never;
