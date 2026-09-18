@@ -36,6 +36,7 @@ import {
 	type StoryMeta,
 	type WorldPack,
 } from "./types.ts";
+import { truncateChars, typeIdRef } from "./format.ts";
 
 // ---------------------------------------------------------------------------
 // 条目 zod strict schema（条目格式定稿）
@@ -133,12 +134,6 @@ const storyMetaSchema = z.object({
 /** zod 校验错误 → 单行可读消息（含字段路径）。 */
 function zodIssueMessage(error: z.ZodError): string {
 	return error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
-}
-
-/** 按码点截断（中文友好，计数「字」）。 */
-function truncateChars(text: string, max: number): string {
-	const chars = [...text];
-	return chars.length > max ? chars.slice(0, max).join("") : text;
 }
 
 /** 特化字段 → 注入用正文渲染（紧凑 markdown；确定性，零 LLM）。 */
@@ -598,7 +593,7 @@ function buildEntryIndex(packs: WorldPack[]): EntryIndex {
 	const index: EntryIndex = new Map();
 	for (const pack of packs) {
 		const byRef = new Map<string, CollectionEntry>();
-		for (const entry of pack.entries) byRef.set(`${entry.type}:${entry.id}`, entry);
+		for (const entry of pack.entries) byRef.set(typeIdRef(entry.type, entry.id), entry);
 		index.set(pack.name, byRef);
 	}
 	return index;
@@ -641,7 +636,7 @@ export function loadPacks(dirs: string[]): WorldPack[] {
 				const parsed = parseRef(ref);
 				if (!parsed.ok) continue; // 格式问题已在 loadPack 报
 				if (parsed.pack === "" || parsed.pack === pack.name) continue;
-				if (!index.get(parsed.pack)?.has(`${parsed.type}:${parsed.id}`)) {
+				if (!index.get(parsed.pack)?.has(typeIdRef(parsed.type, parsed.id))) {
 					issues.push({ file, message: `断链: 跨包引用 ${ref} 不存在` });
 				}
 			}

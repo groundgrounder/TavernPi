@@ -23,22 +23,29 @@ import { DbReader } from "../db/reader.ts";
 import { DbWriter } from "../db/writer.ts";
 import type { CollectionEntry, WorldPack } from "./types.ts";
 
-/** 构建卡包命名 migration 序列：每包两项 `<包名>_schema` / `<包名>_seed`（按包序）。 */
+/**
+ * 构建卡包命名 migration 序列：每包两项 `<包名>_schema` / `<包名>_seed`（按包序）。
+ *
+ * SQL 文本在 `up` **执行时**才读（不在构造时定格）——`migrate` 只对未应用的迁移调 `up`，
+ * 而 `PackCache` 在卡包损坏时会回退上次成功快照继续供包；若 SQL 在构造时就固化，
+ * 那种回退会让迁移静默变成 no-op **却仍被写进 schema_migrations**，之后永久跳过。
+ * 惰性读 + 缺失即抛：宁可本次迁移失败回滚，不可把「空 schema」记成已应用。
+ */
 export function packMigrations(packs: WorldPack[]): Migration[] {
 	const migrations: Migration[] = [];
 	for (const pack of packs) {
-		const schemaSql = readPackFile(pack.dir, "db/schema.sql");
-		const seedSql = readPackFile(pack.dir, "db/seed.sql");
 		migrations.push({
 			name: `${pack.name}_schema`,
 			up: (db) => {
-				// 可空跳过：内容为空/缺失不执行（布局校验在加载层做）
+				// schema.sql 加载期已校验存在（内容可为空）——此时读不到即包目录在加载后被破坏。
+				const schemaSql = readPackSql(pack, "db/schema.sql", true);
 				if (schemaSql.trim() !== "") db.exec(schemaSql);
 			},
 		});
 		migrations.push({
 			name: `${pack.name}_seed`,
 			up: (db) => {
+				const seedSql = readPackSql(pack, "db/seed.sql", false);
 				if (seedSql.trim() !== "") db.exec(seedSql);
 				seedPackEntries(db, pack);
 			},
@@ -47,10 +54,17 @@ export function packMigrations(packs: WorldPack[]): Migration[] {
 	return migrations;
 }
 
-/** 读包内文件；缺失返回空串（schema 可空跳过 / seed 可选）。 */
-function readPackFile(dir: string, rel: string): string {
-	const path = join(dir, rel);
-	if (!existsSync(path)) return "";
+/**
+ * 读迁移用 SQL 文本。`required`（schema.sql）读不到即抛：该文件在加载期是必填项，
+ * 执行期缺失说明包目录已被破坏，此时静默跳过会让「空 schema」被记为已应用。
+ * 非必填（seed.sql）缺失返回空串（语义 = 无 seed，正常合法）。
+ */
+function readPackSql(pack: WorldPack, rel: string, required: boolean): string {
+	const path = join(pack.dir, rel);
+	if (!existsSync(path)) {
+		if (!required) return "";
+		throw new Error(`卡包 ${pack.name} 的 ${rel} 在迁移执行时缺失（包目录已被改动）: ${path}`);
+	}
 	return readFileSync(path, "utf-8");
 }
 

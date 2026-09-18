@@ -9,6 +9,7 @@
 //   - 渲染（紧凑，给主叙事读）：`## <name>（<type>）\n<body>\n【关联】\n- <refs 摘要行>...`；
 //     position=system 进 systemText（前部基调区），recent 进 recentText。
 
+import { entryIdent, truncateChars } from "./format.ts";
 import type { CollectionEntry, WorldPack } from "./types.ts";
 
 export interface CollectionInjectionOptions {
@@ -61,7 +62,7 @@ export function buildCollectionInjection(
 	const entryByIdent = new Map<string, CollectionEntry>();
 	for (const pack of packs) {
 		for (const entry of pack.entries) {
-			entryByIdent.set(`${pack.name}:${entry.type}:${entry.id}`, entry);
+			entryByIdent.set(entryIdent(pack.name, entry.type, entry.id), entry);
 		}
 	}
 
@@ -85,7 +86,7 @@ export function buildCollectionInjection(
 	for (const pack of packs) {
 		for (const entry of pack.entries) {
 			if (!entry.alwaysOn) continue;
-			const ident = `${pack.name}:${entry.type}:${entry.id}`;
+			const ident = entryIdent(pack.name, entry.type, entry.id);
 			if (seen.has(ident)) continue;
 			seen.add(ident);
 			alwaysOn.push({ entry, ident, hits: 0 });
@@ -98,10 +99,11 @@ export function buildCollectionInjection(
 	const triggered: Candidate[] = [];
 	for (const pack of packs) {
 		for (const entry of pack.entries) {
-			if (seen.has(`${pack.name}:${entry.type}:${entry.id}`)) continue;
+			const ident = entryIdent(pack.name, entry.type, entry.id);
+			if (seen.has(ident)) continue;
 			const hits = entry.keys.filter((k) => k.length > 0 && scanText.includes(k.toLowerCase())).length;
 			if (hits > 0) {
-				triggered.push({ entry, ident: `${pack.name}:${entry.type}:${entry.id}`, hits });
+				triggered.push({ entry, ident, hits });
 			}
 		}
 	}
@@ -151,41 +153,42 @@ function resolveRefSummaryLines(entry: CollectionEntry, entryByIdent: Map<string
 	const lines: string[] = [];
 	for (const ref of entry.refs) {
 		const parts = ref.split(":");
+		// parts 长度已由分支保证（noUncheckedIndexedAccess 下须显式断言）
 		if (parts.length === 2) {
-			const target = entryByIdent.get(`${entry.pack}:${parts[0]}:${parts[1]}`);
+			const target = entryByIdent.get(entryIdent(entry.pack, parts[0]!, parts[1]!));
 			if (target !== undefined) lines.push(target.summaryLine);
 		} else if (parts.length === 3) {
-			const target = entryByIdent.get(`${parts[0]}:${parts[1]}:${parts[2]}`);
+			const target = entryByIdent.get(entryIdent(parts[0]!, parts[1]!, parts[2]!));
 			if (target !== undefined) lines.push(target.summaryLine);
 		}
 	}
 	return lines;
 }
 
+/** 条目标题行（渲染与截断共用，避免两处各拼一遍）。 */
+function entryHeader(entry: CollectionEntry): string {
+	return `## ${entry.name}（${entry.type}）`;
+}
+
+/** 【关联】段（含前导换行；无 refs 摘要行时为空串）。 */
+function refsSection(refLines: string[]): string {
+	return refLines.length > 0 ? `\n【关联】\n${refLines.map((l) => `- ${l}`).join("\n")}` : "";
+}
+
 /** 条目渲染：`## <name>（<type>）\n<body>\n【关联】\n- <refs 摘要行>...`（【关联】仅在有 refs 行时出现）。 */
 function renderEntry(entry: CollectionEntry, refLines: string[]): string {
-	const parts = [`## ${entry.name}（${entry.type}）`, entry.body];
-	if (refLines.length > 0) {
-		parts.push(`【关联】\n${refLines.map((l) => `- ${l}`).join("\n")}`);
-	}
-	return parts.join("\n");
+	return `${entryHeader(entry)}\n${entry.body}${refsSection(refLines)}`;
 }
 
 /** 按剩余预算截断正文（头部与【关联】段不裁）。放不下（剩余为 0/过小）返回 null → 整条裁减。 */
 function truncateEntry(entry: CollectionEntry, refLines: string[], remainingTokens: number): string | null {
-	const header = `## ${entry.name}（${entry.type}）\n`;
-	const refsBlock = refLines.length > 0 ? `\n【关联】\n${refLines.map((l) => `- ${l}`).join("\n")}` : "";
+	const header = `${entryHeader(entry)}\n`;
+	const refsBlock = refsSection(refLines);
 	const overheadChars = header.length + refsBlock.length;
 	const maxBodyChars = Math.max(0, remainingTokens * 2 - overheadChars);
 	if (maxBodyChars <= 0) return null;
 	const body = truncateChars(entry.body, maxBodyChars);
 	return `${header}${body}${refsBlock}`;
-}
-
-/** 按码点截断（中文友好）。 */
-function truncateChars(text: string, max: number): string {
-	const chars = [...text];
-	return chars.length > max ? chars.slice(0, max).join("") : text;
 }
 
 /** 按 position 分流进 systemText / recentText，并记入 injected。 */

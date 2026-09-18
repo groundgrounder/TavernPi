@@ -130,6 +130,13 @@ test("refs 摘要行：命中条目展开一级摘要行（被引条目未命中
 	assert.match(text, /【关联】/);
 	assert.match(text, /- 古堡：概述：巍峨的古堡/);
 	assert.match(text, /- 伙伴：身份：身份/);
+	// 形状契约：标题行 → 正文 → 单个空行后的【关联】段（段内每条一行，末尾无多余换行）。
+	// renderEntry 与 truncateEntry 共用同一套拼接，这里钉住边界以免两处再漂移。
+	assert.match(
+		text,
+		/^## 主角（character）\n[\s\S]*\n【关联】\n- 古堡：概述：巍峨的古堡\n- 伙伴：身份：身份$/,
+		`渲染形状: ${JSON.stringify(text)}`,
+	);
 });
 
 test("position 分流：system 进 systemText，recent 进 recentText；缺省 position = system", () => {

@@ -3,10 +3,10 @@
 // seed.sql 执行 / migration 幂等重跑 / 多包共存（各自前缀表 + 各自条目 seed）。
 
 import assert from "node:assert/strict";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DatabaseSync } from "node:sqlite";
-import { characterEntry, cleanupTempDir, createPack, entryYaml, locationEntry, makeTempDir } from "./fixtures/pack-fixtures.ts";
+import { characterEntry, cleanupTempDir, createPack, locationEntry, makeTempDir } from "./fixtures/pack-fixtures.ts";
 import { loadPacks } from "../src/pack/loader.ts";
 import { packMigrations } from "../src/pack/seed.ts";
 import { hasMigration, migrate } from "../src/db/migrate.ts";
@@ -209,6 +209,41 @@ test("seed：schema.sql + seed.sql 落库（包前缀表）；migration 幂等�
 	}
 });
 
+test("seed：SQL 在 up 执行时才读——构造后包被破坏 → 迁移抛错回滚，不记为已应用", () => {
+	const root = makeTempDir();
+	try {
+		const dir = createPack(root, {
+			name: "shouling",
+			entries: [{ type: "characters", id: "a", yaml: characterEntry("甲") }],
+			schemaSql: "CREATE TABLE IF NOT EXISTS shouling_relics (id INTEGER PRIMARY KEY, name TEXT);\n",
+		});
+		const packs = loadPacks([dir]);
+		const migrations = packMigrations(packs);
+		// 构造之后（加载期校验已过）破坏包目录：schema.sql 消失。
+		// 若 SQL 在构造时定格，这里会变成静默 no-op 却仍写进 schema_migrations。
+		rmSync(join(dir, "db", "schema.sql"), { force: true });
+
+		const story = openStoryDb(join(root, "story.db"));
+		try {
+			assert.throws(() => migrate(story.rawDb, migrations), /schema\.sql/);
+			assert.equal(hasMigration(story.rawDb, "shouling_schema"), false, "失败迁移不得记为已应用");
+			assert.equal(hasMigration(story.rawDb, "shouling_seed"), false, "后续迁移不越过失败项");
+			// 包表确实没建出来（回滚生效），故事仍是可用的干净内核库
+			assert.throws(() => story.rawDb.prepare("SELECT * FROM shouling_relics").all(), /no such table/);
+			assert.equal(story.reader.listNpcs().length, 0);
+			// 修好后重跑即恢复（migrate 幂等、无残留 applied 记录）
+			writeFileSync(join(dir, "db", "schema.sql"), "CREATE TABLE shouling_relics (id INTEGER PRIMARY KEY, name TEXT);\n");
+			const retry = migrate(story.rawDb, packMigrations(packs));
+			assert.deepEqual(retry, ["shouling_schema", "shouling_seed"]);
+			assert.equal(story.reader.listNpcs().length, 1);
+		} finally {
+			story.close();
+		}
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
 test("seed：多包共存——各自前缀表 + 各自条目 seed，互不干扰", () => {
 	const root = makeTempDir();
 	try {
@@ -218,7 +253,7 @@ test("seed：多包共存——各自前缀表 + 各自条目 seed，互不干�
 			schemaSql: "CREATE TABLE IF NOT EXISTS pack_a_items (id INTEGER PRIMARY KEY);\n",
 			seedSql: "INSERT INTO pack_a_items (id) VALUES (1);\n",
 		});
-		const b = createPack(root, {
+		createPack(root, {
 			name: "pack_b",
 			entries: [{ type: "characters", id: "hero", yaml: characterEntry("B主角") }],
 			schemaSql: "CREATE TABLE IF NOT EXISTS pack_b_stuff (id INTEGER PRIMARY KEY);\n",
