@@ -9,9 +9,13 @@
 //   （生存/冒险拒非 user 输入、`/!` 强制提交、创造不校验、/plot 指令）。
 //
 // 接线（app 层只消费 core API）：
-//   SessionManager ↔ StoryDb ↔ SnapshotsDb ↔ createStoryRuntime（API 面 + mode + story/npc/stylize/data）
+//   装配全部走内核 openStory（session ↔ StoryDb ↔ SnapshotsDb ↔ 卡包 ↔ 提示词层 ↔ settings ↔
+//   runtime）；改 subagent 开关走内核 rebuildRuntime，`/fork` 走内核 forkFrom。三者都**原地更新**
+//   openStory 返回的装配态（ctx.opened），故本文件不再自己拼 runtime，也不手工同步字段。
+//   app 层只保留：UI 出口、行队列、命令分派、轮中交互 handler（readline 实现）。
 // subagent 开关：story/npc 恒开、data 无开关恒开；stylize 默认关——传 --style 才开，
-//   故事模式为 adventure 时强制开（预设要求全开，关闭会被 build-time 校验拒）。
+//   故事模式为 adventure 时强制开（预设要求全开，关闭会被 build-time 校验拒）。判定在内核
+//   resolveStylizeEnabled（含卡包 defaultStyle 那条规则）。
 //
 // 呈现：本文件只管**流程**（读行、分派命令、跑轮次），排版全部外包——
 //   `ui.ts` 管主题与写出口，`cli-view.ts` 管每屏的行怎么排，`cli-text-*.ts` 管措辞。
@@ -19,46 +23,32 @@
 //
 // 坑（同 m4/m5-cli）：session.prompt 必须 await 完才能 navigateTree；退出不删故事目录。
 
-import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { Interface } from "node:readline";
-import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
 	assertValidRole,
-	buildAncestorChain,
 	clearStoryPromptOverride,
 	computeNextTurnSeq,
 	createDbView,
-	createPipelineEventLog,
-	createStory,
-	createStoryRuntime,
-	defaultGlobalPromptsDir,
-	defaultStoriesRoot,
-	forkStoryDb,
-	inheritStoryMeta,
-	loadSettings,
+	forkFrom,
 	MODE_PRESETS,
-	openSnapshotsDb,
-	openStoryDb,
-	PackCache,
-	packMigrations,
+	openStory,
+	readStoryMeta,
+	rebuildRuntime,
 	resolvePromptChain,
-	resolveStoryMode,
+	resolveStylizeEnabled,
 	setStoryPromptOverride,
-	snapshotsDbPath,
-	storyDbPath as coreStoryDbPath,
 	validateSubagentSwitches,
 	type InteractionRequest,
-	type PipelineEventLog,
+	type OpenedStory,
 	type PromptLayerDirs,
-	type StoryMetaFile,
+	type StoryAgents,
 	type StoryMode,
 	type StoryRuntime,
-	type StoryState,
-	type StylizeRuntimeOptions,
-	type TavernSettings,
 	type TurnResult,
 } from "@tavernpi/core";
 import { InputRejectedError } from "@tavernpi/core";
@@ -97,59 +87,17 @@ interface CliArgs {
 }
 
 interface CliCtx {
-	storiesRoot: string;
-	cwd: string;
-	settings: TavernSettings;
-	modelRuntime: ModelRuntime;
-	prompts: PromptLayerDirs;
 	/** 展示层：app 层唯一的 stdout 出口。 */
 	ui: Ui;
-	/** pipeline 事件流（阶段耗时与活动行阶段词都从这里来）。fork / 重建 runtime 时换新文件并重新赋值。 */
-	eventLog: PipelineEventLog;
-	/** 文风（--style：启用 stylize 阶段，并把该值作为 styleHint 注入）。 */
-	style?: string;
-	/** subagent 开关（会话级，不持久化）：story/npc 默认开；stylize 缺省 undefined = 按规则自动。 */
-	agents: { story: boolean; npc: boolean; stylize?: boolean };
-	/** 行输入队列：轮中交互 handler 要用，fork / 重建 runtime 后也靠它重新挂载。 */
+	/** 行输入队列：轮中交互 handler 要用。 */
 	queue: LineQueue;
-	/** 卡包检索注入（packDirs 为空 = undefined，无注入形态）。 */
-	packs?: { cache: PackCache; pinned: () => string[] };
-	/** 会话级手动钉列表（/pin /unpin 维护；经 getter 传入 runtime）。 */
-	pinned: string[];
-	/** 已加载包目录（/packs 展示；fork 重建复用同一列表重建 cache）。 */
-	packDirs: string[];
-}
-
-/** stylize 是否启用。/agents 的显式设置优先；否则按规则：
- *  显式 --style ／ 故事模式为 adventure（预设强制全开、不可关）／
- *  卡包在 story.yaml 里声明了 defaultStyle（作者写下它就是想让这部作品用它，
- *  否则该字段对「没传 --style」的玩家形同虚设）。 */
-function stylizeEnabled(ctx: CliCtx, storyDir: string): boolean {
-	if (ctx.agents.stylize !== undefined) return ctx.agents.stylize;
-	const meta = readStoryMeta(storyDir);
-	return (
-		resolveStoryMode(undefined, storyDir) === "adventure" ||
-		ctx.style !== undefined ||
-		meta?.defaultStyle !== undefined
-	);
-}
-
-/** subagent 开关 combo：story/npc 由 /agents 控制（创造模式下可关，缺省全开）；
- *  stylize 由 stylizeEnabled 判定。组合合法性由 runtime 构建期校验（validateSubagentSwitches）。 */
-function runtimeExtras(ctx: CliCtx, storyDir: string): {
-	npc?: { enabled: boolean };
-	story?: { enabled: boolean };
-	stylize?: StylizeRuntimeOptions;
-	packs?: { cache: PackCache; pinned: () => string[] };
-} {
-	return {
-		...(ctx.agents.npc ? { npc: { enabled: true } } : {}),
-		...(ctx.agents.story ? { story: { enabled: true } } : {}),
-		...(stylizeEnabled(ctx, storyDir)
-			? { stylize: { enabled: true, ...(ctx.style ? { styleHint: ctx.style } : {}) } }
-			: {}),
-		...(ctx.packs !== undefined ? { packs: ctx.packs } : {}),
-	};
+	/**
+	 * 内核装配态（openStory 的产物）：runtime / session / 故事库 / 事件流 / 卡包注入 / 开关 /
+	 * 文风 / 提示词层 / 模型配置全在里面。fork 与改开关走内核的 forkFrom / rebuildRuntime——
+	 * 它们**原地更新**这个对象，故此处持引用即可：app 层不再自己拼 runtime、也不再手工同步字段
+	 * （装配知识归内核，app 层只管流程与排版）。
+	 */
+	opened: OpenedStory;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,14 +210,6 @@ function activityPhase(role: string): string | undefined {
 	}
 }
 
-function readStoryMeta(storyDir: string): StoryMetaFile | undefined {
-	try {
-		return JSON.parse(readFileSync(join(storyDir, "story.meta.json"), "utf8")) as StoryMetaFile;
-	} catch {
-		return undefined;
-	}
-}
-
 /** 当前时钟的展示串（启动事实块与 /status 同一口径）。 */
 function clockText(runtime: StoryRuntime): string | undefined {
 	const clock = runtime.storyState.storyDb.reader.getClock();
@@ -298,7 +238,8 @@ async function runWithFeedback(
 	ctx: CliCtx,
 	run: () => Promise<TurnResult>,
 ): Promise<void> {
-	const { ui, eventLog } = ctx;
+	const { ui } = ctx;
+	const { eventLog } = ctx.opened;
 	const stageMs: StageTimings = {};
 	let phase: string = EN.activityThinking;
 	const setPhase = (next: string): void => {
@@ -338,72 +279,28 @@ async function runWithFeedback(
 // ---------------------------------------------------------------------------
 
 async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise<StoryRuntime> {
-	const { sessionManager, storyState } = runtime;
 	const { ui } = ctx;
-	const target = treeTargetHint(ui, sessionManager, arg);
+	const target = treeTargetHint(ui, runtime.sessionManager, arg);
 	if (target === undefined) return runtime;
-	const truncateId = target.message.role === "user" ? (target.parentId ?? target.id) : target.id;
-	const chain = buildAncestorChain(sessionManager.getEntries(), target.id);
-	const oldSessionId = sessionManager.getSessionId();
-	const oldStoryState = storyState;
 
-	const newFile = sessionManager.createBranchedSession(truncateId);
-	const newSessionId = sessionManager.getSessionId();
-	const newStoryDir = join(ctx.storiesRoot, newSessionId);
-	ui.line(ui.note(EN.branchedSession(newSessionId, newFile ?? EN.unset), "info"));
+	// 分叉本身（新 session / 新故事库 / 继承 meta / 重放卡包迁移 / 重建 runtime）全在内核
+	// forkFrom 里——这里只负责播报结果。
+	const info = await forkFrom(ctx.opened, target.id);
 
-	// 从故事开头 fork（空链/无快照）时新 story.db 由 core 迁移新建——必须一并重放卡包迁移，
-	// 否则 fork 产物的库只有内核表（包内 `<包名>_*` 表与 seed 行缺失）。取包失败沿用 cache 的
-	// 报错路径（与 /packs 一致），不另设降级；此时旧故事尚未 dispose，未受影响。
-	const forkPackMigrations = ctx.packs === undefined ? [] : packMigrations(ctx.packs.cache.getPacks().packs);
-	const forkResult = forkStoryDb(oldStoryState.snapshotsDb, chain, newStoryDir, forkPackMigrations);
-	ui.line(
-		ui.note(
-			EN.forkedStoryDb(
-				newStoryDir,
-				forkResult.storyDb.reader.listEvents().length,
-				forkResult.snapshotsDb.listSnapshots().length,
-			),
-			"info",
-		),
-	);
-
-	runtime.dispose(); // 级联释放 assist 会话与 broker 注册（不只 session）
-	oldStoryState.storyDb.close();
-	oldStoryState.snapshotsDb.close();
-
-	// fork 产物继承元数据：复制 story.meta.json——模式与锁定（adventure）随 mode 继承。
-	inheritStoryMeta(oldStoryState.storyDir, newStoryDir);
-	// fork 重建 cache（注入热更按当前磁盘包内容）。
-	if (ctx.packDirs.length > 0) ctx.packs = { cache: new PackCache(ctx.packDirs), pinned: () => ctx.pinned };
-
-	const newStoryState = {
-		storyDir: newStoryDir,
-		storyDb: forkResult.storyDb,
-		snapshotsDb: forkResult.snapshotsDb,
-	};
-	ctx.eventLog = createPipelineEventLog(join(newStoryDir, "pipeline-events.jsonl"), (m) => ui.warn(m));
-	const newRuntime = await createStoryRuntime({
-		cwd: ctx.cwd,
-		sessionManager,
-		storyState: newStoryState,
-		settings: ctx.settings,
-		modelRuntime: ctx.modelRuntime,
-		prompts: ctx.prompts,
-		eventLog: ctx.eventLog,
-		onWarning: (m) => ui.warn(m),
-		...runtimeExtras(ctx, newStoryDir),
-	});
-	attachInteraction(newRuntime, ctx);
-	ui.line(ui.note(EN.storySwitched(oldSessionId, newSessionId), "ok"));
-	return newRuntime;
+	ui.line(ui.note(EN.branchedSession(info.newSessionId, info.sessionFile ?? EN.unset), "info"));
+	ui.line(ui.note(EN.forkedStoryDb(ctx.opened.storyState.storyDir, info.eventCount, info.snapshotCount), "info"));
+	ui.line(ui.note(EN.storySwitched(info.oldSessionId, info.newSessionId), "ok"));
+	return ctx.opened.runtime;
 }
 
 /** 轮中交互 handler：把 broker 的请求落到 readline 上（内置 confirm/choice/text 三种 kind）。
  *  卡包代码工具经 getInteractionBroker() 发起请求时走到这里；未挂 handler 时 broker 抛
  *  InteractionUnavailableError，由工具自行降级（不崩、不挂死）。 */
-async function readlineInteractionHandler(req: InteractionRequest, ctx: CliCtx): Promise<unknown> {
-	const { queue, ui } = ctx;
+async function readlineInteractionHandler(
+	req: InteractionRequest,
+	deps: { ui: Ui; queue: LineQueue },
+): Promise<unknown> {
+	const { queue, ui } = deps;
 	switch (req.kind) {
 		case "confirm": {
 			const answer = (await queue.nextLine(EN.interactionConfirmPrompt(req.prompt))).trim().toLowerCase();
@@ -430,32 +327,6 @@ async function readlineInteractionHandler(req: InteractionRequest, ctx: CliCtx):
 		default:
 			throw new Error(EN.interactionUnknownKind(req.kind));
 	}
-}
-
-/** 给 runtime 的轮中交互 broker 挂 handler。每次重建 runtime 都要重挂——broker 是实例级的。 */
-function attachInteraction(runtime: StoryRuntime, ctx: CliCtx): void {
-	runtime.interaction.registerHandler((req) => readlineInteractionHandler(req, ctx));
-}
-
-/** 以当前 ctx 重建 runtime：subagent 开关在创建时固化，改开关必须重建。
- *  dispose 旧实例（级联释放 assist 会话与 broker 注册），复用同一个 sessionManager 与 storyState。 */
-async function rebuildRuntime(runtime: StoryRuntime, ctx: CliCtx): Promise<StoryRuntime> {
-	const { sessionManager, storyState } = runtime;
-	runtime.dispose();
-	ctx.eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"), (m) => ctx.ui.warn(m));
-	const rebuilt = await createStoryRuntime({
-		cwd: ctx.cwd,
-		sessionManager,
-		storyState,
-		settings: ctx.settings,
-		modelRuntime: ctx.modelRuntime,
-		prompts: ctx.prompts,
-		eventLog: ctx.eventLog,
-		onWarning: (m) => ctx.ui.warn(m),
-		...runtimeExtras(ctx, storyState.storyDir),
-	});
-	attachInteraction(rebuilt, ctx);
-	return rebuilt;
 }
 
 async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Promise<StoryRuntime | undefined> {
@@ -504,17 +375,17 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 					mode: runtime.mode,
 					sessionId: runtime.sessionManager.getSessionId(),
 					entryId: runtime.sessionManager.getLeafId() ?? EN.unset,
-					packDirs: ctx.packDirs,
-					pinned: ctx.pinned,
+					packDirs: ctx.opened.packDirs,
+					pinned: ctx.opened.pinned,
 				}),
 			);
 			return undefined;
 		}
 		case "packs": {
-			if (ctx.packs === undefined) {
+			if (ctx.opened.packs === undefined) {
 				ui.lines(renderPacks(ui, []));
 			} else {
-				const { packs, warnings } = ctx.packs.cache.getPacks();
+				const { packs, warnings } = ctx.opened.packs.cache.getPacks();
 				ui.lines(renderPacks(ui, packs));
 				for (const w of warnings) ui.warn(w);
 			}
@@ -525,22 +396,22 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 				ui.line(ui.note(EN.pinUsage, "warn"));
 				return undefined;
 			}
-			if (!ctx.pinned.includes(arg)) ctx.pinned.push(arg);
-			ui.line(ui.note(EN.pinnedList(ctx.pinned.length > 0 ? ctx.pinned.join(EN.listSep) : EN.none), "ok"));
+			if (!ctx.opened.pinned.includes(arg)) ctx.opened.pinned.push(arg);
+			ui.line(ui.note(EN.pinnedList(ctx.opened.pinned.length > 0 ? ctx.opened.pinned.join(EN.listSep) : EN.none), "ok"));
 			return undefined;
 		}
 		case "unpin": {
-			const idx = ctx.pinned.indexOf(arg);
-			if (idx >= 0) ctx.pinned.splice(idx, 1);
-			ui.line(ui.note(EN.pinnedList(ctx.pinned.length > 0 ? ctx.pinned.join(EN.listSep) : EN.none), "ok"));
+			const idx = ctx.opened.pinned.indexOf(arg);
+			if (idx >= 0) ctx.opened.pinned.splice(idx, 1);
+			ui.line(ui.note(EN.pinnedList(ctx.opened.pinned.length > 0 ? ctx.opened.pinned.join(EN.listSep) : EN.none), "ok"));
 			return undefined;
 		}
 		case "reload": {
-			if (ctx.packs === undefined) {
+			if (ctx.opened.packs === undefined) {
 				ui.line(ui.note(EN.reloadNone, "warn"));
 				return undefined;
 			}
-			const { packs, warnings } = ctx.packs.cache.getPacks();
+			const { packs, warnings } = ctx.opened.packs.cache.getPacks();
 			ui.line(
 				ui.note(
 					EN.packsReloaded(packs.map((p) => EN.packsReloadEntry(p.name, p.entries.length)).join(EN.listSep)),
@@ -557,7 +428,7 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			// /prompt <角色> clear         清除 story 层覆盖
 			const parts = arg.split(/\s+/).filter((s) => s !== "");
 			const storyDir = runtime.storyState.storyDir;
-			const dirs: PromptLayerDirs = { ...ctx.prompts, storyDir };
+			const dirs: PromptLayerDirs = { ...ctx.opened.prompts, storyDir };
 			if (parts.length === 0) {
 				// 查询失败的角色单独标出，不让一个错吞掉整屏。
 				const rows: Array<{ role: string; layer?: string; error?: string }> = PROMPT_ROLES.map((role) => {
@@ -633,16 +504,15 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 		}
 		case "agents": {
 			// /agents 查看；/agents <story|npc|stylize> <on|off> 设置（会话级，不持久化）。
-			// 改开关必须重建 runtime——subagent 选项在创建时固化。
+			// 改开关必须重建 runtime——subagent 选项在创建时固化（重建走内核 rebuildRuntime）。
 			const onOff = (b: boolean): string => (b ? EN.agentsOn : EN.agentsOff);
-			const storyDir = runtime.storyState.storyDir;
 			if (arg === "") {
 				ui.lines([
 					ui.note(
 						EN.agentsTitle(
-							onOff(ctx.agents.story),
-							onOff(ctx.agents.npc),
-							onOff(stylizeEnabled(ctx, storyDir)),
+							onOff(ctx.opened.agents.story),
+							onOff(ctx.opened.agents.npc),
+							onOff(resolveStylizeEnabled(ctx.opened)),
 							EN_LABELS.mode[runtime.mode],
 						),
 						"info",
@@ -656,8 +526,8 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 				ui.line(ui.note(EN.agentsBadArg("/agents <story|npc|stylize> <on|off>"), "warn"));
 				return undefined;
 			}
-			const next: CliCtx["agents"] = { ...ctx.agents, [name]: value === "on" };
-			const stylizeOn = name === "stylize" ? value === "on" : stylizeEnabled(ctx, storyDir);
+			const next: StoryAgents = { ...ctx.opened.agents, [name]: value === "on" };
+			const stylizeOn = name === "stylize" ? value === "on" : resolveStylizeEnabled(ctx.opened);
 			const problems = validateSubagentSwitches(runtime.mode, {
 				story: next.story,
 				npc: next.npc,
@@ -668,21 +538,26 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 				for (const p of problems) ui.line(ui.detail(p, "warn"));
 				return undefined;
 			}
-			ctx.agents = next;
-			const rebuilt = await rebuildRuntime(runtime, ctx);
+			ctx.opened.agents = next;
+			// 重建后 runtime 换实例（旧实例已 dispose）；返回新实例给主循环。
+			await rebuildRuntime(ctx.opened);
 			ui.line(
 				ui.note(
-					EN.agentsApplied(onOff(ctx.agents.story), onOff(ctx.agents.npc), onOff(stylizeEnabled(ctx, storyDir))),
+					EN.agentsApplied(
+						onOff(ctx.opened.agents.story),
+						onOff(ctx.opened.agents.npc),
+						onOff(resolveStylizeEnabled(ctx.opened)),
+					),
 					"ok",
 				),
 			);
-			return rebuilt;
+			return ctx.opened.runtime;
 		}
 		case "models": {
 			// 角色清单与 core settings.ts 的 MODEL_ROLES 对应（那是未导出的内部常量，此处同步维护）。
 			const roles = ["narrator", "data", "story", "npc", "stylize", "chapter_summary", "assist"] as const;
 			const rows = roles.map((role) => {
-				const ref = ctx.settings.models[role];
+				const ref = ctx.opened.settings.models[role];
 				return [role, ref ? `${ref.provider}/${ref.id}` : EN.modelsUnset] as const;
 			});
 			ui.lines(renderModels(ui, rows));
@@ -854,47 +729,10 @@ function parseArgs(argv: readonly string[]): CliArgs {
 export async function main(argv: readonly string[]): Promise<void> {
 	const ui = new Ui();
 	const args = parseArgs(argv);
-	const storiesRoot = args.root ?? defaultStoriesRoot();
 	const cwd = repoRoot;
 
-	let sessionManager: SessionManager;
-	let storyState: StoryState;
-	let packDirs = args.pack.map((d) => resolve(d));
-	/** 续写时模式来自 story.meta.json（不是命令行）——启动事实块后提示一句，让来源可见。 */
-	let modeFromMeta = false;
-
-	if (args.resume !== undefined) {
-		// 续写：session 文件恢复；mode 从 story.meta.json 恢复（runtime 解析）；subagent 开关全开满足各模式预设。
-		sessionManager = SessionManager.open(args.resume);
-		const sessionId = sessionManager.getSessionId();
-		const dbPath = coreStoryDbPath(storiesRoot, sessionId);
-		storyState = {
-			storyDir: join(storiesRoot, sessionId),
-			storyDb: openStoryDb(dbPath),
-			snapshotsDb: openSnapshotsDb(snapshotsDbPath(dbPath)),
-		};
-		const meta = readStoryMeta(storyState.storyDir);
-		modeFromMeta = meta?.mode !== undefined;
-		if (packDirs.length === 0 && meta !== undefined) {
-			packDirs = meta.packs.map((p) => p.dir);
-		}
-	} else {
-		// 新故事：--mode 仅在创建时有效（createStory 写入 meta；adventure 创建时锁定）。
-		const created = await createStory({ storiesRoot, packDirs, cwd, ...(args.mode !== undefined ? { mode: args.mode } : {}) });
-		sessionManager = created.sessionManager;
-		storyState = created.storyState;
-	}
-	const sessionId = sessionManager.getSessionId();
-
-	const { settings, warnings: settingsWarnings } = loadSettings();
-	const prompts: PromptLayerDirs = {
-		globalDir: defaultGlobalPromptsDir(),
-		// 多包提示词合并：传全部包 prompts/ 目录（后包覆盖先包；存在的才被探测）。
-		...(packDirs.length > 0 ? { packDirs } : {}),
-	};
-	const modelRuntime = await ModelRuntime.create();
-	const eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"), (m) => ui.warn(m));
-
+	// 行输入队列先于装配建好：openStory 拿它当轮中交互 handler 的依赖（broker 是 runtime 实例级的，
+	// 装配时挂上、重建时由内核自动重挂）。
 	const rl = createInterface({
 		input: process.stdin,
 		output: process.stdout,
@@ -925,37 +763,21 @@ export async function main(argv: readonly string[]): Promise<void> {
 	});
 	const queue = new LineQueue(rl, ui);
 
-	const pinned: string[] = [];
-	const ctx: CliCtx = {
-		storiesRoot,
+	// 装配（新建/续写 → 故事目录与两个库 → 卡包与提示词层 → 模型配置 → 事件流 → runtime）全在内核
+	// openStory：app 层只给 UI 侧依赖与告警出口，不再自己拼这套接线（否则 studio 会复刻一份并漂移）。
+	const opened = await openStory({
 		cwd,
-		settings,
-		modelRuntime,
-		prompts,
-		ui,
-		eventLog,
+		...(args.root !== undefined ? { storiesRoot: args.root } : {}),
+		...(args.resume !== undefined ? { resume: args.resume } : {}),
+		...(args.pack.length > 0 ? { packDirs: args.pack } : {}),
+		...(args.mode !== undefined ? { mode: args.mode } : {}),
 		...(args.style !== undefined ? { style: args.style } : {}),
-		agents: { story: true, npc: true },
-		queue,
-		pinned,
-		packDirs,
-	};
-	if (packDirs.length > 0) {
-		ctx.packs = { cache: new PackCache(packDirs), pinned: () => ctx.pinned };
-	}
-
-	let runtime: StoryRuntime = await createStoryRuntime({
-		cwd,
-		sessionManager,
-		storyState,
-		settings,
-		modelRuntime,
-		prompts,
-		eventLog,
 		onWarning: (m) => ui.warn(m),
-		...runtimeExtras(ctx, storyState.storyDir),
+		onInteraction: (req) => readlineInteractionHandler(req, { ui, queue }),
 	});
-	attachInteraction(runtime, ctx);
+	const ctx: CliCtx = { ui, queue, opened };
+	let runtime: StoryRuntime = ctx.opened.runtime;
+	const sessionId = ctx.opened.sessionManager.getSessionId();
 	// Ctrl+C：第一次请求退出（若当前轮正在生成，等它结束再退），第二次强制退出。
 	// 不接管的话 readline 只会把接口关掉——若此刻卡在几百秒的主叙事里，用户按了 Ctrl+C
 	// 既没有提示也不会退出，会以为进程挂了。
@@ -971,29 +793,29 @@ export async function main(argv: readonly string[]): Promise<void> {
 	});
 
 	// 启动头部：故事标题 · 模式（adventure 追加锁定徽章）+ 事实块（会话/目录/时钟/包/工具）。
-	const bannerMeta = readStoryMeta(storyState.storyDir);
-	const loaded = ctx.packs?.cache.getPacks();
+	const bannerMeta = readStoryMeta(ctx.opened.storyState.storyDir);
+	const loaded = ctx.opened.packs?.cache.getPacks();
 	const packNames = loaded?.packs.map((p) => p.name).join(EN.listSep);
 	const toolNames = runtime.session.getActiveToolNames();
 	const clock = clockText(runtime);
 	ui.lines(
 		renderStartup(ui, {
-			story: bannerMeta?.title ?? sessionManager.getSessionName() ?? EN.untitled,
+			story: bannerMeta?.title ?? ctx.opened.sessionManager.getSessionName() ?? EN.untitled,
 			mode: EN_LABELS.mode[runtime.mode],
 			locked: runtime.mode === "adventure",
 			...(runtime.mode === "creation"
 				? {}
 				: { modeNote: runtime.mode === "adventure" ? EN.modeNoteLocked : EN.modeNoteNormal }),
 			sessionId,
-			storyDir: storyState.storyDir,
+			storyDir: ctx.opened.storyState.storyDir,
 			...(clock !== undefined ? { clock } : {}),
 			tools: toolNames.length > 0 ? toolNames.join(EN.listSep) : EN.toolsEmpty,
 			...(packNames !== undefined && packNames !== "" ? { packs: packNames } : {}),
 		}),
 	);
-	for (const w of settingsWarnings) ui.warn(w);
+	for (const w of ctx.opened.settingsWarnings) ui.warn(w);
 	for (const w of loaded?.warnings ?? []) ui.warn(w);
-	if (modeFromMeta) ui.line(ui.note(EN.modeRestoredFromMeta, "info"));
+	if (ctx.opened.modeFromMeta) ui.line(ui.note(EN.modeRestoredFromMeta, "info"));
 	ui.line();
 	ui.line(ui.note(EN.hint, "info"));
 
@@ -1024,17 +846,20 @@ export async function main(argv: readonly string[]): Promise<void> {
 		}
 	} finally {
 		rl.close();
-		runtime.dispose();
-		runtime.storyState.storyDb.close();
-		runtime.storyState.snapshotsDb.close();
+		// 收尾一律以装配态为准（fork 后故事目录与库都换了，局部变量可能已过期）。
+		ctx.opened.runtime.dispose();
+		ctx.opened.storyState.storyDb.close();
+		ctx.opened.storyState.snapshotsDb.close();
 		ui.line();
-		ui.line(ui.note(EN.storyDirKept(runtime.storyState.storyDir), "info"));
-		ui.line(
-			ui.note(
-				EN.resumeHint(`node packages/app/src/m6-cli.ts --resume ${runtime.sessionManager.getSessionFile()}`),
-				"info",
-			),
-		);
+		ui.line(ui.note(EN.storyDirKept(ctx.opened.storyState.storyDir), "info"));
+		// 只在 session 文件真的落盘后才给续写命令：空故事（无开场白且未跑过轮次）pi 还没写过
+		// 任何消息，文件并不存在——照着提示敲 --resume 只会得到一个 EISDIR/ENOENT。
+		const sessionFile = ctx.opened.sessionManager.getSessionFile();
+		if (sessionFile !== undefined && existsSync(sessionFile)) {
+			ui.line(
+				ui.note(EN.resumeHint(`node packages/app/src/m6-cli.ts --resume ${sessionFile}`), "info"),
+			);
+		}
 	}
 }
 

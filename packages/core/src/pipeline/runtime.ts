@@ -53,6 +53,7 @@ import {
 	type SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
 import type { StoryDb } from "../db/story-db.ts";
+import { runWithAbort } from "../abort.ts";
 import type { SnapshotsDb } from "../snapshot/snapshots-db.ts";
 import { buildAncestorChain } from "../snapshot/ancestors.ts";
 import { createSnapshotHooks, type SnapshotHooks } from "../snapshot/hooks.ts";
@@ -303,6 +304,13 @@ function extractLastAssistantReply(messages: ReadonlyArray<{ role: string; conte
 	return undefined;
 }
 
+/** 最后一条 assistant 消息是否被 pi 标记为中止（stopReason="aborted"；pi 侧的中止事实来源）。 */
+function lastAssistantAborted(session: AgentSession): boolean {
+	const messages: ReadonlyArray<{ role: string; stopReason?: unknown }> = session.state.messages;
+	const last = messages[messages.length - 1];
+	return last !== undefined && last.role === "assistant" && last.stopReason === "aborted";
+}
+
 /** message 条目的文本（content 数组或纯字符串）。 */
 function messageTextOfEntry(entry: SessionEntry): string {
 	if (entry.type !== "message") return "";
@@ -529,10 +537,12 @@ export interface StoryRuntime {
 	 *  adventure 锁定不可切换（含切出）；违规抛中文 Error（列需先重开项，不自动改）。 */
 	setMode(next: StoryMode): void;
 	/** 跑一轮叙事。opts.force = /! 前缀（输入渠道校验强制提交，留痕 warning）。
+	 *  opts.signal 中止本轮（缺口 1：实测单轮可达 200 秒，GUI 不能没有刹车）——中止抛 TurnAbortedError，零落库。
 	 *  skipInputValidation 为内部选项（swipe 重放历史已接受输入时跳过校验），不经公开签名。 */
-	runTurn(input: string, opts?: { force?: boolean }): Promise<TurnResult>;
-	/** /swipe（重骰）：基于分支重生成最后一个 user 轮次的响应，旧稿留树。 */
-	swipe(): Promise<TurnResult>;
+	runTurn(input: string, opts?: { force?: boolean; signal?: AbortSignal }): Promise<TurnResult>;
+	/** /swipe（重骰）：基于分支重生成最后一个 user 轮次的响应，旧稿留树。
+	 *  opts.signal 同 runTurn（中止 = 零落库；session 树里留下的草稿语义同 TurnAbortedError 注释）。 */
+	swipe(opts?: { signal?: AbortSignal }): Promise<TurnResult>;
 	dispose(): void;
 }
 
@@ -857,7 +867,10 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		// 主叙事思考等级刻意与 pi 全局配置解耦：全局值服务于编码场景（常被调成 max），
 		// 而叙事阶段要的是正文——max 级思考会挤压输出预算、显著抬高「只思考不落笔」的概率
 		// （实测约半数轮次正文为空），单轮还多花 200 秒上下。缺省取 SDK 默认 medium。
-		thinkingLevel: opts.narratorThinkingLevel ?? "medium",
+		// 解析顺序：显式 option（测试/调用侧覆盖）→ settings.models.narrator.thinking（玩家配置）
+		// → "medium"。这才是 settings 里 thinking 字段的消费点（读—改—写闭环的读侧）；
+		// settings 整体可选（无配置形态），故全程可选链。
+		thinkingLevel: opts.narratorThinkingLevel ?? settings?.models.narrator?.thinking ?? "medium",
 		...(opts.settingsManager !== undefined ? { settingsManager: opts.settingsManager } : {}),
 	};
 	let created = await createAgentSession(sessionOptions);
@@ -893,9 +906,30 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 	const interaction = new InteractionBroker();
 	registerRuntimeBroker(interaction);
 
+	// 中止桥（缺口 1）：pi 的 session.prompt 没有 signal 选项，只能在信号触发时侧向调 session.abort()
+	// （pi 内部 agent.abort() + 等空闲）。胶水收在 src/abort.ts（runWithAbort），那里有完整语义注释；
+	// 监听器只覆盖主叙事调用在飞的这段，挂一次解一次。判定「本轮被中止」取两个来源：
+	// signal.aborted（调用侧已喊停）或 pi 标记的 stopReason === "aborted"（信号在 prompt 返回前一刻到达）。
+	//
+	// 已知残留（刻意不处理）：被中止的那条 assistant 草稿仍留在 session 树里（pi 打 aborted 标记，
+	// 其自身 UI 会特殊呈现）。内核不为此改导航——回溯会触发快照恢复，而目标链无快照时会走空库兜底
+	// （rmSync story.db），为清一条草稿冒清库风险不值当。阅读流的事实源是 turn_log，故不影响正文。
+	const promptWithAbort = async (text: string, signal: AbortSignal | undefined): Promise<void> =>
+		runWithAbort({
+			...(signal !== undefined ? { signal } : {}),
+			run: () => session.prompt(text),
+			onAbort: () => {
+				void session.abort().catch(() => undefined);
+			},
+			aborted: () => lastAssistantAborted(session),
+		});
+
 	// 私有 runTurn 主体（API 面收口）：skipInputValidation 是内部选项（swipe 重放历史已接受输入故跳过校验），
 	// 不进公开签名（对比 force 有留痕；skipInputValidation 是无痕旁路，不对外暴露）。
-	const runTurnInternal = async (input: string, turnOpts?: { force?: boolean; skipInputValidation?: boolean }): Promise<TurnResult> => {
+	const runTurnInternal = async (
+		input: string,
+		turnOpts?: { force?: boolean; skipInputValidation?: boolean; signal?: AbortSignal },
+	): Promise<TurnResult> => {
 		if (session.isStreaming) {
 			throw new Error("isStreaming 期间不能 prompt（应等待上一轮完成）");
 		}
@@ -1030,7 +1064,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		try {
 			// ---- 主叙事（轻检/打回循环；story 关闭时保持 M3 单 prompt 形态）----
 			let promptStart = session.state.messages.length;
-			await session.prompt(input);
+			await promptWithAbort(input, turnOpts?.signal);
 			let leafId = sessionManager.getLeafId();
 			if (leafId === null) {
 				throw new Error("prompt 后无 leaf entry（会话树异常）");
@@ -1055,7 +1089,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				}
 				pendingRevision = EMPTY_NARRATIVE_REVISION;
 				promptStart = session.state.messages.length;
-				await session.prompt(input);
+				await promptWithAbort(input, turnOpts?.signal);
 				leafId = sessionManager.getLeafId();
 				if (leafId === null) {
 					throw new Error("空叙事重试后无 leaf entry（会话树异常）");
@@ -1107,7 +1141,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 					}
 					pendingRevision = renderRevisionRequest(rule.hardConflicts, rewriteFindings);
 					promptStart = session.state.messages.length;
-					await session.prompt(input);
+					await promptWithAbort(input, turnOpts?.signal);
 					leafId = sessionManager.getLeafId();
 					if (leafId === null) {
 						throw new Error("重写后无 leaf entry（会话树异常）");
@@ -1288,8 +1322,11 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		}
 	};
 
-	// 公开 runTurn：只暴露 force（! 留痕）；skipInputValidation 为内部选项，不进公开签名。
-	const runTurn = async (input: string, opts?: { force?: boolean }): Promise<TurnResult> => runTurnInternal(input, opts);
+	// 公开 runTurn：只暴露 force（! 留痕）与 signal（中止）；skipInputValidation 为内部选项，不进公开签名。
+	const runTurn = async (
+		input: string,
+		opts?: { force?: boolean; signal?: AbortSignal },
+	): Promise<TurnResult> => runTurnInternal(input, opts);
 
 	// 提示词分层管理（「各层读写与覆盖链查询」）：绑定当前 runtime 层目录 + story 覆盖写。
 	// runtimePromptDirs 定义于构建期前部（活管线共用）；story 级覆盖下轮生效。
@@ -1354,7 +1391,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		// 找到当前分支最后一个 user message（getBranch）；取其输入文本；navigateTree(u_N) 前查
 		// rewriteHasSnapshot 同款守卫（有快照走导航恢复、无快照跳过导航直接重写——首轮/无快照不误清库）；
 		// 然后以同一输入重放完整 pipeline（runTurn，skipInputValidation=true：重放的是历史已接受输入，不再过输入校验）。
-		async swipe(): Promise<TurnResult> {
+		async swipe(opts?: { signal?: AbortSignal }): Promise<TurnResult> {
 			if (session.isStreaming) {
 				throw new Error("isStreaming 期间不能 swipe（应等待上一轮完成）");
 			}
@@ -1378,7 +1415,10 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				await session.navigateTree(lastUser.id);
 			}
 			// swipe 走内部路径（skipInputValidation: 重放的是历史已接受输入，不再过输入校验）。
-			return runTurnInternal(input, { skipInputValidation: true });
+			return runTurnInternal(input, {
+				skipInputValidation: true,
+				...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+			});
 		},
 		dispose: () => {
 			session.dispose();

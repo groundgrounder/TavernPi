@@ -18,6 +18,9 @@
 
 export const CORE_VERSION = "0.6.0";
 
+// 中止桥（缺口 1：runTurn 的 AbortSignal → pi session.abort；中止 = 未完成轮、零落库）
+export { runWithAbort, TurnAbortedError, type AbortBridge } from "./abort.ts";
+
 // 故事目录与打开
 export {
 	defaultStoriesRoot,
@@ -168,13 +171,17 @@ export {
 	type PipelineEventListener,
 } from "./pipeline/events.ts";
 
-// 模型配置最小形态
+// 模型配置（读 fail-open / 写 fail-closed；thinking 等级的运行时判据与类型）
 export {
 	defaultSettingsPath,
+	isThinkingLevel,
 	loadSettings,
+	saveSettings,
+	THINKING_LEVELS,
 	type ModelRef,
 	type TavernModels,
 	type TavernSettings,
+	type ThinkingLevel,
 } from "./settings.ts";
 
 // data subagent 变更集（受信任写入的载荷契约；提交侧 zod/json-schema 属内部）
@@ -253,16 +260,32 @@ export {
 } from "./pack/types.ts";
 
 // 故事创建（M5：createStory——卡包校验 → SQL+seed 迁移 → story.yaml 消费 → 开场白首轮 → story.meta.json）
-// + story.meta.json 辅助（--resume / 模式解析 / fork 继承共用）
+// + story.meta.json 辅助（--resume / 模式解析 / fork 继承共用）+ 故事枚举（listStories：故事选择器）
 export {
 	createStory,
 	inheritStoryMeta,
+	listStories,
 	readStoryMeta,
 	writeStoryMeta,
 	type CreateStoryOptions,
 	type CreateStoryResult,
 	type StoryMetaFile,
+	type StorySummary,
 } from "./story.ts";
+
+// 故事会话装配（缺口 8：openStory / rebuildRuntime / forkFrom——引擎装配知识收口，CLI 与 studio 共用）
+export {
+	forkFrom,
+	openStory,
+	rebuildRuntime,
+	resolveStylizeEnabled,
+	type ForkInfo,
+	type OpenedStory,
+	type OpenStoryOptions,
+	type PackInjection,
+	type StoryAgents,
+	type StoryAssembly,
+} from "./assembly.ts";
 
 // 内核级模式预设（★信任边界：三模式声明式预设——subagent 启用集合 / 切换规则 / 锁定）
 export {

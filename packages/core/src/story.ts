@@ -12,11 +12,12 @@
 // story.meta.json（--resume 恢复载体）；实际加载（additionalExtensionPaths 委托 pi loader）发生在
 // runtime 侧，挂到主叙事 session（见 pipeline/runtime.ts 的代码包挂载段）。
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import type { Dirent } from "node:fs";
 import { join, resolve } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_STORY_CLOCK } from "./db/types.ts";
-import { defaultStoriesRoot, openStoryDb, storyDbPath } from "./db/story-db.ts";
+import { defaultStoriesRoot, openStoryDb, SESSION_ID_RE, storyDbPath } from "./db/story-db.ts";
 import { migrate } from "./db/migrate.ts";
 import { openSnapshotsDb, snapshotsDbPath, takeSnapshot } from "./snapshot/snapshots-db.ts";
 import { loadPacks } from "./pack/loader.ts";
@@ -81,6 +82,85 @@ export interface CreateStoryResult {
 	sessionManager: SessionManager;
 	storyState: StoryState;
 	packs: WorldPack[];
+}
+
+/** 故事列表项（listStories 的返回单元）。 */
+export interface StorySummary {
+	/** sessionId = 故事目录名（openStory 的 resume/storyDbPath 都以它为准）。 */
+	sessionId: string;
+	storyDir: string;
+	/** story.meta.json 的 title；未记录则缺省（调用侧自行回落「未命名」类文案）。 */
+	title?: string;
+	/** 内核级模式；meta 缺失或字段非法一律按 creation（与 resolveStoryMode 的缺省一致，不抛错）。 */
+	mode: StoryMode;
+	/** 世界包名（meta 记录顺序 = 提示词覆盖顺序）。 */
+	packNames: string[];
+	/** 世界包声明的默认文风。 */
+	defaultStyle?: string;
+	/** meta.createdAt（ISO 串原样透传，不解析——解析失败的历史值不该让故事从列表里消失）。 */
+	createdAt?: string;
+	/** 最后活动时间（ms）：story.db 的 mtime，库缺席时回落故事目录 mtime。 */
+	updatedAt?: number;
+	/** story.db 字节数（库文件缺席则缺省）。 */
+	dbBytes?: number;
+}
+
+/**
+ * 枚举故事根目录下的全部故事（CLI / studio 的故事选择器）。
+ *
+ * 判据：目录名符合 sessionId 字符集，且含 story.db 或 story.meta.json（两者皆无 = 非故事目录，
+ * 例如 `sessions/` 与散落的杂目录）。目录名不合规的一律跳过——它无法被 storyDbPath / openStory 消费，
+ * 列出来只会让调用侧在打开时炸。
+ *
+ * **刻意不打开 story.db**：列表页要瞬间出结果，且不能与正在运行的故事抢写锁（同步 SQLite 会阻塞）。
+ * 需要轮次 / 时钟 / 事件等库内事实时，由调用侧对选中的故事单独走 openStory。故此处只给
+ * 「元数据 + 文件 stat」能回答的字段。
+ */
+export function listStories(storiesRoot: string = defaultStoriesRoot()): StorySummary[] {
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(storiesRoot, { withFileTypes: true });
+	} catch {
+		// 根目录不存在 = 还没建过故事（首次运行即此路径），不是错误。
+		return [];
+	}
+
+	const stories: StorySummary[] = [];
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		const sessionId = entry.name;
+		if (!SESSION_ID_RE.test(sessionId)) continue;
+		const storyDir = join(storiesRoot, sessionId);
+		const meta = readStoryMeta(storyDir);
+		const dbStat = statOrUndefined(join(storyDir, "story.db"));
+		if (meta === undefined && dbStat === undefined) continue;
+		const updatedAt = (dbStat ?? statOrUndefined(storyDir))?.mtimeMs;
+		const metaMode = meta?.mode;
+		stories.push({
+			sessionId,
+			storyDir,
+			...(meta?.title !== undefined ? { title: meta.title } : {}),
+			mode: isStoryMode(metaMode) ? metaMode : "creation",
+			packNames: (meta?.packs ?? []).map((p) => p.name),
+			...(meta?.defaultStyle !== undefined ? { defaultStyle: meta.defaultStyle } : {}),
+			...(meta?.createdAt !== undefined ? { createdAt: meta.createdAt } : {}),
+			...(updatedAt !== undefined ? { updatedAt } : {}),
+			...(dbStat !== undefined ? { dbBytes: dbStat.size } : {}),
+		});
+	}
+
+	// 最近活动的在前；同一毫秒（或都缺 mtime）时按 sessionId 定序，保证列表稳定。
+	return stories.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || a.sessionId.localeCompare(b.sessionId));
+}
+
+/** stat 取不到（不存在 / 无权限 / 非常规文件）返回 undefined——列表不因单个条目炸掉。 */
+function statOrUndefined(path: string): { mtimeMs: number; size: number } | undefined {
+	try {
+		const s = statSync(path);
+		return { mtimeMs: s.mtimeMs, size: s.size };
+	} catch {
+		return undefined;
+	}
 }
 
 /** story.yaml 的历法/粒度/开场白/文风字段（StoryMeta 消费面）。 */
