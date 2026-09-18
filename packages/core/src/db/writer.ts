@@ -59,7 +59,7 @@ export class DbWriter {
 	/**
 	 * 事务执行器（applyChangeset 原子性前提）。node:sqlite DatabaseSync 有 isTransaction 属性：
 	 * 已在事务内 → SAVEPOINT/RELEASE（可嵌套，异常 ROLLBACK TO 保留外层事务）；
-	 * 否则 BEGIN/COMMIT，异常 ROLLBACK。
+	 * 否则 BEGIN IMMEDIATE/COMMIT，异常 ROLLBACK（IMMEDIATE 的理由见下方注释）。
 	 */
 	transaction<T>(fn: () => T): T {
 		if (this.db.isTransaction) {
@@ -74,7 +74,10 @@ export class DbWriter {
 				throw err;
 			}
 		}
-		this.db.exec("BEGIN");
+		// BEGIN IMMEDIATE：事务起点就取写锁。WAL 下 deferred BEGIN 先取读快照、到写语句才升级，
+		// 撞上并发写会得 SQLITE_BUSY_SNAPSHOT——busy_timeout 对它无效，只能整事务重试；
+		// IMMEDIATE 从起点持写锁，busy_timeout 的等待才真正生效（见 SQLITE_BUSY_TIMEOUT_MS）。
+		this.db.exec("BEGIN IMMEDIATE");
 		try {
 			const result = fn();
 			this.db.exec("COMMIT");

@@ -10,11 +10,13 @@ import {
 	renderHelp,
 	renderInputRejected,
 	renderPacks,
+	renderRestore,
 	renderStartup,
 	renderStatus,
 	renderTurn,
 } from "../src/cli-view.ts";
 import { EN } from "../src/cli-text-en.ts";
+import { ZH } from "../src/cli-text-zh.ts";
 import { stripAnsi, Ui } from "../src/ui.ts";
 
 const ui = new Ui({ width: 80, color: false, animate: false, out: null as never });
@@ -213,4 +215,42 @@ test("renderInputRejected：三行分别是原因（带错字形）/ 建议 / �
 	assert.match(stripAnsi(lines[0]!), /^ {2}✗ input rejected \(input-channel check\): 非玩家输入$/);
 	assert.match(stripAnsi(lines[1]!), /^ {2}• try instead: 改成角色行动$/);
 	assert.match(stripAnsi(lines[2]!), /prefix it with \/!/);
+});
+
+// ---- 快照恢复：空库兜底的语气 ----
+// resetToEmptyStoryDb 会 rmSync(story.db) 后重建，已落库的事实（NPC 关系 / 地点 / 物品 /
+// 时间线）全部归零。它是 README 文档化的 /tree 语义（跳回开头 = 重做开头），所以不该拒绝它；
+// 但它**不许**以 ok 绿 +「正常」的字样出现——那被读成「一切正常」，效果等于静默删数据。
+// tone 的期望值用 ui.paint 现生成，不硬编码 ANSI 码（改配色表不会假红）。
+test("renderRestore：空库兜底走 warn 语气 + 文案点明数据已重置（不得标成 ok）", () => {
+	const colorUi = new Ui({ width: 80, color: true, animate: false, out: null as never });
+	const text = renderRestore(colorUi, { ok: true }, "0000-01-01 清晨", 0).join("\n");
+
+	assert.ok(
+		text.includes(colorUi.paint("warn", EN.restoreEmptyFallback)),
+		`空库兜底应以 warn 语气呈现：${text}`,
+	);
+	assert.ok(
+		!text.includes(colorUi.paint("ok", EN.restoreEmptyFallback)),
+		"空库兜底不得标成 ok（绿）——那会让破坏性结果看起来像一切正常",
+	);
+	// 文案是用户唯一的知情渠道：两套语言都必须点出「空库兜底」与「数据已重置」，
+	// 只写「正常 / ok」等于把破坏性结果说成无事发生。
+	assert.match(ZH.restoreEmptyFallback, /空库兜底/);
+	assert.match(ZH.restoreEmptyFallback, /重置/);
+	assert.match(EN.restoreEmptyFallback, /empty-DB fallback/i);
+	assert.match(EN.restoreEmptyFallback, /reset to initial state/i);
+});
+
+test("renderRestore：正常恢复（有 restoredTurnSeq）走 ok，不沾空库兜底文案", () => {
+	const colorUi = new Ui({ width: 80, color: true, animate: false, out: null as never });
+	const text = renderRestore(
+		colorUi,
+		{ ok: true, restoredTurnSeq: 3, restoredEntryId: "a3" },
+		"0000-01-05 夜晚",
+		12,
+	).join("\n");
+
+	assert.ok(text.includes(colorUi.paint("ok", EN.restoreOk(3, "a3"))), `正常恢复应走 ok：${text}`);
+	assert.ok(!text.includes(EN.restoreEmptyFallback), "正常恢复不得出现空库兜底文案");
 });

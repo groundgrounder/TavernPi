@@ -393,6 +393,101 @@ test("loadPack：INSERT INTO 也做前缀扫描（seed.sql 违规同样报错）
 	}
 });
 
+// 内核表拦截不能只认 CREATE TABLE / INSERT INTO。
+// 旧实现只扫这两个动词，`DELETE FROM turn_log;`（turn_log 是「数据库才是事实」的载体）
+// 与 `CREATE INDEX ... ON events` 曾静默通过校验——卡包作者唯一的防线放行数据清空。
+// 改为反向扫描内核表名后，成败不再取决于动词覆盖面：以下每条都是"能改写内核表"的合法 SQL。
+for (const sql of [
+	"DELETE FROM turn_log;\n",
+	"DROP TABLE events;\n",
+	"DROP TABLE IF EXISTS npcs;\n",
+	"UPDATE clock SET id = 1;\n",
+	"ALTER TABLE locations ADD COLUMN evil TEXT;\n",
+	"CREATE INDEX ix_evil ON events (id);\n",
+	"CREATE TRIGGER trg_evil AFTER INSERT ON world_state BEGIN SELECT 1; END;\n",
+	"CREATE VIEW v_evil AS SELECT * FROM npc_memories;\n",
+	"create index ix2 on TURN_LOG (id);\n",
+]) {
+	test(`loadPack：破坏性动词改写内核保留表也报错 — ${sql.trim()}`, () => {
+		const root = makeTempDir();
+		try {
+			const dir = createPack(root, {
+				name: "shouling",
+				schemaSql: "CREATE TABLE shouling_relics (id INTEGER);\n",
+				seedSql: sql,
+			});
+			assert.throws(() => loadPack(dir), /卡包 SQL 不应写内核保留表/);
+		} finally {
+			cleanupTempDir(root);
+		}
+	});
+}
+
+test("loadPack：DROP/DELETE 的表名同样做命名空间前缀扫描（不止 CREATE/INSERT）", () => {
+	const root = makeTempDir();
+	try {
+		const dir = createPack(root, {
+			name: "shouling",
+			schemaSql: "CREATE TABLE shouling_relics (id INTEGER);\n",
+			seedSql: "DROP TABLE other_table;\n",
+		});
+		assert.throws(() => loadPack(dir), /命名空间前缀违规: 表名 "other_table"/);
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("loadPack：注释与字符串字面量里的内核表名不算引用（不假阳性）", () => {
+	const root = makeTempDir();
+	try {
+		const dir = createPack(root, {
+			name: "shouling",
+			// init 生成的骨架 schema.sql 说明注释里就写着「/ world_state 键须以 <包名>_ 前缀」；
+			// seed 里的字符串则是数据值，不是表引用。
+			schemaSql:
+				"-- 所有表名 / world_state 键必须以「shouling_」前缀开头（内核保留表除外）\nCREATE TABLE shouling_log (id INTEGER, msg TEXT);\n",
+			seedSql: "INSERT INTO shouling_log (id, msg) VALUES (1, 'DELETE FROM turn_log');\n",
+		});
+		assert.equal(loadPack(dir).name, "shouling");
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("loadPack：内核表名作子串的自建表名不误报（shouling_events / shouling_clockwork）", () => {
+	const root = makeTempDir();
+	try {
+		const dir = createPack(root, {
+			name: "shouling",
+			schemaSql:
+				"CREATE TABLE shouling_events (id INTEGER);\nCREATE TABLE shouling_clockwork (id INTEGER);\n",
+			seedSql: "INSERT INTO shouling_events (id) VALUES (1);\n",
+		});
+		assert.equal(loadPack(dir).name, "shouling");
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("loadPack：clockwork 不被当内核表 clock（词边界），但缺前缀仍报前缀违规", () => {
+	const root = makeTempDir();
+	try {
+		const dir = createPack(root, {
+			name: "shouling",
+			schemaSql: "CREATE TABLE clockwork (id INTEGER);\n",
+		});
+		assert.throws(() => loadPack(dir), (err: unknown) => {
+			assert.ok(err instanceof PackLoadError);
+			const messages = err.issues.map((i) => i.message).join("\n");
+			assert.match(messages, /命名空间前缀违规/);
+			assert.doesNotMatch(messages, /内核保留表/, "clockwork 不是内核表 clock，不该按内核拦");
+			return true;
+		});
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
 test("loadPack：非法包名（含连字符，不转换直接拒绝）→ PackLoadError", () => {
 	const root = makeTempDir();
 	try {
@@ -457,6 +552,50 @@ test("loadPack：pi.extensions 声明收集进 extensionEntryPaths（不加载�
 		const pack = loadPack(dir);
 		assert.equal(pack.hasCode, true);
 		assert.deepEqual(pack.extensionEntryPaths, [join(dir, "src", "ext.ts")]);
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+// pi.extensions 是自由字符串数组，会照原样交给 pi 的 loader 加载。写成包外路径时作者
+// 以为挂的是自己的文件，实际加载的是别处——越界必须响亮报错，不能静默剔除或静默放行。
+for (const declared of ["../outside.ts", "./../outside.ts", "/etc/hostname"]) {
+	test(`loadPack：pi.extensions 指向包外 → PackLoadError — ${declared}`, () => {
+		const root = makeTempDir();
+		try {
+			const dir = createPack(root, { name: "code_pack", piExtensions: [declared] });
+			assert.throws(() => loadPack(dir), (err: unknown) => {
+				assert.ok(err instanceof PackLoadError);
+				assert.match(err.issues.map((i) => i.message).join("\n"), /指向包外路径/);
+				return true;
+			});
+		} finally {
+			cleanupTempDir(root);
+		}
+	});
+}
+
+// 越界判断用 path.relative 而非前缀字符串比较：`<root>/code_pack-evil` 的字符串前缀
+// 恰好是 `<root>/code_pack`，用 startsWith 判会把它误当包内放行。
+test("loadPack：与前缀相似的兄弟目录（code_pack-evil）不被当成包内", () => {
+	const root = makeTempDir();
+	try {
+		const dir = createPack(root, { name: "code_pack", piExtensions: ["../code_pack-evil/x.ts"] });
+		createPack(root, { name: "code_pack-evil" });
+		assert.throws(() => loadPack(dir), /指向包外路径/);
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("loadPack：包内相对路径（含 ./ 与多级子目录）照常收集，不误判越界", () => {
+	const root = makeTempDir();
+	try {
+		const dir = createPack(root, { name: "mine", piExtensions: ["./src/ext.ts", "src/nested/deep.ts"] });
+		assert.deepEqual(loadPack(dir).extensionEntryPaths, [
+			join(dir, "src", "ext.ts"),
+			join(dir, "src", "nested", "deep.ts"),
+		]);
 	} finally {
 		cleanupTempDir(root);
 	}

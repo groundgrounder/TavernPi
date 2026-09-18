@@ -1,4 +1,4 @@
-// CLI 文案的**中文版**。CLI 当前不使用它，保留给未来的 GUI（tavern-studio）——
+// CLI 文案的**中文版**。CLI 当前不使用它，保留给未来的 GUI（tavern studio / packages/studio）——
 // 那里的用户不是开发者，中文才是合适的默认。
 //
 // 与 `cli-text-en.ts` 的 key 一一对应（`ZH: typeof EN` 把它变成编译期约束，少一个 key 就不过）；
@@ -222,7 +222,7 @@ export const ZH: typeof EN = {
 	restoreFailed: (err) => `失败：${err}`,
 	restoreUnknown: "未知错误",
 	restoreOk: (turn, entry) => `第 ${turn} 轮（条目 ${entry}）`,
-	restoreEmptyFallback: "正常（空库兜底）",
+	restoreEmptyFallback: "空库兜底——故事数据已重置为初始态（该分支无快照）",
 	restoreClock: (time, events) => `${time} · ${events} 个事件`,
 
 	// ---- 中断与退出 ----

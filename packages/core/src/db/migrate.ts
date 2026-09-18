@@ -124,7 +124,9 @@ export function migrate(db: DatabaseSync, extraMigrations: Migration[] = []): st
 		if (applied.has(migration.name)) {
 			continue;
 		}
-		db.exec("BEGIN");
+		// BEGIN IMMEDIATE（同 DbWriter.transaction，理由见 SQLITE_BUSY_TIMEOUT_MS 注释）：
+		// 迁移是多语句写，起点取写锁，避免中途升级撞 SQLITE_BUSY_SNAPSHOT。
+		db.exec("BEGIN IMMEDIATE");
 		try {
 			migration.up(db);
 			db.prepare("INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)").run(

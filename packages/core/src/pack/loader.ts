@@ -21,7 +21,7 @@
 // 失败即 PackLoadError，一次收集全部问题（校验工具/UI 可整屏展示）。
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import {
@@ -400,22 +400,56 @@ function pickSpecialized(parsed: ParsedEntry, type: EntryType): Record<string, u
 	return out;
 }
 
-/** 代码入口收集（只收集不加载）：index.ts 或 pi.extensions 声明。 */
-function detectCode(dir: string, pkg: PackageJson): { hasCode: boolean; extensionEntryPaths: string[] } {
+/** 绝对路径 p 是否落在目录 root 内（含 root 自身）。
+ *  用 relative 判断而非前缀字符串比较——否则 `/packs/mine` 与 `/packs/mine-evil` 会被误判为包含。
+ *  只做词法判断（不解析符号链接）：本校验的定位见 detectCode 的说明。 */
+function isInside(root: string, p: string): boolean {
+	const rel = relative(root, p);
+	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/**
+ * 代码入口收集（只收集不加载）：index.ts 或 pi.extensions 声明。
+ *
+ * 路径必须落在包目录内。卡包**允许携带代码**（「设定集 + SQL + 可选代码」）是设计，
+ * 所以这里不是"防越权执行"——而是防**误配**：`pi.extensions` 是个自由字符串数组，
+ * 写成 `../other-pack/index.ts` 或相对包外时，pi 的 loader 会照着加载，作者却以为挂的是自己的文件。
+ * 同理，表名有 KERNEL_TABLE_WHITELIST、sessionId 有字符集校验，路径不该是唯一没有闸门的那一个。
+ * 越界报 Issue 而非静默剔除——静默剔除会让作者以为挂载成功。
+ */
+function detectCode(
+	dir: string,
+	pkg: PackageJson,
+	issues: PackIssue[],
+): { hasCode: boolean; extensionEntryPaths: string[] } {
 	const paths: string[] = [];
 	const indexPath = join(dir, "index.ts");
 	if (existsSync(indexPath)) paths.push(indexPath);
+
 	const ext = pkg.pi?.extensions;
+	const declared: string[] = [];
 	if (typeof ext === "string") {
-		paths.push(resolve(dir, ext));
+		declared.push(ext);
 	} else if (Array.isArray(ext)) {
 		for (const e of ext) {
-			if (typeof e === "string") paths.push(resolve(dir, e));
+			if (typeof e === "string") declared.push(e);
 		}
 	} else if (ext !== undefined && typeof ext === "object") {
 		for (const v of Object.values(ext as Record<string, unknown>)) {
-			if (typeof v === "string") paths.push(resolve(dir, v));
+			if (typeof v === "string") declared.push(v);
 		}
+	}
+
+	for (const declaredPath of declared) {
+		const abs = resolve(dir, declaredPath);
+		if (!isInside(dir, abs)) {
+			issues.push({
+				file: join(dir, "package.json"),
+				message: `pi.extensions 指向包外路径: ${JSON.stringify(declaredPath)}（解析为 ${abs}）——代码入口必须落在包目录内`,
+			});
+			continue;
+		}
+		paths.push(abs);
 	}
 	return { hasCode: paths.length > 0, extensionEntryPaths: paths };
 }
@@ -484,8 +518,10 @@ function validateInPackRefs(dir: string, packName: string, entries: CollectionEn
 }
 
 /**
- * 内核保留表白名单（卡包 SQL 静态扫描豁免名单）。卡包 SQL 不应写这些表——
- * 写了也报错（表归属内核，多包/内核语义由 core 管理）。
+ * 内核保留表名（卡包 SQL 不得触及）。表归属内核，多包/内核语义由 core 管理。
+ * 扫描方式见 findKernelTableRefs：**全文本标识符匹配**，不枚举动词——任何动词
+ * （DROP / DELETE / UPDATE / ALTER / CREATE INDEX ... ON / CREATE TRIGGER ... ON）
+ * 引用这些表名都会被拦下。
  */
 export const KERNEL_TABLE_WHITELIST: readonly string[] = [
 	"clock",
@@ -506,15 +542,119 @@ export const KERNEL_TABLE_WHITELIST: readonly string[] = [
 ];
 
 const SQL_IDENT = `[A-Za-z_][A-Za-z0-9_]*|"[^"]+"|\`[^\`]+\`|\\[[^\\]]+\\]`;
-const CREATE_TABLE_RE = new RegExp(`CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${SQL_IDENT})`, "gi");
-const INSERT_INTO_RE = new RegExp(`INSERT\\s+INTO\\s+(${SQL_IDENT})`, "gi");
+/**
+ * 写动作 / DDL 语句中的「表名位置」：动词之后紧跟的标识符即被操作的表。
+ * 刻意不含 SELECT / FROM / JOIN —— 那是只读，且 FROM 后可能是 CTE 名（CTE 不要求包名前缀，
+ * 扫了会假阳性拒掉合法卡包）。内核保留表不受此限制，走 findKernelTableRefs 的全文本扫描。
+ */
+const WRITE_TARGET_RES: readonly RegExp[] = [
+	// CREATE [TEMP|VIRTUAL] TABLE [IF NOT EXISTS] <t>
+	new RegExp(`\\bCREATE\\s+(?:TEMP(?:ORARY)?\\s+|VIRTUAL\\s+)?TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${SQL_IDENT})`, "gi"),
+	// INSERT [OR ...] INTO / REPLACE INTO <t>（[^;] 容忍 OR REPLACE 之类修饰，但不跨语句）
+	new RegExp(`\\b(?:INSERT|REPLACE)\\b[^;]*?\\bINTO\\s+(${SQL_IDENT})`, "gi"),
+	// DROP TABLE [IF EXISTS] <t>
+	new RegExp(`\\bDROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?(${SQL_IDENT})`, "gi"),
+	// ALTER TABLE <t>
+	new RegExp(`\\bALTER\\s+TABLE\\s+(${SQL_IDENT})`, "gi"),
+	// DELETE FROM <t>
+	new RegExp(`\\bDELETE\\s+FROM\\s+(${SQL_IDENT})`, "gi"),
+	// UPDATE [OR ...] <t>
+	new RegExp(`\\bUPDATE\\s+(?:OR\\s+[A-Za-z]+\\s+)?(${SQL_IDENT})`, "gi"),
+];
 
 /** 去 SQL 标识符引号（"name" / `name` / [name]）。 */
 function stripSqlIdent(raw: string): string {
 	return raw.replace(/^["`\[]|["`\]]$/g, "");
 }
 
-/** 静态扫描 db/schema.sql + db/seed.sql 文本：表名须 `<包名>_` 前缀；写内核表即报错。 */
+/** 正则元字符转义（内核表名来自常量数组；转义是防它日后被改成含元字符的名字）。 */
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * 剥掉 SQL 注释（`-- ...` / 斜杠星块注释）与字符串字面量（`'...'`，`''` 为转义），
+ * 只留会被执行的结构部分；三类替换都保留词边界（用空格占位）。
+ *
+ * 为什么必需：注释与字符串里的表名**不会被执行**，不是引用。
+ *   - 不剥注释会假阳性：`tavernpi-pack init` 生成的骨架 schema.sql 说明注释里就写着
+ *     「所有表名 / world_state 键必须以 <包名>_ 前缀开头」，把作者自己的起点判成违规；
+ *   - 不剥字符串会把数据当表名：`INSERT INTO probe_pack_log VALUES ('DELETE FROM turn_log')`
+ *     里的 turn_log 只是数据值。
+ * 单遍状态机（而非先剥注释再剥字符串）：`--` 可能出现在字符串里、`'` 可能出现在注释里，
+ * 分两遍会互相误伤。
+ */
+function stripSqlNoise(sql: string): string {
+	let out = "";
+	let i = 0;
+	while (i < sql.length) {
+		const ch = sql[i]!;
+		// 行注释：吞到行尾（换行本身保留）
+		if (ch === "-" && sql[i + 1] === "-") {
+			while (i < sql.length && sql[i] !== "\n") i++;
+			continue;
+		}
+		// 块注释：吞到闭合（未闭合则吞到结尾）
+		if (ch === "/" && sql[i + 1] === "*") {
+			i += 2;
+			while (i < sql.length && !(sql[i] === "*" && sql[i + 1] === "/")) i++;
+			i += 2;
+			out += " ";
+			continue;
+		}
+		// 字符串字面量：吞到配对的单引号（'' 是转义的单引号）
+		if (ch === "'") {
+			i++;
+			while (i < sql.length) {
+				if (sql[i] === "'") {
+					if (sql[i + 1] === "'") {
+						i += 2;
+						continue;
+					}
+					i++;
+					break;
+				}
+				i++;
+			}
+			out += " ";
+			continue;
+		}
+		out += ch;
+		i++;
+	}
+	return out;
+}
+
+/**
+ * 内核保留表被引用到的名字（按白名单顺序，去重）。
+ *
+ * 为什么是「全文本标识符扫描」而不是「动词 + 表名」：能改写一张表的 SQL 动词是开放集合
+ * （DROP / DELETE / UPDATE / ALTER / CREATE INDEX ... ON / CREATE TRIGGER ... ON / CREATE VIEW ...），
+ * 枚举必然漏——旧实现只认 CREATE TABLE 与 INSERT INTO，`DELETE FROM turn_log;` 因此静默通过校验，
+ * 而 turn_log 正是「数据库才是事实」的载体。
+ * 反过来，内核表名是**有限的已知集合**，所以反向扫描既完整、又不依赖动词覆盖面。
+ * 词边界（前后非 [A-Za-z0-9_]）保证 `shouling_events` / `clockwork` 这类自建名不误报。
+ * 代价：卡包把内核表名用作列名/别名也会被拦——刻意的保守，改名即可。
+ */
+function findKernelTableRefs(sql: string): string[] {
+	return KERNEL_TABLE_WHITELIST.filter((table) =>
+		new RegExp(`(?<![A-Za-z0-9_])${escapeRegExp(table)}(?![A-Za-z0-9_])`, "i").test(sql),
+	);
+}
+
+/** 写动作 / DDL 语句引用的表名（去重）。 */
+function collectWriteTargets(sql: string): Set<string> {
+	const tables = new Set<string>();
+	for (const re of WRITE_TARGET_RES) {
+		for (const m of sql.matchAll(re)) {
+			const raw = m[1];
+			if (raw !== undefined) tables.add(stripSqlIdent(raw));
+		}
+	}
+	return tables;
+}
+
+/** 静态扫描 db/schema.sql + db/seed.sql：引用内核保留表即报错；自建表名须 `<包名>_` 前缀。 */
 function scanSqlNamespace(dir: string, packName: string, issues: PackIssue[]): void {
 	const files: Array<{ path: string; required: boolean }> = [
 		{ path: join(dir, "db", "schema.sql"), required: true },
@@ -532,14 +672,18 @@ function scanSqlNamespace(dir: string, packName: string, issues: PackIssue[]): v
 			issues.push({ file: path, message: `读取失败: ${(err as Error).message}` });
 			continue;
 		}
-		const tables = new Set<string>();
-		for (const m of sql.matchAll(CREATE_TABLE_RE)) tables.add(stripSqlIdent(m[1]!));
-		for (const m of sql.matchAll(INSERT_INTO_RE)) tables.add(stripSqlIdent(m[1]!));
-		for (const table of tables) {
-			if (KERNEL_TABLE_WHITELIST.includes(table)) {
-				issues.push({ file: path, message: `卡包 SQL 不应写内核保留表: ${table}` });
-				continue;
-			}
+		// 0. 先剥注释与字符串字面量 —— 那是**不执行**的部分，其中的表名不是引用
+		//    （骨架 schema.sql 的说明注释里就提到 world_state，不剥会误判作者自己的起点）。
+		const code = stripSqlNoise(sql);
+		// 1. 内核保留表：全文本标识符扫描 —— 任何动词都拦得住（见 findKernelTableRefs）。
+		const kernelRefs = new Set(findKernelTableRefs(code));
+		for (const table of kernelRefs) {
+			issues.push({ file: path, message: `卡包 SQL 不应写内核保留表: ${table}` });
+		}
+		// 2. 命名空间前缀：写动作 / DDL 位置的表名（内核表已在上一步报过，不重复报）。
+		//    比对前统一小写——SQLite 表名不区分大小写，否则 `TURN_LOG` 会绕过内核去重、重复报两条。
+		for (const table of collectWriteTargets(code)) {
+			if (kernelRefs.has(table.toLowerCase())) continue;
 			if (!table.startsWith(`${packName}_`)) {
 				issues.push({
 					file: path,
@@ -574,7 +718,7 @@ export function loadPack(dir: string): WorldPack {
 
 	const story = parseStoryMeta(resolvedDir, issues);
 	const entries = loadCollection(resolvedDir, issues);
-	const { hasCode, extensionEntryPaths } = detectCode(resolvedDir, pkg);
+	const { hasCode, extensionEntryPaths } = detectCode(resolvedDir, pkg, issues);
 
 	if (name !== null) {
 		for (const entry of entries) entry.pack = name;

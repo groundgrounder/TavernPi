@@ -8,7 +8,10 @@ import { DatabaseSync } from "node:sqlite";
 import { migrate } from "./migrate.ts";
 import { DbReader } from "./reader.ts";
 import { DbWriter } from "./writer.ts";
-import { DEFAULT_STORY_CLOCK } from "./types.ts";
+import { DEFAULT_STORY_CLOCK, SQLITE_BUSY_TIMEOUT_MS } from "./types.ts";
+
+/** sessionId 安全字符集（盘上故事目录名 = sessionId）。故事目录扫描与 storyDbPath 共用同一判据。 */
+export const SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
 
 /** 默认故事根目录 ~/.tavernpi/stories。可注入替换（测试用临时目录）。 */
 export function defaultStoriesRoot(): string {
@@ -17,7 +20,7 @@ export function defaultStoriesRoot(): string {
 
 /** 故事 DB 路径：<storiesRoot>/<session-id>/story.db。sessionId 限安全字符集（防路径穿越）。 */
 export function storyDbPath(storiesRoot: string, sessionId: string): string {
-	if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) {
+	if (!SESSION_ID_RE.test(sessionId)) {
 		throw new Error(`非法 sessionId: ${JSON.stringify(sessionId)}（仅允许 [A-Za-z0-9_-]）`);
 	}
 	return join(storiesRoot, sessionId, "story.db");
@@ -51,13 +54,14 @@ export class StoryDb {
 }
 
 /**
- * 打开（或创建）故事 DB：WAL 模式、外键开启、执行 core migration、种入默认 clock。
+ * 打开（或创建）故事 DB：WAL 模式、外键开启、busy_timeout、执行 core migration、种入默认 clock。
  */
 export function openStoryDb(dbPath: string): StoryDb {
 	mkdirSync(dirname(dbPath), { recursive: true });
 	const db = new DatabaseSync(dbPath);
 	db.exec("PRAGMA journal_mode = WAL");
 	db.exec("PRAGMA foreign_keys = ON");
+	db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
 	migrate(db);
 	ensureDefaultClock(db);
 	return new StoryDb(dbPath, db);

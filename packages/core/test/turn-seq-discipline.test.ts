@@ -6,14 +6,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { cleanupTempDir, makeTempDir } from "./helpers.ts";
 import { openStoryDb, storyDbPath } from "../src/db/story-db.ts";
-import { DEFAULT_STORY_CLOCK } from "../src/db/types.ts";
+import { DEFAULT_STORY_CLOCK, SQLITE_BUSY_TIMEOUT_MS } from "../src/db/types.ts";
 
 function openTempStory(dir: string, name = "story.db") {
 	const story = openStoryDb(join(dir, name));
 	return story;
 }
 
-test("openStoryDb：WAL 模式 + 外键开启 + 默认 clock 种入", () => {
+test("openStoryDb：WAL 模式 + 外键开启 + busy_timeout + 默认 clock 种入", () => {
 	const dir = makeTempDir();
 	try {
 		const story = openTempStory(dir);
@@ -21,10 +21,47 @@ test("openStoryDb：WAL 模式 + 外键开启 + 默认 clock 种入", () => {
 		assert.equal(journalMode.toLowerCase(), "wal");
 		const fk = (story.rawDb.prepare("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys;
 		assert.equal(fk, 1);
+		// 同一库文件会有多个写者（takeSnapshot 为 snapshots.db 另开连接；内核可被同进程嵌入），
+		// 没有 busy_timeout 时第二个写者立即 BUSY 而不等待。
+		const busyTimeout = (story.rawDb.prepare("PRAGMA busy_timeout").get() as { timeout: number }).timeout;
+		assert.equal(busyTimeout, SQLITE_BUSY_TIMEOUT_MS);
 		assert.deepEqual({ ...story.reader.getClock() }, DEFAULT_STORY_CLOCK);
 		story.close();
 	} finally {
 		cleanupTempDir(dir);
+	}
+});
+
+// BEGIN IMMEDIATE 的可观测差异：事务起点即持写锁，**哪怕事务体里一条写语句都没有**。
+// deferred BEGIN 在 WAL 下先取读快照、到写语句才升级为写，只读事务体不持写锁——多写者场景下
+// busy_timeout 于是形同虚设（升级时撞 SQLITE_BUSY_SNAPSHOT，busy_timeout 对它无效，只能整事务重试）。
+// 判据用「另一条连接在 a 持事务期间尝试写」直接观测锁，而不是查 SQL 文本。
+test("DbWriter.transaction 用 BEGIN IMMEDIATE：只读事务体也持写锁，并发写者被挡", () => {
+	const root = makeTempDir();
+	try {
+		const dbPath = join(root, "s", "story.db");
+		const a = openStoryDb(dbPath);
+		const b = openStoryDb(dbPath);
+		// b 关掉忙等：被挡时立即抛 BUSY，而不是陪 a 等满 5 秒超时（否则这条测试会卡 5 秒）。
+		b.rawDb.exec("PRAGMA busy_timeout = 0");
+		try {
+			let blocked = false;
+			a.writer.transaction(() => {
+				try {
+					// 探针用 PRAGMA user_version：它是写操作，又不依赖任何表的 schema，
+					// 不会因约束/NOT NULL 失败而让断言假绿。
+					b.rawDb.exec("PRAGMA user_version = 1");
+				} catch {
+					blocked = true;
+				}
+			});
+			assert.equal(blocked, true, "a 的写事务应挡住 b 的写（IMMEDIATE 在起点取写锁）");
+		} finally {
+			b.close();
+			a.close();
+		}
+	} finally {
+		cleanupTempDir(root);
 	}
 });
 

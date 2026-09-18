@@ -1,7 +1,7 @@
 // CLI 面向用户的文案表。
 //
 // 现状：**CLI 走英文**（EN）。ZH 是同一批文案的中文版，**留档给未来的 GUI**
-// （tavern-studio）复用——那里的用户不是开发者，中文才是合适的默认。
+// （tavern studio / packages/studio）复用——那里的用户不是开发者，中文才是合适的默认。
 //
 // 纪律：两侧 key 必须一一对应。改 EN 时同步改 ZH，否则 GUI 侧会缺文案。
 // 只放**面向用户**的字符串；代码注释、字段名、命令名、参数名不进这里。
@@ -246,7 +246,7 @@ export const EN = {
 	restoreFailed: (err: string) => `failed: ${err}`,
 	restoreUnknown: "unknown error",
 	restoreOk: (turn: number, entry: string) => `turn ${turn} (entry ${entry})`,
-	restoreEmptyFallback: "ok (empty-DB fallback)",
+	restoreEmptyFallback: "empty-DB fallback — story data reset to initial state (no snapshot on this branch)",
 	restoreClock: (time: string, events: number) => `${time} · ${events} events`,
 
 	// ---- 中断与退出 ----

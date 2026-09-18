@@ -8,6 +8,7 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
 import type { StoryDb } from "../db/story-db.ts";
+import { SQLITE_BUSY_TIMEOUT_MS } from "../db/types.ts";
 
 export interface SnapshotRecord {
 	turn_seq: number;
@@ -38,6 +39,7 @@ export class SnapshotsDb {
 		this.path = dbPath;
 		this.db = new DatabaseSync(dbPath);
 		this.db.exec("PRAGMA journal_mode = WAL");
+		this.db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
 		this.db.exec(SNAPSHOTS_SCHEMA_SQL);
 	}
 

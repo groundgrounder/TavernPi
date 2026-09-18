@@ -14,6 +14,20 @@ export const DEFAULT_STORY_CLOCK: StoryClock = {
 	granularity: "elastic",
 };
 
+/**
+ * 连接级忙等上限（毫秒）；story.db 与 snapshots.db 都在打开时设置。
+ *
+ * 为什么需要：本内核是可供同进程嵌入的库（studio 同宿主），而 takeSnapshot 会为
+ * snapshots.db **另开一条连接**（用完即关），常开的 snapshotsDb 连接同时也在——同一库文件
+ * 存在多个写者；SnapshotsDb 构造里还要跑 CREATE TABLE IF NOT EXISTS（写操作）。
+ * 不设 busy_timeout 时第二个写者立即拿到 SQLITE_BUSY，而不是等待。
+ *
+ * 为什么写事务还得配 BEGIN IMMEDIATE：WAL 下 deferred BEGIN 先取读快照、到写语句才升级为写，
+ * 此时若别人已提交写，SQLite 返回 SQLITE_BUSY_SNAPSHOT —— **busy_timeout 对它不生效**，
+ * 只能整事务回滚重试。IMMEDIATE 在事务起点就取写锁，busy_timeout 才真正起作用。
+ */
+export const SQLITE_BUSY_TIMEOUT_MS = 5_000;
+
 /** 每轮时间推进记录。span_days = 本轮推进的故事天数（可空；一切时间运算以此为准）。 */
 export interface TimeLogRow {
 	turn_seq: number;

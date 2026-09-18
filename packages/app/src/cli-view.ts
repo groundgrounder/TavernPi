@@ -531,8 +531,11 @@ export function renderRestore(
 		verdict = EN.restoreOk(result.restoredTurnSeq, result.restoredEntryId ?? "");
 		tone = "ok";
 	} else {
+		// 走到这里 = 空库兜底（resetToEmptyStoryDb）：删掉 story.db 后重建，已落库的事实
+		// （NPC 关系 / 地点 / 物品 / 时间线）全部归零。这是**破坏性**结果，标成 ok 绿色
+		// 会让用户读成「一切正常」——用 warn 让它在终端里跳出来。
 		verdict = EN.restoreEmptyFallback;
-		tone = "ok";
+		tone = "warn";
 	}
 	return [
 		ui.heading(EN.restoreTitle),
