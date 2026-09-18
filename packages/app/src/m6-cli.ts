@@ -43,6 +43,7 @@ import {
 	openSnapshotsDb,
 	openStoryDb,
 	PackCache,
+	packMigrations,
 	resolvePromptChain,
 	resolveStoryMode,
 	setStoryPromptOverride,
@@ -289,8 +290,8 @@ function clockText(runtime: StoryRuntime): string | undefined {
  * （正式正文只从 TurnResult.narrativeText 打一次，见 cli-view 的 renderTurn）。
  * 失败原样抛出（调用方决定怎么呈现），活动行在 finally 里一定收掉。
  *
- * 已知边界：内核与 pi SDK 有零星直写 console.warn 的地方（如未配模型时的告警），
- * 它们绕过 ui，会在活动行上留半行残迹——本层够不着，不为它去改全局 console。
+ * 已知边界：仅剩 pi SDK **自身**的直写（我们够不着，不为它去改全局 console）。tavernpi 内核
+ * 的告警已全部收口到 onWarning → ui.warn（见 core/src/warn.ts 的 emitWarning），不再撕裂活动行。
  */
 async function runWithFeedback(
 	runtime: StoryRuntime,
@@ -351,7 +352,11 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 	const newStoryDir = join(ctx.storiesRoot, newSessionId);
 	ui.line(ui.note(EN.branchedSession(newSessionId, newFile ?? EN.unset), "info"));
 
-	const forkResult = forkStoryDb(oldStoryState.snapshotsDb, chain, newStoryDir);
+	// 从故事开头 fork（空链/无快照）时新 story.db 由 core 迁移新建——必须一并重放卡包迁移，
+	// 否则 fork 产物的库只有内核表（包内 `<包名>_*` 表与 seed 行缺失）。取包失败沿用 cache 的
+	// 报错路径（与 /packs 一致），不另设降级；此时旧故事尚未 dispose，未受影响。
+	const forkPackMigrations = ctx.packs === undefined ? [] : packMigrations(ctx.packs.cache.getPacks().packs);
+	const forkResult = forkStoryDb(oldStoryState.snapshotsDb, chain, newStoryDir, forkPackMigrations);
 	ui.line(
 		ui.note(
 			EN.forkedStoryDb(
@@ -377,7 +382,7 @@ async function cmdFork(arg: string, runtime: StoryRuntime, ctx: CliCtx): Promise
 		storyDb: forkResult.storyDb,
 		snapshotsDb: forkResult.snapshotsDb,
 	};
-	ctx.eventLog = createPipelineEventLog(join(newStoryDir, "pipeline-events.jsonl"));
+	ctx.eventLog = createPipelineEventLog(join(newStoryDir, "pipeline-events.jsonl"), (m) => ui.warn(m));
 	const newRuntime = await createStoryRuntime({
 		cwd: ctx.cwd,
 		sessionManager,
@@ -437,7 +442,7 @@ function attachInteraction(runtime: StoryRuntime, ctx: CliCtx): void {
 async function rebuildRuntime(runtime: StoryRuntime, ctx: CliCtx): Promise<StoryRuntime> {
 	const { sessionManager, storyState } = runtime;
 	runtime.dispose();
-	ctx.eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"));
+	ctx.eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"), (m) => ctx.ui.warn(m));
 	const rebuilt = await createStoryRuntime({
 		cwd: ctx.cwd,
 		sessionManager,
@@ -888,7 +893,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 		...(packDirs.length > 0 ? { packDirs } : {}),
 	};
 	const modelRuntime = await ModelRuntime.create();
-	const eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"));
+	const eventLog = createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"), (m) => ui.warn(m));
 
 	const rl = createInterface({
 		input: process.stdin,

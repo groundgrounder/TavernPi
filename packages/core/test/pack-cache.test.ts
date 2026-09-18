@@ -121,7 +121,7 @@ test("PackCache：多目录共同跟踪；单包变化触发整体重载", () =>
 	const root = makeTempDir();
 	try {
 		const a = createPack(root, { name: "a", entries: [{ type: "characters", id: "x", yaml: characterEntry("A甲") }] });
-		const b = createPack(root, { name: "b", entries: [{ type: "characters", id: "y", yaml: characterEntry("B乙") }] });
+		createPack(root, { name: "b", entries: [{ type: "characters", id: "y", yaml: characterEntry("B乙") }] });
 		const cache = new PackCache([a, join(root, "b")]);
 		assert.equal(cache.getPacks().packs.length, 2);
 

@@ -208,18 +208,6 @@ export function createAssistTools(viewFactory: () => DbView, opts: AssistToolOpt
 // 会话辅助
 // ---------------------------------------------------------------------------
 
-/** message 条目文本（content 数组或纯字符串）；assist 会话消息同形。 */
-function messageText(message: { role?: string; content?: unknown } | undefined): string {
-	if (!message) return "";
-	if (Array.isArray(message.content)) {
-		return (message.content as Array<{ type: string; text?: string }>)
-			.filter((c) => c.type === "text")
-			.map((c) => c.text ?? "")
-			.join("");
-	}
-	return typeof message.content === "string" ? message.content : "";
-}
-
 /** 最后一个非空 assistant 文本回复。 */
 function extractLastAssistantReply(messages: ReadonlyArray<{ role: string; content?: unknown }>): string | undefined {
 	for (const msg of [...messages].reverse()) {

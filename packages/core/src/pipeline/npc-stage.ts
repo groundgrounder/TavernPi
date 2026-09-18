@@ -33,6 +33,7 @@ import {
 	type SubagentUsage,
 } from "../subagent/runtime.ts";
 import type { PipelineEventLog } from "./events.ts";
+import { emitWarning } from "../warn.ts";
 
 // ---------------------------------------------------------------------------
 // 在场预演 schema（token 预算机械强制——M3 定案值）
@@ -176,6 +177,8 @@ export interface NpcStageOptions {
 	modelRuntime?: ModelRuntime;
 	prompts?: PromptLayerDirs;
 	eventLog?: PipelineEventLog;
+	/** 降级告警出口（缺省 console.warn；CLI 传入以收口到活动行，避免撕裂提示行）。 */
+	onWarning?: (message: string) => void;
 	/** 每 NPC/每批重试上限（默认 2）。 */
 	maxAttempts?: number;
 	/** 缺省 runSubagent；测试/验收故障注入通道。 */
@@ -339,6 +342,7 @@ async function runOneRehearsal(
 				outputTool: REHEARSAL_TOOL,
 				model: opts.model,
 				modelRuntime: opts.modelRuntime,
+				onWarning: opts.onWarning,
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;
@@ -453,6 +457,7 @@ export async function runOffscreenBatch(npcs: NpcRow[], turnSeq: number, opts: N
 				outputTool: OFFSCREEN_TOOL,
 				model: opts.model,
 				modelRuntime: opts.modelRuntime,
+				onWarning: opts.onWarning,
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;
@@ -477,7 +482,10 @@ export async function runOffscreenBatch(npcs: NpcRow[], turnSeq: number, opts: N
 		eventLogRecord(opts.eventLog, turnSeq, attempt, attemptStartedAt, userPrompt, outputChars, usage, false, error);
 		userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
 	}
-	console.warn(`[npc_offscreen] 离线批量推演失败（${maxAttempts} 次重试耗尽，已丢弃本轮 deltas）: ${lastError}`);
+	emitWarning(
+		opts.onWarning,
+		`[npc_offscreen] 离线批量推演失败（${maxAttempts} 次重试耗尽，已丢弃本轮 deltas）: ${lastError}`,
+	);
 	return [];
 }
 

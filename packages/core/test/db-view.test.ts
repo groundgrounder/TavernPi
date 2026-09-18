@@ -326,7 +326,7 @@ test("filter=none 全透传：NpcComposite 不滤、relations 不滤、world_sta
 test("isNpcCardVisible：card_ref 对应行在集合内即可见，未 seed 或越集不可见", () => {
 	const dir = makeTempDir();
 	try {
-		const { story, player, ally, local, stranger } = setupAnchorStory(dir);
+		const { story } = setupAnchorStory(dir);
 		const view = createDbView(story.reader, "user-related");
 		const set = view.relatedSet;
 

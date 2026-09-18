@@ -62,6 +62,7 @@ import { loadPrompt, renderPlaceholders, type PromptLayerDirs } from "../prompts
 import type { SubagentResult, SubagentRunOptions } from "../subagent/runtime.ts";
 import { buildCollectionInjection } from "../pack/matcher.ts";
 import type { PackCache } from "../pack/cache.ts";
+import { packMigrations } from "../pack/seed.ts";
 import { runDataStage, type DataStageOptions, type DataStageOutcome } from "./data-stage.ts";
 import {
 	computeScenePlan,
@@ -104,6 +105,7 @@ import {
 	type PromptChainInfo,
 } from "../prompts/loader.ts";
 import type { PipelineEventLog } from "./events.ts";
+import { emitWarning } from "../warn.ts";
 import { renderDbSummary } from "./db-summary.ts";
 import {
 	assertCanSwitchMode,
@@ -667,6 +669,16 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			storyState.storyDb = db;
 		},
 		getEntryAncestors: (entryId) => buildAncestorChain(sessionManager.getEntries(), entryId),
+		// 空库兜底（重做开头）会删库重建：必须重放卡包 `<包名>_schema` / `_seed`，否则包内表与
+		// seed 行永久缺失。迁移在删库前现取——取包失败即中止本次恢复，旧库不动（响亮失败）。
+		// opts.packs 缺省（无包故事 / 库消费者未接卡包）→ 空数组 = 只有内核表的初始态。
+		getExtraMigrations: () => {
+			const packOptions = opts.packs;
+			if (packOptions === undefined) return [];
+			const loaded = packOptions.cache.getPacks();
+			for (const message of loaded.warnings) onWarning?.(message);
+			return packMigrations(loaded.packs);
+		},
 		onWarning,
 	});
 
@@ -707,6 +719,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		modelRuntime,
 		prompts: runtimePromptDirs,
 		eventLog,
+		onWarning,
 		executor: storyOpts.executor,
 	};
 
@@ -757,6 +770,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 						modelRuntime,
 						prompts: runtimePromptDirs,
 						eventLog,
+						onWarning,
 						executor: opts.chapterSummary?.executor,
 						maxAttempts: opts.chapterSummary?.maxAttempts,
 					},
@@ -869,9 +883,9 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		// 没有真实模型可恢复，于是必然回退到默认模型——预期行为，不影响运行。
 		// 在 ~/.tavernpi/settings.json 配好 models.narrator 后，sessionOptions.model 有值，
 		// SDK 不再走恢复分支，这条提示即消失。
-		console.warn(`[warn] ${created.modelFallbackMessage}`);
-		console.warn(
-			`  （新建故事时这是开场白占位模型导致的预期回退；配好 ~/.tavernpi/settings.json 的 models.narrator 即消失）`,
+		emitWarning(
+			onWarning,
+			`[warn] ${created.modelFallbackMessage}\n  （新建故事时这是开场白占位模型导致的预期回退；配好 ~/.tavernpi/settings.json 的 models.narrator 即消失）`,
 		);
 	}
 
@@ -983,6 +997,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				modelRuntime,
 				prompts: runtimePromptDirs,
 				eventLog,
+				onWarning,
 				maxAttempts: npcOpts.maxAttempts,
 				executor: npcOpts.executor,
 			};
@@ -1120,6 +1135,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 						modelRuntime,
 						prompts: runtimePromptDirs,
 						eventLog,
+						onWarning,
 						maxAttempts: stylizeOpts.maxAttempts,
 						executor: stylizeOpts.executor,
 					},
@@ -1173,6 +1189,7 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				modelRuntime,
 				prompts: runtimePromptDirs,
 				eventLog,
+				onWarning,
 				maxAttempts: maxDataAttempts,
 				executor: opts.dataExecutor,
 				strictDrop: releasedWithWarnings,

@@ -7,7 +7,7 @@ export interface StoryClock {
 	granularity: string;
 }
 
-/** 默认时钟初值。历法/粒度由卡包配置，默认弹性时间；具体初值待 M2 校准。 */
+/** 默认时钟初值。历法/粒度由卡包 story.yaml 配置（createStory 消费），默认弹性时间。 */
 export const DEFAULT_STORY_CLOCK: StoryClock = {
 	current_time: "0000-01-01",
 	calendar: "default",
@@ -38,7 +38,7 @@ export interface EventRow {
 	created_entry_id: string | null;
 }
 
-/** 故事阶段/幕。ended_turn 为 NULL 表示未结束。status 取值待 M2 校准。 */
+/** 故事阶段/幕。ended_turn 为 NULL 表示未结束。status 是开放词汇（无枚举约束）。 */
 export interface PhaseRow {
 	id: number;
 	name: string;
@@ -97,7 +97,7 @@ export interface LocationLogRow {
 	to_location_name: string | null;
 }
 
-/** NPC。status: alive/dead/absent...（开放集合，待 M2 校准）。current_location 引用 locations。 */
+/** NPC。status: 开放集合（alive/dead/absent...，无枚举约束）。current_location 引用 locations。 */
 export interface NpcRow {
 	id: number;
 	name: string;
@@ -108,7 +108,7 @@ export interface NpcRow {
 	current_location_name: string | null;
 }
 
-/** 性格特征，可演化 —— (npc_id, trait, turn_seq) 保留每次演化。weight 语义待 M2 校准。 */
+/** 性格特征，可演化 —— (npc_id, trait, turn_seq) 保留每次演化。weight 由 data subagent 按提示词判断（schema 不约束数值域）。 */
 export interface NpcTraitRow {
 	npc_id: number;
 	trait: string;
@@ -139,7 +139,7 @@ export function renderMemoryText(
 	return tags.length === 0 ? memory.content : `${memory.content}（${tags.join(" · ")}）`;
 }
 
-/** 记忆；salience 供检索排序（默认 0，衰减语义待 M2 校准）。
+/** 记忆；salience 供检索排序（默认 0；衰减由 data subagent 判断，非内核计算）。
  *  source = 知识来源（可空 = 未标注）；event_id = 所涉事件引用（可空；耳闻版本允许与事件不符）。 */
 export interface NpcMemoryRow {
 	id: number;

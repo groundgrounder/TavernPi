@@ -1,10 +1,17 @@
 // db 工具集（pi ToolDefinition，typebox 参数 schema）。
-// 查询：get_clock / query_events / get_npc；写入：write_event / advance_clock。
+// 查询：get_clock / query_events / get_npc；写入：write_event / advance_clock / move_to。
+//
+// ⚠ M1 遗留验证面，**当前生产路径不挂载**：createDbTools 在 packages/{app,tools} 与
+//   pipeline 里没有任何消费者（只有 core/test 直接调用）。主叙事的写者是 data subagent
+//   经 changeset.applyChangeset（唯一写者纪律，见 pipeline/changeset.ts）；运行期也不给
+//   主叙事挂任何工具（pipeline/runtime.ts 的零工具形态）。
+//   因此这里的写入工具是**绕过 changeset 的第二条写路径**——若将来要启用，需先让它
+//   经 changeset 校验（否则 turn_seq 纪律与语义校验都会被跳过）。
+//   保留原因：它仍被测试用作 turn_seq 纪律的最小验证面。要不要归档由项目定。
 //
 // turn_seq 暴露取舍：写入工具**不向模型暴露 turn_seq**——由 createDbTools 注入的
 // getCurrentTurnSeq() 提供（M2 起由 turn pipeline 编排器注入当前轮）。
 // 未注入时写入工具执行即抛错（fail-loud），避免静默落错轮次；查询工具不受影响。
-// M2 data subagent 才是主要写者；本阶段工具集是纪律链路的最小验证面。
 
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";

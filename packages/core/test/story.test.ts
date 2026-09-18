@@ -9,7 +9,6 @@ import {
 	characterEntry,
 	cleanupTempDir,
 	createPack,
-	entryYaml,
 	locationEntry,
 	makeTempDir,
 } from "./fixtures/pack-fixtures.ts";

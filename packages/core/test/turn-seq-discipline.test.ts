@@ -1,7 +1,7 @@
 // turn_seq 纪律与读写层单测：缺参报错、clock 单例、写入后可读回、目录布局。
 
 import assert from "node:assert/strict";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { cleanupTempDir, makeTempDir } from "./helpers.ts";

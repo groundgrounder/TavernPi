@@ -434,7 +434,7 @@ test("loadPacks：多包各自的问题一次收集合并抛出", () => {
 			name: "pack_a",
 			entries: [{ type: "characters", id: "a", yaml: entryYaml({ type: "character", name: "甲", bogus: 1 }) }],
 		});
-		const b = createPack(root, {
+		createPack(root, {
 			name: "pack_b",
 			schemaSql: "CREATE TABLE bad (id INTEGER);\n",
 		});

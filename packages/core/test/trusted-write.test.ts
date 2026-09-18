@@ -9,7 +9,7 @@ import { cleanupTempDir, makeTempDir } from "./helpers.ts";
 import { openSnapshotsDb, openStoryDb, snapshotsDbPath, storyDbPath, writeStoryMeta } from "../src/index.ts";
 import { createStoryRuntime, getInteractionBroker, type StoryRuntime, type StoryState } from "../src/pipeline/runtime.ts";
 import { loadPrompt } from "../src/prompts/loader.ts";
-import type { SubagentResult, SubagentRunOptions, SubagentUsage } from "../src/subagent/runtime.ts";
+import type { SubagentResult, SubagentUsage } from "../src/subagent/runtime.ts";
 
 const ZERO: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, costTotal: 0 };
 

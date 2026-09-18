@@ -45,6 +45,8 @@ export interface DataStageOptions {
 	modelRuntime?: ModelRuntime;
 	prompts?: PromptLayerDirs;
 	eventLog?: PipelineEventLog;
+	/** 告警出口（缺省 console.warn；编排层传入以收口到 CLI 活动行）。 */
+	onWarning?: (message: string) => void;
 	/** 重试上限（默认 3）。 */
 	maxAttempts?: number;
 	/** 缺省 runSubagent；测试/验收故障注入通道。 */
@@ -131,6 +133,7 @@ export async function runDataStage(opts: DataStageOptions): Promise<DataStageOut
 				outputTool: OUTPUT_TOOL,
 				model: opts.model,
 				modelRuntime: opts.modelRuntime,
+				onWarning: opts.onWarning,
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;

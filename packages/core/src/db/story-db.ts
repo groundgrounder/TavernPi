@@ -63,7 +63,7 @@ export function openStoryDb(dbPath: string): StoryDb {
 	return new StoryDb(dbPath, db);
 }
 
-/** 种入默认 clock 单例（幂等：仅当 clock 为空）。初值见 DEFAULT_STORY_CLOCK，待 M2 校准。
+/** 种入默认 clock 单例（幂等：仅当 clock 为空）。初值见 DEFAULT_STORY_CLOCK；卡包 story.yaml 的 calendar/granularity 可覆盖（createStory 消费），未配置即此默认。
  *  current_time 是 SQLite 关键字（CURRENT_TIME），列名加引号限定。 */
 function ensureDefaultClock(db: DatabaseSync): void {
 	const row = db.prepare("SELECT COUNT(*) AS c FROM clock").get() as { c: number };

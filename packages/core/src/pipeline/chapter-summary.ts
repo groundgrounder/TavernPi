@@ -160,6 +160,8 @@ export interface ChapterSummaryOptions {
 	modelRuntime?: ModelRuntime;
 	prompts?: PromptLayerDirs;
 	eventLog?: PipelineEventLog;
+	/** 告警出口（缺省 console.warn；编排层传入以收口到 CLI 活动行）。 */
+	onWarning?: (message: string) => void;
 	/** 重试上限（默认 2）。 */
 	maxAttempts?: number;
 	/** 缺省 runSubagent；测试/验收故障注入通道。 */
@@ -186,7 +188,6 @@ export async function runChapterSummary(
 	const systemPrompt = loadPrompt("chapter_summary", opts.prompts).content;
 	let userPrompt = buildChapterSummaryUserPrompt(opts.storyDb, input);
 
-	let lastError = "";
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 		const attemptStartedAt = Date.now();
 		let usage: SubagentUsage = ZERO_USAGE;
@@ -201,6 +202,7 @@ export async function runChapterSummary(
 				outputTool: CHAPTER_SUMMARY_TOOL,
 				model: opts.model,
 				modelRuntime: opts.modelRuntime,
+				onWarning: opts.onWarning,
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;
@@ -228,7 +230,6 @@ export async function runChapterSummary(
 		} catch (err) {
 			error = `第 ${attempt} 次执行失败: ${err instanceof Error ? err.message : String(err)}`;
 		}
-		lastError = error;
 		opts.eventLog?.record({
 			ts: new Date().toISOString(),
 			turnSeq: lastTurnSeq(opts.storyDb),

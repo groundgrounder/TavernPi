@@ -100,3 +100,26 @@ test("写失败路径：目标位置非法（父级是普通文件）→ 不抛�
 		cleanupTempDir(dir);
 	}
 });
+
+test("写失败告警：传 onWarning 时不再裸写 stderr（轮中 stderr 写会撕裂 CLI 活动行）", () => {
+	const dir = makeTempDir();
+	const originalWarn = console.warn;
+	let stderrWrites = 0;
+	const warnings: string[] = [];
+	console.warn = () => {
+		stderrWrites++;
+	};
+	try {
+		writeFileSync(join(dir, "blocker"), "占用");
+		const filePath = join(dir, "blocker", "events.jsonl");
+		const log = createPipelineEventLog(filePath, (m) => warnings.push(m));
+		assert.doesNotThrow(() => log.record(eventFixture));
+		assert.doesNotThrow(() => log.record({ ...eventFixture, turnSeq: 2 }));
+		assert.equal(warnings.length, 1, "写失败仅首次告警（去重）");
+		assert.match(warnings[0]!, /\[pipeline-events\] 写入事件日志失败/);
+		assert.equal(stderrWrites, 0, "有 onWarning 时不得再写 console.warn");
+	} finally {
+		console.warn = originalWarn;
+		cleanupTempDir(dir);
+	}
+});

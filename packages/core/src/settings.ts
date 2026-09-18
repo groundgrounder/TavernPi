@@ -34,7 +34,6 @@ export function defaultSettingsPath(): string {
 }
 
 const MODEL_ROLES = ["narrator", "data", "story", "npc", "stylize", "chapter_summary", "assist"] as const;
-type ModelRole = (typeof MODEL_ROLES)[number];
 
 function isModelRef(value: unknown): value is ModelRef {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {

@@ -20,7 +20,7 @@
 // 需要 auth.json（M0 已配）。结束时清理临时目录。运行：npm run m6:accept。
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -30,7 +30,6 @@ import {
 	createStory,
 	createStoryRuntime,
 	createDbView,
-	defaultGlobalPromptsDir,
 	inheritStoryMeta,
 	loadPrompt,
 	loadSettings,
@@ -42,7 +41,6 @@ import {
 	snapshotsDbPath,
 	storyDbPath,
 	writeStoryMeta,
-	type PromptLayerDirs,
 	type SceneCard,
 	type SnapshotRestoreResult,
 	type StoryMode,
@@ -350,11 +348,9 @@ async function main(): Promise<void> {
 	const checks: Check[] = [];
 	let settings: Parameters<typeof createStoryRuntime>[0]["settings"];
 	let modelRuntime: Parameters<typeof createStoryRuntime>[0]["modelRuntime"];
-	let prompts: PromptLayerDirs;
 	try {
 		({ settings } = loadSettings());
 		modelRuntime = await ModelRuntime.create();
-		prompts = { globalDir: defaultGlobalPromptsDir() };
 	} catch (err) {
 		console.log(`[warn] 模型环境加载失败（A 区确定性可继续；B 区需真实 LLM）: ${String(err)}`);
 		throw err;
@@ -599,10 +595,9 @@ async function main(): Promise<void> {
 				}
 				// 第二次：同意输入 /! 强制，场景卡改为 valid:true（本次判合法）
 				currentCard = validSceneCard({ valid: true });
-				let report: TurnResult | null = null;
 				let err: unknown = null;
 				try {
-					report = await a.runtime.runTurn(input, { force: true });
+					await a.runtime.runTurn(input, { force: true });
 				} catch (e) {
 					err = e;
 				}
@@ -699,7 +694,6 @@ async function main(): Promise<void> {
 
 		// C1a. 章节摘要 compaction：数轮叙事 → /compact → 摘要含章节摘要特征（伏笔标记）；上下文替换；后续连贯
 		{
-			const marker = "青铜钥匙";
 			const settingsManager = SettingsManager.inMemory({
 				defaultProvider: "deepseek",
 				defaultModel: "deepseek-v4-flash",
@@ -828,8 +822,8 @@ async function main(): Promise<void> {
 			});
 			const a = await newM6Runtime(root, { mode: "creation", settings, modelRuntime, settingsManager, seedNpcMemory: "青铜钥匙伏笔" });
 			try {
-				const r1 = await a.runtime.runTurn("我走进王城，向卫兵打听青铜钥匙。");
-				const r2 = await a.runtime.runTurn("我向卫兵借来一盏灯笼。");
+				await a.runtime.runTurn("我走进王城，向卫兵打听青铜钥匙。");
+				await a.runtime.runTurn("我向卫兵借来一盏灯笼。");
 				const assistantBefore = countAssistant(a.sessionManager.getEntries());
 				const eventsBefore = a.storyState.storyDb.reader.listEvents().length;
 				// swipe：重生成最后一个 user 轮次（turn 2）
@@ -933,7 +927,6 @@ async function main(): Promise<void> {
 			try {
 				await a.runtime.runTurn("我走进王城，向卫兵打听青铜钥匙。"); // turn 1
 				await a.runtime.assist.chat("我该怎么推进剧情？"); // 创建 assist 会话#1
-				const sessionsAfterFirst = assistSessions;
 				await a.runtime.runTurn("我向卫兵借来一盏灯笼。"); // turn 2
 				await a.runtime.assist.chat("我该继续追查还是离开？"); // 复用会话#1
 				const sessionsAfterTurn2 = assistSessions;

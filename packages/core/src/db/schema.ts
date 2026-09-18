@@ -1,7 +1,8 @@
 // 核心 schema（全量，严格按文档字段）。
 // snapshots 表不在此处 —— 快照存独立 snapshots.db（M1-P2）。
 // 所有 CREATE TABLE 用 IF NOT EXISTS，保证迁移崩溃后可幂等重跑。
-// 「待 M2 校准」标注处 = 字段取值词汇/语义未在规划定案，由 M2 data subagent 契约校准。
+// 取值词汇多为开放集合：内核 schema 不约束（如 events.type / npcs.status 都是自由文本），
+// 由 data subagent 按提示词填写与演化；受限取值一律用 z.enum 显式约束（见 pipeline/changeset.ts）。
 // v1 = 基础 schema（M1 已交付，已被旧故事库记录在 schema_migrations）；空间基元在 v2
 // （CORE_V2_SPATIAL_SQL + CORE_V2_ALTERS，见 migrate.ts）——既有 v1 库 open 后原地升 v2，
 // 新库 v1→v2 顺序应用直达当前版本。
@@ -27,7 +28,7 @@ CREATE TABLE IF NOT EXISTS time_log (
 CREATE INDEX IF NOT EXISTS idx_time_log_turn_seq ON time_log (turn_seq);
 
 -- 叙事世界
--- events.type 取值词汇未定案（待 M2 校准），暂默认 'event' 自由文本
+-- events.type 开放词汇（无枚举约束），默认 'event'，自由文本
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   turn_seq INTEGER NOT NULL,
@@ -41,7 +42,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_turn_seq ON events (turn_seq);
 
--- phases: 故事阶段/幕。status 取值（active/ended...）待 M2 校准
+-- phases: 故事阶段/幕。status 开放词汇（active/ended...），无枚举约束
 CREATE TABLE IF NOT EXISTS phases (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
@@ -59,7 +60,7 @@ CREATE TABLE IF NOT EXISTS world_state (
 );
 
 -- NPC。npcs 表本身无 turn_seq 列（状态覆盖型数据）
--- npcs.status: alive/dead/absent... 开放集合，待 M2 校准
+-- npcs.status: 开放集合（alive/dead/absent...），无枚举约束
 CREATE TABLE IF NOT EXISTS npcs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
@@ -79,7 +80,7 @@ CREATE TABLE IF NOT EXISTS npc_traits (
 );
 CREATE INDEX IF NOT EXISTS idx_npc_traits_npc ON npc_traits (npc_id);
 
--- npc_memories: 记忆；salience 供检索排序，默认 0，衰减语义待 M2 校准
+-- npc_memories: 记忆；salience 供检索排序，默认 0（衰减由 data subagent 判断，非内核计算）
 CREATE TABLE IF NOT EXISTS npc_memories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   npc_id INTEGER NOT NULL REFERENCES npcs(id),

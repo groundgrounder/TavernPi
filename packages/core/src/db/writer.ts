@@ -142,7 +142,7 @@ export class DbWriter {
 	// 叙事世界
 	// ------------------------------------------------------------------
 
-	/** 追加事件。type 默认 'event'（取值词汇待 M2 校准）。locationId 提供则做登记校验。
+	/** 追加事件。type 默认 'event'（开放词汇，无枚举约束）。locationId 提供则做登记校验。
 	 *  npcIds = 在场名册（event_npcs 结构化引用；只写已存在的 NPC id，调用方保证——FK 兜底）。 */
 	insertEvent(input: {
 		turnSeq: number;
@@ -216,7 +216,7 @@ export class DbWriter {
 		};
 	}
 
-	/** 结束阶段：写入 ended_turn。status 语义由调用方另行处理（待 M2 校准）。 */
+	/** 结束阶段：写入 ended_turn。status 语义由调用方另行处理（本方法只写 ended_turn）。 */
 	endPhase(phaseId: number, endedTurn: number): void {
 		assertTurnSeq(endedTurn);
 		this.db.prepare("UPDATE phases SET ended_turn = ? WHERE id = ?").run(endedTurn, phaseId);
@@ -385,7 +385,7 @@ export class DbWriter {
 		};
 	}
 
-	/** 更新 NPC 状态（alive/dead/absent...，开放集合待 M2 校准）。 */
+	/** 更新 NPC 状态（开放集合 alive/dead/absent...，无枚举约束）。 */
 	updateNpcStatus(npcId: number, status: string): void {
 		this.db.prepare("UPDATE npcs SET status = ? WHERE id = ?").run(status, npcId);
 	}
@@ -405,7 +405,7 @@ export class DbWriter {
 		};
 	}
 
-	/** 写入记忆。salience 默认 0（衰减语义待 M2 校准）。
+	/** 写入记忆。salience 默认 0（衰减由 data subagent 判断，非内核计算）。
 	 *  source = 知识来源（witness 亲历 / hearsay 耳闻 / inference 推断，可空）；eventId = 所涉事件（可空）。 */
 	insertNpcMemory(input: {
 		npcId: number;

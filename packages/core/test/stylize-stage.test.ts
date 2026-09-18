@@ -153,6 +153,54 @@ test("runStylize：事实漂移 → 反馈重试自纠 → 成功（applied=true
 	}
 });
 
+test("runStylize：重试耗尽告警走 onWarning，不再裸写 stderr（轮中写会撕裂 CLI 活动行）", async () => {
+	const dir = makeTempDir();
+	const originalWarn = console.warn;
+	let stderrWrites = 0;
+	const warnings: string[] = [];
+	console.warn = () => {
+		stderrWrites++;
+	};
+	try {
+		const story = openTempStory(dir);
+		seedStylizeStory(story);
+		const executor = async () => stubResult({ text: "他付了 4 枚铜币。" }); // 恒漂移
+		const result = await runStylize(
+			{ turnSeq: 1, narrativeText: "他付了 3 枚铜币。" },
+			{ storyDb: story, cwd: dir, executor, onWarning: (m) => warnings.push(m) },
+		);
+		assert.equal(result.applied, false, "回退原文");
+		assert.equal(warnings.length, 1, `应恰好一条告警，实得 ${JSON.stringify(warnings)}`);
+		assert.match(warnings[0]!, /\[stylize\] 润色失败/);
+		assert.equal(stderrWrites, 0, "有 onWarning 时不得再写 console.warn");
+		story.close();
+	} finally {
+		console.warn = originalWarn;
+		cleanupTempDir(dir);
+	}
+});
+
+test("runStylize：未传 onWarning → 告警退回 console.warn（core 可独立用于工具/测试）", async () => {
+	const dir = makeTempDir();
+	const originalWarn = console.warn;
+	const stderrLines: string[] = [];
+	console.warn = (m?: unknown) => {
+		stderrLines.push(String(m));
+	};
+	try {
+		const story = openTempStory(dir);
+		seedStylizeStory(story);
+		const executor = async () => stubResult({ text: "他付了 4 枚铜币。" });
+		await runStylize({ turnSeq: 1, narrativeText: "他付了 3 枚铜币。" }, { storyDb: story, cwd: dir, executor });
+		assert.equal(stderrLines.length, 1, `实得 ${JSON.stringify(stderrLines)}`);
+		assert.match(stderrLines[0]!, /\[stylize\] 润色失败/);
+		story.close();
+	} finally {
+		console.warn = originalWarn;
+		cleanupTempDir(dir);
+	}
+});
+
 test("runStylize：恒漂移重试耗尽 → 回退原文 applied=false + drift 记录 + eventLog", async () => {
 	const dir = makeTempDir();
 	try {

@@ -4,12 +4,14 @@
 //
 // 容错纪律：
 // - listener 抛错：捕获并忽略（不炸 pipeline）。
-// - 文件写失败：不抛；仅首次 console.warn 去重（避免吞掉静默埋雷，又不打断 pipeline）。
+// - 文件写失败：不抛；仅首次告警去重（避免吞掉静默埋雷，又不打断 pipeline）。
+//   告警走 onWarning（缺省 console.warn）——记录发生在轮中，裸写 stderr 会撕裂 CLI 活动行。
 // - inputChars/outputChars 只记规模不记全文，控制日志体积。
 
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { SubagentUsage } from "../subagent/runtime.ts";
+import { emitWarning, type WarnSink } from "../warn.ts";
 
 export interface PipelineEvent {
 	/** ISO 时间戳。 */
@@ -39,7 +41,11 @@ export interface PipelineEventLog {
 	readonly filePath?: string;
 }
 
-export function createPipelineEventLog(filePath?: string): PipelineEventLog {
+/**
+ * @param filePath JSONL 落盘路径；缺省 = 纯内存模式（不写文件、不会触发写失败告警）。
+ * @param onWarning 写失败告警出口（缺省 console.warn；CLI 传入以收口到活动行）。
+ */
+export function createPipelineEventLog(filePath?: string, onWarning?: WarnSink): PipelineEventLog {
 	const listeners = new Set<PipelineEventListener>();
 	let warnedWriteError = false;
 	return {
@@ -53,7 +59,8 @@ export function createPipelineEventLog(filePath?: string): PipelineEventLog {
 					// 写失败吞掉但首次告警（去重），不抛——事件流是观测设施，不能炸 pipeline。
 					if (!warnedWriteError) {
 						warnedWriteError = true;
-						console.warn(
+						emitWarning(
+							onWarning,
 							`[pipeline-events] 写入事件日志失败（仅首次告警）: ${filePath}: ${(err as Error).message}`,
 						);
 					}

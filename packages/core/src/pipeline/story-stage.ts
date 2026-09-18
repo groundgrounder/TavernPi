@@ -25,6 +25,7 @@ import {
 	type SubagentUsage,
 } from "../subagent/runtime.ts";
 import type { PipelineEventLog } from "./events.ts";
+import { emitWarning } from "../warn.ts";
 import { renderDbSummary } from "./db-summary.ts";
 import { computeScenePlan } from "./npc-stage.ts";
 
@@ -124,6 +125,8 @@ export interface StoryStageOptions {
 	modelRuntime?: ModelRuntime;
 	prompts?: PromptLayerDirs;
 	eventLog?: PipelineEventLog;
+	/** 降级告警出口（缺省 console.warn；CLI 传入以收口到活动行，避免撕裂提示行）。 */
+	onWarning?: (message: string) => void;
 	/** 每 runner 重试上限（默认 2）。 */
 	maxAttempts?: number;
 	/** 缺省 runSubagent；测试/验收故障注入通道。 */
@@ -309,6 +312,7 @@ export async function runSceneAnalysis(
 				outputTool: SCENE_TOOL,
 				model: opts.model,
 				modelRuntime: opts.modelRuntime,
+				onWarning: opts.onWarning,
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;
@@ -354,7 +358,7 @@ export async function runSceneAnalysis(
 		});
 		userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
 	}
-	console.warn(`[story_scene] 场景分析失败（${maxAttempts} 次重试耗尽），降级确定性兜底: ${lastError}`);
+	emitWarning(opts.onWarning, `[story_scene] 场景分析失败（${maxAttempts} 次重试耗尽），降级确定性兜底: ${lastError}`);
 	return { card: buildFallbackSceneCard(opts.storyDb), fallback: true };
 }
 
@@ -524,6 +528,7 @@ export async function runReview(
 				outputTool: REVIEW_TOOL,
 				model: opts.model,
 				modelRuntime: opts.modelRuntime,
+				onWarning: opts.onWarning,
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;
@@ -564,7 +569,7 @@ export async function runReview(
 		});
 		userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
 	}
-	console.warn(`[story_review] 审查失败（${maxAttempts} 次重试耗尽），放行: ${lastError}`);
+	emitWarning(opts.onWarning, `[story_review] 审查失败（${maxAttempts} 次重试耗尽），放行: ${lastError}`);
 	return [];
 }
 
@@ -630,6 +635,7 @@ export async function runOversee(
 				outputTool: OVERSEE_TOOL,
 				model: opts.model,
 				modelRuntime: opts.modelRuntime,
+				onWarning: opts.onWarning,
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;
@@ -670,7 +676,7 @@ export async function runOversee(
 		});
 		userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
 	}
-	console.warn(`[story_oversee] 全统筹失败（${maxAttempts} 次重试耗尽），跳过: ${lastError}`);
+	emitWarning(opts.onWarning, `[story_oversee] 全统筹失败（${maxAttempts} 次重试耗尽），跳过: ${lastError}`);
 	return null;
 }
 

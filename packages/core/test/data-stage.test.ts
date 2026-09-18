@@ -11,7 +11,7 @@ import { cleanupTempDir, makeTempDir } from "./helpers.ts";
 import { openStoryDb, type StoryDb } from "../src/db/story-db.ts";
 import type { SubagentResult, SubagentUsage } from "../src/subagent/runtime.ts";
 import { createPipelineEventLog, type PipelineEvent } from "../src/pipeline/events.ts";
-import { runDataStage, type DataStageOptions } from "../src/pipeline/data-stage.ts";
+import { runDataStage } from "../src/pipeline/data-stage.ts";
 
 const USAGE: SubagentUsage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, costTotal: 0 };
 

@@ -20,6 +20,7 @@ import {
 	type SubagentUsage,
 } from "../subagent/runtime.ts";
 import type { PipelineEventLog } from "./events.ts";
+import { emitWarning } from "../warn.ts";
 
 const stylizeOutputSchema = z.object({
 	text: z.string().min(1), // 无 maxLength——长度约束走 prompt 层「不超过原文 1.5 倍」
@@ -43,6 +44,8 @@ export interface StylizeOptions {
 	modelRuntime?: ModelRuntime;
 	prompts?: PromptLayerDirs;
 	eventLog?: PipelineEventLog;
+	/** 降级告警出口（缺省 console.warn；CLI 传入以收口到活动行，避免撕裂提示行）。 */
+	onWarning?: (message: string) => void;
 	/** 重试上限（默认 2）。 */
 	maxAttempts?: number;
 	/** 缺省 runSubagent；测试/验收故障注入通道。 */
@@ -128,6 +131,7 @@ export async function runStylize(
 				outputTool: STYLIZE_TOOL,
 				model: opts.model,
 				modelRuntime: opts.modelRuntime,
+				onWarning: opts.onWarning,
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;
@@ -174,6 +178,6 @@ export async function runStylize(
 		// 事实漂移反馈进下次 attempt（模型自纠通道）
 		userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
 	}
-	console.warn(`[stylize] 润色失败（${maxAttempts} 次重试耗尽），回退原文: ${lastError}`);
+	emitWarning(opts.onWarning, `[stylize] 润色失败（${maxAttempts} 次重试耗尽），回退原文: ${lastError}`);
 	return { text: input.narrativeText, applied: false, drift: lastDrift };
 }

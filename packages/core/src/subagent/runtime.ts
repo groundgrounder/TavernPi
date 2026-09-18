@@ -21,6 +21,7 @@ import {
 	type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
+import { emitWarning } from "../warn.ts";
 
 /**
  * 模型类型：从 createAgentSession 的选项推导，等价于 pi-ai 的 Model<any>，
@@ -58,6 +59,8 @@ export interface SubagentRunOptions {
 	model?: SubagentModel;
 	/** 多 subagent 并行纪律：共享一个 ModelRuntime 实例（凭证/模型共享）。 */
 	modelRuntime?: ModelRuntime;
+	/** 告警出口（缺省 console.warn）。编排器传入以收口到 CLI 活动行——轮中写 stderr 会撕裂提示行。 */
+	onWarning?: (message: string) => void;
 }
 
 export interface SubagentResult<T> {
@@ -129,7 +132,7 @@ export async function runSubagent<T = unknown>(options: SubagentRunOptions): Pro
 		modelRuntime: options.modelRuntime,
 	});
 	if (modelFallbackMessage) {
-		console.warn(`[subagent:${options.role}] ${modelFallbackMessage}`);
+		emitWarning(options.onWarning, `[subagent:${options.role}] ${modelFallbackMessage}`);
 	}
 
 	const startedAt = Date.now();
