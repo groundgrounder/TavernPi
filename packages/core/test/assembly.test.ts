@@ -3,7 +3,7 @@
 // 判据取盘上事实（story.meta.json、库内表与 seed 行、session 文件），不是内存字段自证。
 
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { cleanupTempDir, makeTempDir } from "./helpers.ts";
@@ -226,6 +226,62 @@ test("forkFrom：条目不存在 → 抛中文错且装配态原封不动（不�
 		} finally {
 			cleanup(opened);
 		}
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+/**
+ * 进程内指向某文件的打开句柄（Linux /proc/self/fd）。
+ * 用途：验证 openStory 失败时**真的**把已打开的两个库收回了——不是靠读代码相信 catch 会跑。
+ */
+function openHandlesFor(target: string): string[] {
+	const hits: string[] = [];
+	for (const fd of readdirSync("/proc/self/fd")) {
+		try {
+			const link = readlinkSync(join("/proc/self/fd", fd));
+			if (link.includes(target)) hits.push(`${fd} -> ${link}`);
+		} catch {
+			// fd 在读取瞬间被关闭：忽略
+		}
+	}
+	return hits;
+}
+
+test("判据自检：句柄探针能看见打开的故事库（否则下面那条断言是空的）", async () => {
+	const root = makeTempDir();
+	try {
+		const storiesRoot = join(root, "stories");
+		const opened = await openStory({ cwd: root, storiesRoot });
+		try {
+			const dbPath = join(opened.storyState.storyDir, "story.db");
+			assert.ok(openHandlesFor(dbPath).length > 0, "故事打开时应当能看见 story.db 的句柄");
+		} finally {
+			cleanup(opened);
+		}
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("openStory：装配失败（模式与开关冲突）→ 两个库的句柄被收回，不留泄漏", async () => {
+	const root = makeTempDir();
+	try {
+		// survival 预设要求 story 开；显式关掉会让 createStoryRuntime 在构建期抛错——
+		// 此时故事目录已建、两个库已开，正是「失败后是否收回句柄」要验的那条路径。
+		const storiesRoot = join(root, "stories");
+		await assert.rejects(
+			openStory({ cwd: root, storiesRoot, mode: "survival", agents: { story: false, npc: true } }),
+			/冲突/,
+		);
+		// 故事目录仍在（不删用户数据），但库不该被这个进程攥着。
+		// 判据用「谁有 story.db」而不是名字——`sessions/` 也符合 sessionId 字符集，不是故事。
+		const storyDirs = readdirSync(storiesRoot).filter((name) => existsSync(join(storiesRoot, name, "story.db")));
+		assert.equal(storyDirs.length, 1, "新建的故事目录保留，供用户之后打开");
+		const dbPath = join(storiesRoot, storyDirs[0]!, "story.db");
+		assert.equal(existsSync(dbPath), true);
+		assert.deepEqual(openHandlesFor(dbPath), [], "失败的 openStory 不得留下打开的库句柄");
+		assert.deepEqual(openHandlesFor(join(storiesRoot, storyDirs[0]!, "snapshots.db")), []);
 	} finally {
 		cleanupTempDir(root);
 	}

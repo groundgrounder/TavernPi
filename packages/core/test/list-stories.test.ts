@@ -179,6 +179,25 @@ test("listStories：给出会话文件路径（openStory 续写的入参）；�
 	}
 });
 
+test("listStories：同一 sessionId 命中多个会话文件时取时间戳最大者（确定性，不看 readdir 顺序）", () => {
+	const root = makeTempDir();
+	try {
+		const sessions = join(root, "sessions");
+		mkdirSync(sessions, { recursive: true });
+		const sessionId = "01a0aaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+		mkdirSync(join(root, sessionId), { recursive: true });
+		writeFileSync(join(root, sessionId, "story.db"), "x");
+		// 故意先写「新」的、再写「旧」的：结果是按名字定序，不是按写入顺序（readdir 顺序不可依赖）
+		writeFileSync(join(sessions, `2026-09-18T10-00-00-000Z_${sessionId}.jsonl`), "{}\n");
+		writeFileSync(join(sessions, `2026-01-01T10-00-00-000Z_${sessionId}.jsonl`), "{}\n");
+
+		const item = listStories(root)[0]!;
+		assert.match(item.sessionFile ?? "", /2026-09-18T10-00-00-000Z/, "应取时间戳最大的那份");
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
 test("listStories：按最后活动时间倒序（mtime 定序，与目录创建顺序无关）", () => {
 	const root = makeTempDir();
 	try {

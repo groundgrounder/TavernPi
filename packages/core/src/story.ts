@@ -164,22 +164,31 @@ export function listStories(storiesRoot: string = defaultStoriesRoot()): StorySu
 /**
  * 扫 `<storiesRoot>/sessions/` 建 sessionId → 会话文件 的索引（pi 的命名：`<时间戳>_<sessionId>.jsonl`）。
  * 一次列目录、整表复用，不按故事逐个 stat（列表页要快）。目录不存在 = 还没跑过任何故事 → 空索引。
+ *
+ * 同一 sessionId 命中多个文件时取**时间戳最大者**（名字里带 ISO 时间戳，字典序即时间序）：
+ * 正常路径一故事一文件，但历史遗留 / 手工拷贝 / 会话被重新落盘都可能留下多份，
+ * 此处必须是确定性的——「readdir 顺序」不是判据。
  */
 function indexSessionFiles(storiesRoot: string): Map<string, string> {
-	const index = new Map<string, string>();
+	/** sessionId → 文件名（时间戳最大者）。 */
+	const names = new Map<string, string>();
 	let entries: Dirent[];
 	try {
 		entries = readdirSync(join(storiesRoot, "sessions"), { withFileTypes: true });
 	} catch {
-		return index;
+		return new Map();
 	}
 	for (const entry of entries) {
 		if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
 		const matched = /_([A-Za-z0-9_-]+)\.jsonl$/.exec(entry.name);
 		if (matched === null) continue;
-		index.set(matched[1]!, join(storiesRoot, "sessions", entry.name));
+		const sessionId = matched[1]!;
+		const existing = names.get(sessionId);
+		if (existing === undefined || entry.name > existing) {
+			names.set(sessionId, entry.name);
+		}
 	}
-	return index;
+	return new Map([...names].map(([sessionId, name]) => [sessionId, join(storiesRoot, "sessions", name)]));
 }
 
 /** stat 取不到（不存在 / 无权限 / 非常规文件）返回 undefined——列表不因单个条目炸掉。 */

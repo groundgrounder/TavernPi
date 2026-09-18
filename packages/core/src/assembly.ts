@@ -150,36 +150,48 @@ export async function openStory(opts: OpenStoryOptions): Promise<OpenedStory> {
 		storyState = created.storyState;
 	}
 
-	const { settings, warnings: settingsWarnings } = loadSettings(opts.settingsPath);
-	const prompts: PromptLayerDirs = {
-		globalDir: defaultGlobalPromptsDir(),
-		// 多包提示词合并：传全部包 prompts/ 目录（后包覆盖先包；存在的才被探测）。
-		...(packDirs.length > 0 ? { packDirs } : {}),
-	};
-	const modelRuntime = await ModelRuntime.create();
-	// pinned 数组就地维护（push/splice）：packs 的 getter 直接闭包它，故容器建成后无需回调重绑。
-	const pinned: string[] = [];
+	// 从装配依赖开始，任何一步失败都要**收回已打开的两个库**：否则句柄泄漏，而调用方拿不到任何
+	// 可关闭的句柄（openStory 抛出时没东西可关）。
+	// 会走到这里的真实失败：settings 读取、ModelRuntime 创建、subagent 开关与模式冲突
+	// （validateSubagentSwitches）、卡包加载/代码包挂载、pi 的 createAgentSession。
+	// 注意：新建路径的故事目录**不删**——那是个合法（可能为空）的故事，用户之后能打开它；
+	// 「删数据」需要额外授权，此处不是那种场合。
+	try {
+		const { settings, warnings: settingsWarnings } = loadSettings(opts.settingsPath);
+		const prompts: PromptLayerDirs = {
+			globalDir: defaultGlobalPromptsDir(),
+			// 多包提示词合并：传全部包 prompts/ 目录（后包覆盖先包；存在的才被探测）。
+			...(packDirs.length > 0 ? { packDirs } : {}),
+		};
+		const modelRuntime = await ModelRuntime.create();
+		// pinned 数组就地维护（push/splice）：packs 的 getter 直接闭包它，故容器建成后无需回调重绑。
+		const pinned: string[] = [];
 
-	const assembly: StoryAssembly = {
-		sessionManager,
-		storyState,
-		eventLog: createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"), opts.onWarning),
-		settings,
-		settingsWarnings,
-		prompts,
-		packDirs,
-		pinned,
-		...(packDirs.length > 0 ? { packs: { cache: new PackCache(packDirs), pinned: () => pinned } } : {}),
-		agents: opts.agents ?? { story: true, npc: true },
-		...(opts.style !== undefined ? { style: opts.style } : {}),
-		modeFromMeta,
-		cwd,
-		storiesRoot,
-		modelRuntime,
-		...(opts.onWarning !== undefined ? { onWarning: opts.onWarning } : {}),
-		...(opts.onInteraction !== undefined ? { onInteraction: opts.onInteraction } : {}),
-	};
-	return { ...assembly, runtime: await buildRuntime(assembly) };
+		const assembly: StoryAssembly = {
+			sessionManager,
+			storyState,
+			eventLog: createPipelineEventLog(join(storyState.storyDir, "pipeline-events.jsonl"), opts.onWarning),
+			settings,
+			settingsWarnings,
+			prompts,
+			packDirs,
+			pinned,
+			...(packDirs.length > 0 ? { packs: { cache: new PackCache(packDirs), pinned: () => pinned } } : {}),
+			agents: opts.agents ?? { story: true, npc: true },
+			...(opts.style !== undefined ? { style: opts.style } : {}),
+			modeFromMeta,
+			cwd,
+			storiesRoot,
+			modelRuntime,
+			...(opts.onWarning !== undefined ? { onWarning: opts.onWarning } : {}),
+			...(opts.onInteraction !== undefined ? { onInteraction: opts.onInteraction } : {}),
+		};
+		return { ...assembly, runtime: await buildRuntime(assembly) };
+	} catch (error) {
+		storyState.storyDb.close();
+		storyState.snapshotsDb.close();
+		throw error;
+	}
 }
 
 /**

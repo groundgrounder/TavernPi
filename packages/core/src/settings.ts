@@ -150,6 +150,18 @@ export function loadSettings(path: string = defaultSettingsPath()): { settings: 
  * - **原子替换**：写同目录临时文件后 rename，写一半被打断不会留下半个坏文件。
  */
 export function saveSettings(settings: TavernSettings, path: string = defaultSettingsPath()): void {
+	// 形态先行：本函数经 IPC / JS 调用时会收到任意值（TS 类型在运行期不存在）。不挡的话
+	// `{}.models[role]` 是 TypeError、`{models: 5}` 会被静默当成「无变更」写回——两种都不该发生。
+	// 校验走别名读取，避免把后面的类型收窄成 Record<string, unknown>（那样 models[role] 就没类型了）。
+	const shape: unknown = settings;
+	if (
+		!isPlainObject(shape) ||
+		!isPlainObject((shape as Record<string, unknown>)["models"])
+	) {
+		throw new Error(
+			`settings 写入被拒（未写任何文件）：形态非法，应为 { models: { <角色>: { provider, id, thinking? } } }，收到 ${JSON.stringify(settings)}`,
+		);
+	}
 	const problems: string[] = [];
 	for (const role of MODEL_ROLES) {
 		const ref = settings.models[role];

@@ -97,6 +97,25 @@ test("runWithAbort：非中止故障原样上抛（不被吞成「用户按了�
 	});
 });
 
+test("runWithAbort：onAbort 同步抛错必须被吞掉——否则监听器里的异常会变成未捕获异常崩掉进程", async () => {
+	const controller = new AbortController();
+	let ran = 0;
+	const pending = runWithAbort({
+		signal: controller.signal,
+		run: async () => {
+			ran++;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		},
+		onAbort: () => {
+			throw new Error("onAbort 同步炸了");
+		},
+	});
+	// 关键判据：abort() 本身不得把监听器的异常抛给调用点（Node 会 process.nextTick 重抛 → 进程 exit 1）
+	assert.doesNotThrow(() => controller.abort(), "controller.abort() 不该把 onAbort 的异常抛出来");
+	await assert.rejects(pending, TurnAbortedError, "中止语义照旧：操作作废");
+	assert.equal(ran, 1);
+});
+
 test("runWithAbort：操作结束后解绑监听器——事后 abort 不再打到 onAbort（长寿 signal 不串轮）", async () => {
 	const controller = new AbortController();
 	let aborted = 0;

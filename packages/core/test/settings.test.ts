@@ -311,6 +311,33 @@ test("saveSettings：根节点非对象 → 抛错不覆盖", () => {
 	}
 });
 
+test("saveSettings：入参形态非法（非对象 / 缺 models / models 非对象）→ 抛清晰错且不写文件", () => {
+	const dir = makeTempDir();
+	try {
+		const path = join(dir, "settings.json");
+		const before = JSON.stringify({ models: { npc: { provider: "google", id: "keep" } }, theme: "dark" });
+		writeFileSync(path, before);
+
+		// 这些值在 IPC / JS 调用下都会真实到达（TS 类型在运行期不存在）。
+		// 曾经的行为：{} → TypeError: Cannot read properties of undefined (reading 'narrator')；
+		// {models: 5} → 静默写回「无变更」（调用方以为写成功了）。
+		const bad: unknown[] = [{}, { models: null }, { models: 5 }, { models: [] }, "hello", null, undefined];
+		for (const value of bad) {
+			assert.throws(
+				() => saveSettings(value as TavernSettings, path),
+				/形态非法/,
+				`${JSON.stringify(value)} 应被拒`,
+			);
+			assert.equal(readFileSync(path, "utf-8"), before, `${JSON.stringify(value)}：文件必须原样未动`);
+		}
+		// 空 models 是合法入参（「本次不改任何角色」）：内容语义不变（重新序列化会改排版）
+		saveSettings({ models: {} }, path);
+		assert.deepEqual(JSON.parse(readFileSync(path, "utf-8")), JSON.parse(before), "空 models 等于无变更");
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
 test("saveSettings：空文件视作无内容，可直接写入", () => {
 	const dir = makeTempDir();
 	try {

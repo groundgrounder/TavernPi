@@ -24,7 +24,10 @@ export interface AbortBridge {
 	signal?: AbortSignal;
 	/** 真正跑的操作（如 session.prompt）。 */
 	run: () => Promise<void>;
-	/** 信号触发时的侧向中止调用（如 session.abort）；抛错由本模块吞掉，不影响操作本身收敛。 */
+/** 信号触发时的侧向中止调用（如 session.abort）。
+ *  **同步抛错也会被本模块吞掉**——实测：监听器里同步 throw 会被 Node 以
+ *  `process.nextTick(() => { throw err })` 重新抛出，直接变成未捕获异常把进程带走（exit 1），
+ *  而中止本身是「用户按了停止」，不该因为胶水出错就崩掉整个 app。 */
 	onAbort: () => void;
 	/** 操作返回后自行判定「这轮是否已被中止」（如 pi 标记的 stopReason === "aborted"）。 */
 	aborted?: () => boolean;
@@ -43,7 +46,12 @@ export async function runWithAbort(bridge: AbortBridge): Promise<void> {
 		throw new TurnAbortedError();
 	}
 	const handler = (): void => {
-		onAbort();
+		// 同步抛错必须在此吞掉：监听器里逃出去的异常会被 Node 当作未捕获异常重新抛出（崩进程）。
+		try {
+			onAbort();
+		} catch {
+			// 中止是尽力而为：侧向 abort 失败不该影响「本轮作废」这个结果（操作返回后照样抛 TurnAbortedError）。
+		}
 	};
 	signal?.addEventListener("abort", handler, { once: true });
 	try {
