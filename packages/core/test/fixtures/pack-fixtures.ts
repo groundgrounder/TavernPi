@@ -25,6 +25,8 @@ export interface PackFixtureOptions {
 	name?: string;
 	/** story.yaml 内容；缺省不写 story.yaml（= 空 StoryMeta）。 */
 	story?: string;
+	/** 条目落盘位置：`type` 是 **collection 子目录名**（复数，characters/locations/objects/factions/plot），
+	 *  不是条目的 `EntryType`（单数 character/location/...）——写成单数会被 loader 判为未知目录。 */
 	entries?: Array<{ type: string; id: string; yaml: string }>;
 	/** 缺省写空 schema.sql（布局必填，内容可为空）。传 null 表示不写该文件。 */
 	schemaSql?: string | null;
