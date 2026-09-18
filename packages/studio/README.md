@@ -4,56 +4,84 @@ tavernpi 内核的 GUI 外壳。**同进程嵌入** `@tavernpi/core`（不走 RP
 故事引擎的全部能力在内核，studio 只做面向创作与游玩的图形外壳。
 
 - **文档**：`docs/创作规划.md`（做什么 / UX 契约）、`docs/技术考察.md`（怎么实现 / 形态、契约、缺口）
-- **当前状态**：**骨架**——契约层、IPC 通道适配器、边界纪律判据、S0 冒烟脚本已就位；**未接 UI**，
-  main 侧 handler（openStory / runTurn / forkFrom 的接线）与渲染进程应用是 S1 的事。
+- **当前状态**：**S0 收尾已通**——Electron 44.4.2 起窗、主进程直跑内核 `.ts`、preload/IPC 通道打通、
+  空壳里真跑「列故事 → 新建 → 发一轮（真 LLM）」并通过独立读盘核对（见下）。
+  **S1 才是 UI**：现有 `src/renderer/` 只是验收用的最小壳（经典脚本、无构建、无框架）。
 
 ## 目录
 
 ```
 src/
-├── contract/   # 唯一契约面：channel 名 + 载荷类型 + Transport 接口（两侧共用，禁止各自抄一份）
-├── main/       # 主进程侧：transport-ipc.ts（把契约 channel 注册到 IpcLike 上）
-├── renderer/   # 渲染进程侧：transport-ipc.ts（经 preload 的 contextBridge 说话）
-├── dev/        # 开发脚手架：transport-ws.ts（**壳**，见文件头）
-└── ../../spike/s0-smoke.cjs   # S0 环境冒烟（Electron 内跑通内核 + 渲染，已全绿）
+├── contract/         # 唯一契约面：channel 名 + 载荷类型 + Transport/IpcLike 接口（两侧共用，禁止各抄一份）
+├── main/
+│   ├── index.ts          # Electron 引导：开窗 → 注册 channel → 加载渲染进程
+│   ├── session.ts        # StudioSession：持有内核装配态 + 在飞轮次的中止把手 + 推送转接
+│   ├── handlers.ts       # channel → StudioSession 的唯一映射表（缺 channel 编译期就红）
+│   ├── transport-ipc.ts  # createIpcHost：把契约 channel 注册到 IpcLike（可脱 electron 单测）
+│   └── s0-acceptance.ts  # S0 验收：等渲染进程结果 + **独立**读盘核对
+├── renderer/         # 最小壳（S0 验收用；S1 换 React + Vite）
+│   ├── index.html        # 布局与 CSP（default-src 'none'：渲染进程无网络面）
+│   ├── transport.js      # 通道实现（经典脚本：file:// 下不支持 ESM，故 S0 不引构建）
+│   └── shell.js          # 故事列表 / 新建 / 输入 / 流式 / 中止 + 验收钩子
+├── preload.cjs       # contextBridge 白名单（不暴露 ipcRenderer 本体）
+└── dev/transport-ws.ts   # 开发通道（壳，S1 接）
+spike/s0-smoke.cjs    # 环境冒烟（内核直载 / node:sqlite / 窗口渲染）
 test/
-├── boundary.test.ts   # 渲染进程不得值导入内核（扫源码，含判据自检）
-└── ipc-host.test.ts   # IPC 适配器：注册完整性 / 失败原子性 / 异常透传 / 推送
+├── boundary.test.ts  # renderer / dev / preload 不得值导入内核（扫 .ts/.js/.cjs，含判据自检）
+└── ipc-host.test.ts  # IPC 适配器：注册完整性 / 失败原子性 / 异常透传 / 推送
 ```
-
-## 三条纪律
-
-1. **两边只有一份契约**：channel 名与载荷类型只在 `src/contract/` 定义。生产（IPC）与开发（HTTP/SSE）
-   两个适配器共用它——否则两条通道必然漂移。
-2. **渲染进程不得值导入内核**：模式过滤（DbView）、唯一写路径（trustedWrite）、快照恢复都在 main 侧
-   的内核实例里；渲染进程只要能值导入内核就等于把信任边界搬到了页面上。允许 `import type`
-   （类型剥离后不留运行时代码，而类型必须共用一份）。这条由 `test/boundary.test.ts` 扫源码钉住——
-   刻意做成机器判据，不写在文档里当君子协定。
-3. **传输层从第一天就是可替换的适配器**：开发期用浏览器 + 系统 Node 跑内核（改一行刷新，不必反复
-   重启 200MB 的 Electron），交付形态仍是 Electron。若等到收尾再把 WebSocket 换成 IPC，那不叫切换，
-   叫重写。
 
 ## 开发与验证
 
 ```bash
-npm test                              # 含本包的两份判据（边界扫描 + IPC 适配器）
-npm run typecheck                     # core / app / tools / studio(main) / studio(renderer) 五份配置
+npm --workspace @tavernpi/studio run start       # 开真窗口
+npm --workspace @tavernpi/studio run spike       # 环境冒烟（隐藏窗口）
+npm --workspace @tavernpi/studio run accept:s0   # S0 验收（真 LLM 一轮 + 独立读盘核对）
+npm test && npm run typecheck                    # 全仓判据
 ```
 
-本包的 TS 配置刻意分两份：`tsconfig.main.json`（Node 侧）与 `tsconfig.renderer.json`（DOM 侧，`lib` 加 DOM）。
-渲染那份仍需 `@types/node`——因为契约层 `import type` 了内核源码，而内核源码自身引用 `node:*`。
-运行期隔离不靠 TS 配置保证，靠上面第 2 条纪律的扫描判据。
+**两条环境坑（已实测，别踩第二遍）**：
 
-## 下一步（S0 收尾 → S1）
+1. 装 Electron **必须**走镜像：`export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`
+   （默认从 github.com 拉二进制，本机不通）。二进制缺失时可补跑
+   `ELECTRON_MIRROR=... node node_modules/electron/install.js`。
+2. 本机默认导出 `ELECTRON_RUN_AS_NODE=1`，Electron 会退化成纯 Node——窗口起不来、`--version`
+   打印 Node 版本、`import { app } from "electron"` 不可用。npm scripts 里已带 `env -u`。
 
-1. **S0 收尾**：装 Electron（**必须** `export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`，
-   本机直连 github.com 不通，见 `docs/技术考察.md` §1）、写 preload（contextBridge 白名单）、
-   开窗口、空壳里真跑「列故事 → 打开 → 发一轮（真 LLM）」。判据取盘上 `story.db` 的 `turn_log`，
-   不是界面上出现了什么字。
-2. **S1 游玩主线**：main 侧实现 `HostHandlers`（把每个 channel 接到内核 API 上）+ 渲染进程应用
-   （推荐 React + Vite + TS：长叙事流的虚拟滚动、故事树、DB 表格、表单密集的编辑器线都有成熟件）。
-3. **开发通道接线**：main 侧同进程起本地 HTTP 服务（POST /rpc + SSE /events），挂同一份 `HostHandlers`；
-   只监听 127.0.0.1。
+## S0 收尾验收证据（2026-09-18，真跑）
+
+```
+ok: true
+renderer: sessionId 01a0b4ed… · creation · turnSeq 1 · 510 字
+          流式增量 337 片 · turn:done 1 次 · pipeline: story_scene,data,narrator · 17.8s
+db:       turn_log 1 行 · events 1 条 · snapshots.db 4096B
+逐项：渲染流程完成 ✓ / 流式到达 ✓ / turn:done 到达 ✓ / pipeline 事件到达 ✓ /
+      turn_log 含本轮 ✓ / **盘上终稿与渲染终稿逐字符一致（510/510）** ✓ / 本轮落快照 ✓ / data 落库 ✓
+```
+
+判据是**盘上 `story.db`**（主进程用 raw SQLite 直读，不复用内核读取路径——免得用被验对象证明自己），
+不是「界面上出现了什么字」。
+
+## 三条纪律
+
+1. **两边只有一份契约**：channel 名与载荷类型只在 `src/contract/` 定义。生产（IPC）与开发（HTTP/SSE）
+   两个适配器共用它；channel 名的白名单就是 main 侧的注册表（preload 不另抄一份列表）。
+2. **渲染进程不得值导入内核**：模式过滤（DbView）、唯一写路径（trustedWrite）、快照恢复都在 main 侧
+   的内核实例里。允许 `import type`。由 `test/boundary.test.ts` 扫源码钉住（含 `.js/.cjs`——
+   S0 的壳是经典脚本，纪律不能因扩展名换了就失效）。
+3. **传输层从第一天就是可替换的适配器**：若等到收尾再把 WebSocket 换成 IPC，那不叫切换，叫重写。
+
+## 下一步（S1）
+
+1. 渲染进程换 React + Vite + TS（契约与边界判据不动，只换渲染层与构建；`shell.js` 的验收钩子
+   `__s0Result` 保留为回归手段）。
+2. 阅读流从 `story.db.turn_log` 取（分页 + 虚拟滚动）；流式增量只作「生成中」临时展示，轮末用
+   `turn:done` 的终稿覆写。
+3. 开发通道接线（本地 HTTP/SSE，只监听 127.0.0.1），挂同一份 `HostHandlers`。
+4. 轮中交互通道：渲染进程呈现 + `interaction:respond` 回应（现在未挂 handler，卡包工具会按内核
+   既有语义降级——不崩、不挂死，但也不能用）。
+5. 故事树 / DB 浏览器 / 编辑器线：分别等内核缺口 3（通用只读查询）、6（阶段开始事件）、
+   5/9/10（global 提示词写、卡包校验模块导出、pin 持久化），见 `docs/技术考察.md` §3.2。
 
 ## 许可证
 

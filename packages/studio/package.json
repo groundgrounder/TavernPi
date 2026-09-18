@@ -5,7 +5,16 @@
   "private": true,
   "type": "module",
   "description": "tavern studio：tavernpi 内核的 GUI 外壳（Electron 同进程嵌入内核，不走 RPC）。本包当前只有契约层与通道骨架。",
+  "main": "src/main/index.ts",
+  "scripts": {
+    "start": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "spike": "env -u ELECTRON_RUN_AS_NODE electron spike/s0-smoke.cjs",
+    "accept:s0": "env -u ELECTRON_RUN_AS_NODE electron . --s0-accept"
+  },
   "dependencies": {
     "@tavernpi/core": "0.0.0"
+  },
+  "devDependencies": {
+    "electron": "44.4.2"
   }
 }
