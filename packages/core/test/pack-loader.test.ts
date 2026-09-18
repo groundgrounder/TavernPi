@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
 import { characterEntry, cleanupTempDir, createPack, entryYaml, locationEntry, makeTempDir, writeFile } from "./fixtures/pack-fixtures.ts";
-import { loadPack, loadPacks } from "../src/pack/loader.ts";
+import { KERNEL_TABLE_WHITELIST, loadPack, loadPacks } from "../src/pack/loader.ts";
+import { openStoryDb } from "../src/db/story-db.ts";
 import { PackLoadError } from "../src/pack/types.ts";
 
 test("loadPack：好包全要素（story/entries/schema/seed/code），字段正确", () => {
@@ -607,6 +608,60 @@ test("loadPack：未知 collection 类型目录 → PackLoadError（防目录名
 		const dir = createPack(root, { name: "p" });
 		writeFile(dir, "collection/characterss/a.yaml", characterEntry("甲"));
 		assert.throws(() => loadPack(dir), /未知 collection 类型目录: characterss/);
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// 内核保留表白名单：必须覆盖内核建出的每一张表
+// ---------------------------------------------------------------------------
+
+/**
+ * 判据来源是**真实打开的库**而不是 schema 源码常量：内核建了什么表，只有建出来才作数
+ * （迁移会 ALTER、也会在后续版本加表）。schema_migrations 是 migrate 建的，同样入册。
+ */
+test("KERNEL_TABLE_WHITELIST：内核实际建出的每一张表都在白名单里（漏登记即被前缀规则放行）", () => {
+	const root = makeTempDir();
+	try {
+		const db = openStoryDb(join(root, "story.db"));
+		try {
+			const rows = db.rawDb
+				.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+				.all() as Array<{ name: string }>;
+			const actual = rows.map((r) => r.name);
+			assert.ok(actual.length > 0, "探针自身要有效：内核库必须建出表");
+			assert.deepEqual(
+				actual.filter((t) => !KERNEL_TABLE_WHITELIST.includes(t)),
+				[],
+				"内核表未登记进白名单 → 卡包 SQL 可触及该表",
+			);
+			assert.deepEqual(
+				KERNEL_TABLE_WHITELIST.filter((t) => !actual.includes(t)),
+				[],
+				"白名单里有不存在的表名（改名或拼写错误）",
+			);
+		} finally {
+			db.close();
+		}
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+/**
+ * 真实的旁路形态：包名与内核表名共用前缀时，前缀规则不再挡得住，只剩白名单这道闸门。
+ * 包名 `event` 的前缀 `event_` 恰好覆盖 `event_npcs`——白名单漏登记它时，本用例会放行。
+ */
+test("loadPack：包名与内核表共用前缀时，白名单仍是闸门（event 包不得 DELETE FROM event_npcs）", () => {
+	const root = makeTempDir();
+	try {
+		const dir = createPack(root, {
+			name: "event",
+			schemaSql: "CREATE TABLE event_relics (id INTEGER);\n",
+			seedSql: "DELETE FROM event_npcs;\n",
+		});
+		assert.throws(() => loadPack(dir), /卡包 SQL 不应写内核保留表: event_npcs/);
 	} finally {
 		cleanupTempDir(root);
 	}

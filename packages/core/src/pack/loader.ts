@@ -23,6 +23,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { KERNEL_TABLE_WHITELIST } from "../db/kernel-tables.ts";
 import { z } from "zod";
 import {
 	ENTRY_ID_RE,
@@ -522,24 +523,12 @@ function validateInPackRefs(dir: string, packName: string, entries: CollectionEn
  * 扫描方式见 findKernelTableRefs：**全文本标识符匹配**，不枚举动词——任何动词
  * （DROP / DELETE / UPDATE / ALTER / CREATE INDEX ... ON / CREATE TRIGGER ... ON）
  * 引用这些表名都会被拦下。
+ *
+ * 清单的事实源在 db 层（`db/kernel-tables.ts`）：表由 db 建，故清单随 db 走；
+ * 此处仅转发，保持 pack 层的对外签名不变。清单覆盖度由 pack-loader.test.ts 的
+ * 「内核实际表 ⊆ 白名单」判据钉住。
  */
-export const KERNEL_TABLE_WHITELIST: readonly string[] = [
-	"clock",
-	"time_log",
-	"events",
-	"locations",
-	"location_log",
-	"phases",
-	"world_state",
-	"npcs",
-	"npc_traits",
-	"npc_memories",
-	"npc_relations",
-	"turn_log",
-	"data_status",
-	"directives",
-	"schema_migrations",
-];
+export { KERNEL_TABLE_WHITELIST };
 
 const SQL_IDENT = `[A-Za-z_][A-Za-z0-9_]*|"[^"]+"|\`[^\`]+\`|\\[[^\\]]+\\]`;
 /**
