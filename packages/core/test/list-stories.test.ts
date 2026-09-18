@@ -2,7 +2,7 @@
 // 判据：目录名合规 + 含 story.db 或 story.meta.json；不打开库（只 stat）。
 
 import assert from "node:assert/strict";
-import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { cleanupTempDir, makeTempDir } from "./helpers.ts";
@@ -146,6 +146,34 @@ test("listStories：只有 story.db（无 meta）也算故事——mode 缺省 c
 		assert.equal(list.length, 1);
 		assert.equal(list[0]!.mode, "creation");
 		assert.equal(list[0]!.createdAt, undefined);
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("listStories：给出会话文件路径（openStory 续写的入参）；无消息的故事缺省该字段", async () => {
+	const root = makeTempDir();
+	try {
+		const storiesRoot = join(root, "stories");
+		// 带开场白 → pi 写了 session 文件
+		const withOpening = await createStory({
+			storiesRoot,
+			packDirs: [shoulingPack(root)],
+			cwd: root,
+		});
+		withOpening.storyState.storyDb.close();
+		withOpening.storyState.snapshotsDb.close();
+		// 无包无开场白 → 没产生任何消息，pi 还没写文件
+		const bare = await createStory({ storiesRoot, packDirs: [], cwd: root });
+		bare.storyState.storyDb.close();
+		bare.storyState.snapshotsDb.close();
+
+		const byId = new Map(listStories(storiesRoot).map((s) => [s.sessionId, s]));
+		const openingSummary = byId.get(withOpening.sessionId)!;
+		assert.ok(openingSummary.sessionFile !== undefined, "有开场白的故事应有会话文件");
+		assert.equal(existsSync(openingSummary.sessionFile!), true, "给出的路径必须真实存在");
+		assert.match(openingSummary.sessionFile!, new RegExp(`${withOpening.sessionId}\\.jsonl$`));
+		assert.equal(byId.get(bare.sessionId)!.sessionFile, undefined, "无消息的故事没有会话文件");
 	} finally {
 		cleanupTempDir(root);
 	}

@@ -96,6 +96,8 @@ export interface OpenStoryOptions {
 	packDirs?: string[];
 	/** 内核级模式预设；仅新建有效（续写以 story.meta.json 记录为准，adventure 锁不可绕）。 */
 	mode?: StoryMode;
+	/** 故事标题；仅新建有效（写进 story.meta.json，覆盖卡包 story.yaml 的 title）。 */
+	title?: string;
 	/** 文风（- -style：启用 stylize 并作为 styleHint 注入）。 */
 	style?: string;
 	/** subagent 开关（缺省 { story: true, npc: true }）。 */
@@ -136,12 +138,13 @@ export async function openStory(opts: OpenStoryOptions): Promise<OpenedStory> {
 			packDirs = meta.packs.map((p) => p.dir);
 		}
 	} else {
-		// 新故事：mode 仅在创建时有效（createStory 写进 meta；adventure 创建即锁定）。
+		// 新故事：mode/title 仅在创建时有效（createStory 写进 meta；adventure 创建即锁定）。
 		const created = await createStory({
 			storiesRoot,
 			packDirs,
 			cwd,
 			...(opts.mode !== undefined ? { mode: opts.mode } : {}),
+			...(opts.title !== undefined ? { title: opts.title } : {}),
 		});
 		sessionManager = created.sessionManager;
 		storyState = created.storyState;
