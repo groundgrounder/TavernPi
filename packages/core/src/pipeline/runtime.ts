@@ -116,7 +116,18 @@ import {
 	type StoryMode,
 	type SubagentSwitchFlags,
 } from "../mode.ts";
-import { readStoryMeta, writeStoryMeta } from "../story.ts";
+import { persistAgents, readStoryMeta, writeStoryMeta } from "../story.ts";
+
+/**
+ * subagent 开关（调用侧形态）。story/npc 为显式布尔；stylize 三态——
+ * undefined = 按规则自动（装配层 resolveStylizeEnabled 解出布尔后才进 runtime）——
+ * 故 runtime 的 `agents` getter 回答的是**已解析**的布尔三元组。
+ */
+export interface StoryAgents {
+	story: boolean;
+	npc: boolean;
+	stylize?: boolean;
+}
 
 /** 当前最大 turn_seq 的下一轮（turn_log 每轮一行，PK 保证完整性；新库为 1）。与 m1-cli 同源。 */
 export function computeNextTurnSeq(storyDb: StoryDb): number {
@@ -462,15 +473,20 @@ export interface StoryRuntimeOptions {
 		/** 重试上限（默认 2）。 */
 		maxAttempts?: number;
 	};
-	/** 带外顾问选项：model 缺省走 settings.models.assist 或 pi 默认；sessionFactory 供测试/故障注入。
+/** 带外顾问选项：model 缺省走 settings.models.assist 或 pi 默认；sessionFactory 供测试/故障注入。
 	 *  assist 会话懒创建（不找它即零开销），无开关。 */
 	assist?: {
 		model?: NonNullable<CreateAgentSessionOptions["model"]>;
 		/** 会话工厂（替换 createAgentSession；测试计数/断言用）。 */
 		sessionFactory?: (opts: CreateAgentSessionOptions) => Promise<{ session: AgentSession }>;
 	};
+	/**
+	 * subagent 开关落盘成功的回调（缺口 7）。runtime 只负责「校验 + 持久化」，**不重建自己**——
+	 * subagent 选项在实例创建时固化，改开关必须重建 runtime（见 assembly 的 rebuildRuntime）。
+	 * 回调交给装配层去重建，避免 runtime 依赖装配层（那是反向依赖）。
+	 */
+	onAgentsChanged?: (agents: StoryAgents) => void;
 }
-
 export interface TurnResult {
 	turnSeq: number;
 	userEntryId: string;
@@ -536,6 +552,12 @@ export interface StoryRuntime {
 	/** 切换模式：断言可切换、校验当前 subagent 开关符合目标预设、写回 story.meta.json、更新内部状态。
 	 *  adventure 锁定不可切换（含切出）；违规抛中文 Error（列需先重开项，不自动改）。 */
 	setMode(next: StoryMode): void;
+	/** 当前生效的 subagent 开关（已解析的布尔三元组；缺口 7）。 */
+	readonly agents: StoryAgents;
+	/** 改 subagent 开关（缺口 7）：先校验形态与模式预设组合（不过则零副作用），再持久化到
+	 *  story.meta.json。**不重建自身**——subagent 选项在实例创建时固化，调用侧须走
+	 *  assembly 的 rebuildRuntime 让新开关生效（见 onAgentsChanged 选项）。 */
+	setAgents(next: StoryAgents): void;
 	/** 跑一轮叙事。opts.force = /! 前缀（输入渠道校验强制提交，留痕 warning）。
 	 *  opts.signal 中止本轮（缺口 1：实测单轮可达 200 秒，GUI 不能没有刹车）——中止抛 TurnAbortedError，零落库。
 	 *  skipInputValidation 为内部选项（swipe 重放历史已接受输入时跳过校验），不经公开签名。 */
@@ -616,6 +638,28 @@ export function computeInputValidityAction(
 }
 
 /**
+ * 校验 subagent 开关的**形态**（与模式预设无关的那一层）：story/npc 必须是布尔，
+ * stylize 三态（undefined / 布尔）。存在的理由是 JS 调用侧（studio IPC、脚本）没有类型检查——
+ * 若不拦，`{ story: "false" }` 这种字符串会被 truthy 判成「开」，作者以为关掉了却在跑。
+ * 中文报错列出**全部**问题（与 core 其他校验入口一致：一次说完，不要让调用方挤牙膏）。
+ */
+export function assertAgentsShape(agents: StoryAgents): void {
+	const problems: string[] = [];
+	for (const key of ["story", "npc"] as const) {
+		const value = agents[key];
+		if (typeof value !== "boolean") {
+			problems.push(`${key} 必须是布尔值（读到 ${JSON.stringify(value)}）`);
+		}
+	}
+	if (agents.stylize !== undefined && typeof agents.stylize !== "boolean") {
+		problems.push(`stylize 必须是布尔值或省略（省略 = 按规则自动；读到 ${JSON.stringify(agents.stylize)}）`);
+	}
+	if (problems.length > 0) {
+		throw new Error(`subagent 开关格式非法：\n- ${problems.join("\n- ")}`);
+	}
+}
+
+/**
  * 切换模式：断言可切换、校验当前 subagent 开关符合目标模式预设、写回 story.meta.json、返回新模式。
  * 不自动改 subagent 开关——违规抛中文 Error 列出需先重开的项。adventure 锁定（含切出）一律拒绝。
  */
@@ -639,7 +683,8 @@ export function applyModeSwitch(
 
 /** 构建一次完整接线运行态（fork 后以新故事目录重建新实例）。 */
 export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<StoryRuntime> {
-	const { cwd, sessionManager, storyState, settings, modelRuntime, prompts, eventLog, onWarning } = opts;
+	const { cwd, sessionManager, storyState, settings, modelRuntime, prompts, eventLog, onWarning, onAgentsChanged } =
+		opts;
 
 	// ---- 模式解析（★信任边界）：显式 option → story.meta.json → "creation"；adventure 锁不可绕 ----
 	let mode: StoryMode = resolveStoryMode(opts.mode, storyState.storyDir);
@@ -663,6 +708,12 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		npc: npcOpts.enabled,
 		stylize: stylizeOpts.enabled,
 	};
+	/**
+	 * 本实例生效的 stylize 开关（缺口 7 的读回口）。
+	 * 三态语义在装配层就解析完了，runtime 只见布尔；这里把「未给 stylize 选项」折成 false
+	 * （缺省关闭，见 StylizeRuntimeOptions），使 `runtime.agents` 永远回答具体布尔。
+	 */
+	const storyRuntimeStylizeEnabled = (): boolean => stylizeOpts.enabled;
 	const modeProblems = validateSubagentSwitches(mode, subagentFlags);
 	if (modeProblems.length > 0) {
 		throw new Error(`subagent 开关与故事模式（${mode}）冲突：\n- ${modeProblems.join("\n- ")}`);
@@ -1346,6 +1397,33 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		},
 		get mode() {
 			return mode;
+		},
+		/** subagent 开关快照（缺口 7）：只回答当前生效值，改它走 setAgents。 */
+		get agents(): StoryAgents {
+			return {
+				story: storyOpts.enabled,
+				npc: npcOpts.enabled,
+				stylize: storyRuntimeStylizeEnabled(),
+			};
+		},
+		setAgents(next: StoryAgents): void {
+			// 与 /mode 同一道纪律：先校验、后落盘。校验分两层——
+			// ① 形态（显式布尔；stylize 三态）；② 与当前模式预设的组合合法性。任一不过则零副作用。
+			assertAgentsShape(next);
+			const stylizeNext = next.stylize ?? storyRuntimeStylizeEnabled();
+			const problems = validateSubagentSwitches(mode, {
+				story: next.story,
+				npc: next.npc,
+				stylize: stylizeNext,
+			});
+			if (problems.length > 0) {
+				throw new Error(
+					`无法应用 subagent 开关（当前模式 ${mode}）：\n- ${problems.join("\n- ")}`,
+				);
+			}
+			// 落盘：这里写的是「重启后跑不跑」，读不懂的 meta 宁可不写（persistAgents 抛错）。
+			persistAgents(storyState.storyDir, next);
+			onAgentsChanged?.(next);
 		},
 		setMode(next: StoryMode): void {
 			// 入口拒绝非法模式值（避免 MODE_PRESETS[next] 首次切换才 TypeError）

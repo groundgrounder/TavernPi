@@ -45,6 +45,16 @@ export interface StoryMetaFile {
 	defaultStyle?: string;
 	/** 内核级模式；adventure 由其派生 locked，随 meta 持久化并 fork/clone 继承。 */
 	mode?: StoryMode;
+	/**
+	 * subagent 开关（缺口 7：原先是纯会话级，重启即回到全开）。三态语义：
+	 * - 字段缺省（老故事 / 未改过）→ 调用侧缺省全开，与历史行为一致；
+	 * - `stylize` 缺省表示「按规则自动」（见 assembly 的 resolveStylizeEnabled：
+	 *   显式 style ／ adventure ／ 卡包 defaultStyle 三条规则），写成布尔才是调用侧定死。
+	 * 只记录 **false** 也有意义——「作者刻意关掉了 npc」是可复现的偏好，不该每次重启问一遍。
+	 */
+	agents?: { story?: boolean; npc?: boolean; stylize?: boolean };
+	/** 手动钉（`包名:类型:id`）持久化（缺口 10）；缺省 = 无钉。 */
+	pinned?: string[];
 	createdAt: string;
 }
 
@@ -74,6 +84,80 @@ export function inheritStoryMeta(srcStoryDir: string, dstStoryDir: string): void
 	const meta = readStoryMeta(srcStoryDir);
 	if (meta === undefined) return;
 	writeStoryMeta(dstStoryDir, meta);
+}
+
+/** `story.meta.json` 的 agents 字段形态（三态；缺省字段 = 未记录）。 */
+export interface StoryAgentsMeta {
+	story?: boolean;
+	npc?: boolean;
+	stylize?: boolean;
+}
+
+/**
+ * 持久化 subagent 开关到 `story.meta.json`（缺口 7）。**合并写**：保留 meta 里的其他字段
+ * （title / packs / mode / defaultStyle / pinned …），只覆盖 `agents`。
+ * 读不懂的 meta 一律拒绝覆盖（与 saveSettings 同一条纪律：宁可不写，也不把用户的东西抹掉）——
+ * 报错而不是静默丢失，因为这里写的是一份能决定「重启后跑不跑 subagent」的记录。
+ */
+export function persistAgents(storyDir: string, agents: StoryAgentsMeta): void {
+	const meta = readStoryMeta(storyDir);
+	if (meta === undefined) {
+		throw new Error(
+			`无法持久化 subagent 开关：读不懂 ${join(storyDir, "story.meta.json")}（文件缺失或不是合法 JSON）。` +
+				"拒绝覆盖——请先修好或删掉该文件。",
+		);
+	}
+	// stylize 只在显式定死时才落盘（undefined = 按规则自动，落盘反而会把「自动」冻成一次快照）。
+	writeStoryMeta(storyDir, {
+		...meta,
+		agents: {
+			...(agents.story !== undefined ? { story: agents.story } : {}),
+			...(agents.npc !== undefined ? { npc: agents.npc } : {}),
+			...(agents.stylize !== undefined ? { stylize: agents.stylize } : {}),
+		},
+	});
+}
+
+/**
+ * 从 `story.meta.json` 的 agents 字段复原开关（续写路径）。
+ * 字段缺省（老故事 / 从未改过）→ 返回 undefined，由调用侧走缺省全开（与历史行为一致）。
+ * 注意：**只信布尔**（`typeof value !== "boolean"` 即拒），meta 手改成 `"yes"` 之类的垃圾值会被
+ * 当成非法值拒掉而不是悄悄当 false，与 readStoryMeta 对 mode 的宽处理刻意不同——模式有安全的
+ * 缺省（creation），而开关没有：猜错了会让作者以为关掉的 subagent 其实在跑。
+ */
+export function resolveAgentsFromMeta(storyDir: string): StoryAgentsMeta | undefined {
+	const raw = readStoryMeta(storyDir)?.agents;
+	if (raw === undefined) return undefined;
+	for (const key of ["story", "npc", "stylize"] as const) {
+		const value = raw[key];
+		if (value !== undefined && typeof value !== "boolean") {
+			throw new Error(
+				`story.meta.json 的 agents.${key} 不是布尔值（读到 ${JSON.stringify(value)}）。` +
+					"开关没有安全的缺省，拒绝猜测——请把它改成 true / false，或删掉该字段。",
+			);
+		}
+	}
+	return {
+		...(raw.story !== undefined ? { story: raw.story } : {}),
+		...(raw.npc !== undefined ? { npc: raw.npc } : {}),
+		...(raw.stylize !== undefined ? { stylize: raw.stylize } : {}),
+	};
+}
+
+/**
+ * 持久化手动钉列表到 `story.meta.json`（缺口 10）。合并写；读不懂的 meta 拒绝覆盖。
+ * 空列表落成**字段缺失**（无钉 = 不写）：保持 meta 干净，也让「删掉字段」与「清空钉」同义。
+ */
+export function persistPinned(storyDir: string, pinned: string[]): void {
+	const meta = readStoryMeta(storyDir);
+	if (meta === undefined) {
+		throw new Error(
+			`无法持久化钉列表：读不懂 ${join(storyDir, "story.meta.json")}（文件缺失或不是合法 JSON）。` +
+				"拒绝覆盖——请先修好或删掉该文件。",
+		);
+	}
+	const { pinned: _drop, ...rest } = meta;
+	writeStoryMeta(storyDir, pinned.length > 0 ? { ...rest, pinned: [...pinned] } : rest);
 }
 
 export interface CreateStoryResult {

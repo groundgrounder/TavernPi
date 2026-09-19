@@ -248,8 +248,10 @@ export {
 	getInteractionBroker,
 	InputRejectedError,
 	resolveStoryMode,
+	assertAgentsShape,
 	type NpcStageRuntimeOptions,
 	type RuntimePrompts,
+	type StoryAgents as RuntimeStoryAgents,
 	type StoryRuntime,
 	type StoryRuntimeOptions,
 	type StoryStageRuntimeOptions,
@@ -284,14 +286,19 @@ export {
 
 // 故事创建（M5：createStory——卡包校验 → SQL+seed 迁移 → story.yaml 消费 → 开场白首轮 → story.meta.json）
 // + story.meta.json 辅助（--resume / 模式解析 / fork 继承共用）+ 故事枚举（listStories：故事选择器）
+// + 缺口 7/10：开关与钉的持久化/复原（meta 的读写都归本模块）
 export {
 	createStory,
 	inheritStoryMeta,
 	listStories,
+	persistAgents,
+	persistPinned,
 	readStoryMeta,
+	resolveAgentsFromMeta,
 	writeStoryMeta,
 	type CreateStoryOptions,
 	type CreateStoryResult,
+	type StoryAgentsMeta,
 	type StoryMetaFile,
 	type StorySummary,
 } from "./story.ts";
@@ -302,6 +309,8 @@ export {
 	openStory,
 	rebuildRuntime,
 	resolveStylizeEnabled,
+	// 缺口 7：改开关并生效（校验 + 落盘 + 重建，收敛到一处，调用侧不必自己记得要重建）
+	setAgents,
 	type ForkInfo,
 	type OpenedStory,
 	type OpenStoryOptions,

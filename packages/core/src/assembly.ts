@@ -20,7 +20,7 @@ import {
 	type StoryState,
 	type StylizeRuntimeOptions,
 } from "./pipeline/runtime.ts";
-import { createStory, inheritStoryMeta, readStoryMeta } from "./story.ts";
+import { createStory, inheritStoryMeta, readStoryMeta, resolveAgentsFromMeta } from "./story.ts";
 import { defaultStoriesRoot, openStoryDb, storyDbPath } from "./db/story-db.ts";
 import { openSnapshotsDb, snapshotsDbPath } from "./snapshot/snapshots-db.ts";
 import { buildAncestorChain } from "./snapshot/ancestors.ts";
@@ -33,14 +33,33 @@ import type { StoryMode } from "./mode.ts";
 import type { InteractionHandler } from "./interaction/broker.ts";
 
 /**
- * subagent 开关（会话级，不持久化）。story/npc 为显式布尔；
+ * subagent 开关。story/npc 为显式布尔；
  * stylize 三态——undefined = 按规则自动（见 resolveStylizeEnabled），true/false = 调用侧定死。
+ *
+ * 缺口 7：本组开关随 `story.meta.json` 的 `agents` 字段持久化（见 persistAgents），
+ * 续写时由 resolveAgentsFromMeta 读回——重启不再回到全开。
  */
 export interface StoryAgents {
 	story: boolean;
 	npc: boolean;
 	stylize?: boolean;
 }
+
+/**
+ * 持久化 subagent 开关到 `story.meta.json`（缺口 7）。**合并写**：保留 meta 里的其他字段
+ * （title / packs / mode / defaultStyle / pinned …），只覆盖 `agents`。
+ * 读不懂的 meta 一律拒绝覆盖（与 saveSettings 同一条纪律：宁可不写，也不把用户的东西抹掉）——
+ * 报错而不是静默丢失，因为这里写的是一份能决定「重启后跑不跑 subagent」的记录。
+ *
+ * 实现落在 story.ts（meta 的读写都归它）；此处再导出，让装配层的调用点就近可读。
+ */
+export { persistAgents, persistPinned, resolveAgentsFromMeta } from "./story.ts";
+
+/**
+ * `story.meta.json` 的 agents 字段形态（三态；缺省字段 = 未记录）。
+ * 事实源与读写实现都在 story.ts；此处别名再导出，让装配层调用点就近可读。
+ */
+export type { StoryAgentsMeta } from "./story.ts";
 
 /** 卡包检索注入（packDirs 为空 = 无注入形态）。 */
 export interface PackInjection {
@@ -64,7 +83,7 @@ export interface StoryAssembly {
 	/** 提示词分层目录（global + packDirs；story 层由 runtime 自行并入）。 */
 	prompts: PromptLayerDirs;
 	packDirs: string[];
-	/** 会话级手动钉列表（/pin /unpin 维护；经 PackInjection.pinned getter 传进 runtime）。 */
+	/** 手动钉列表（/pin /unpin 维护；随 story.meta.json 持久化，见 persistPinned）。 */
 	pinned: string[];
 	/** 无包故事（packDirs 为空）时缺省。fork 后按同一 packDirs 重建 cache。 */
 	packs?: PackInjection;
@@ -100,8 +119,10 @@ export interface OpenStoryOptions {
 	title?: string;
 	/** 文风（- -style：启用 stylize 并作为 styleHint 注入）。 */
 	style?: string;
-	/** subagent 开关（缺省 { story: true, npc: true }）。 */
+	/** subagent 开关（缺省 { story: true, npc: true }；续写未给时从 story.meta.json 的 agents 复原）。 */
 	agents?: StoryAgents;
+	/** 手动钉（`包名:类型:id`）；续写未给时从 story.meta.json 的 pinned 复原。 */
+	pinned?: string[];
 	/** settings.json 路径（缺省 ~/.tavernpi/settings.json）；测试/多环境注入用。 */
 	settingsPath?: string;
 	/** 告警出口（模型配置告警、卡包告警、pipeline 事件写失败等）。 */
@@ -121,6 +142,9 @@ export async function openStory(opts: OpenStoryOptions): Promise<OpenedStory> {
 	let storyState: StoryState;
 	let packDirs = (opts.packDirs ?? []).map((d) => resolve(d));
 	let modeFromMeta = false;
+	/** 续写时从 meta 复原的开关/钉列表（新建路径留空 → 走调用参数与缺省）。 */
+	let agentsFromMeta: StoryAgents | undefined;
+	let pinnedFromMeta: string[] = [];
 
 	if (opts.resume !== undefined) {
 		// 续写：session 文件恢复；模式与卡包从 story.meta.json 恢复。
@@ -137,6 +161,22 @@ export async function openStory(opts: OpenStoryOptions): Promise<OpenedStory> {
 		if (packDirs.length === 0 && meta !== undefined) {
 			packDirs = meta.packs.map((p) => p.dir);
 		}
+		// 缺口 7/10：开关与钉随 meta 复原。**只在调用侧未显式给时**才复原——
+		// 命令行 -agents/-pin 是更明确的意图，不该被上次会话的记忆盖掉。
+		// 复原失败（meta 里是垃圾值）按响亮失败处理：resolveAgentsFromMeta 会抛错。
+		// meta 里的字段缺省（老故事）→ 回落缺省全开，与历史行为一致（此处不做三态保留：
+		// 装配层的 StoryAgents 里 stylize 才是三态的，story/npc 一直是显式布尔）。
+		if (opts.agents === undefined) {
+			const restored = resolveAgentsFromMeta(storyState.storyDir);
+			if (restored !== undefined) {
+				agentsFromMeta = {
+					story: restored.story ?? true,
+					npc: restored.npc ?? true,
+					...(restored.stylize !== undefined ? { stylize: restored.stylize } : {}),
+				};
+			}
+		}
+		if (opts.pinned === undefined) pinnedFromMeta = readStoryMeta(storyState.storyDir)?.pinned ?? [];
 	} else {
 		// 新故事：mode/title 仅在创建时有效（createStory 写进 meta；adventure 创建即锁定）。
 		const created = await createStory({
@@ -165,7 +205,8 @@ export async function openStory(opts: OpenStoryOptions): Promise<OpenedStory> {
 		};
 		const modelRuntime = await ModelRuntime.create();
 		// pinned 数组就地维护（push/splice）：packs 的 getter 直接闭包它，故容器建成后无需回调重绑。
-		const pinned: string[] = [];
+		// 初值优先级与 agents 一致：调用侧显式给 > meta 复原 > 空。
+		const pinned: string[] = [...(opts.pinned ?? pinnedFromMeta)];
 
 		const assembly: StoryAssembly = {
 			sessionManager,
@@ -177,7 +218,7 @@ export async function openStory(opts: OpenStoryOptions): Promise<OpenedStory> {
 			packDirs,
 			pinned,
 			...(packDirs.length > 0 ? { packs: { cache: new PackCache(packDirs), pinned: () => pinned } } : {}),
-			agents: opts.agents ?? { story: true, npc: true },
+			agents: opts.agents ?? agentsFromMeta ?? { story: true, npc: true },
 			...(opts.style !== undefined ? { style: opts.style } : {}),
 			modeFromMeta,
 			cwd,
@@ -186,7 +227,12 @@ export async function openStory(opts: OpenStoryOptions): Promise<OpenedStory> {
 			...(opts.onWarning !== undefined ? { onWarning: opts.onWarning } : {}),
 			...(opts.onInteraction !== undefined ? { onInteraction: opts.onInteraction } : {}),
 		};
-		return { ...assembly, runtime: await buildRuntime(assembly) };
+		// 先把 assembly 装进 OpenedStory（同一个对象，不浅拷），再建 runtime。
+		// 顺序刻意：buildRuntime 的 onAgentsChanged 闭包要写回调用侧持有的对象，
+		// 若此处 `{...assembly}` 浅拷，闭包写的会是调用侧拿不到的那份（rebuild 按旧开关构建）。
+		const opened = assembly as OpenedStory;
+		opened.runtime = await buildRuntime(opened);
+		return opened;
 	} catch (error) {
 		storyState.storyDb.close();
 		storyState.snapshotsDb.close();
@@ -209,8 +255,24 @@ export async function rebuildRuntime(opened: OpenedStory): Promise<OpenedStory> 
 	return opened;
 }
 
-export interface ForkInfo {
-	oldSessionId: string;
+/**
+ * 改 subagent 开关并让它生效（缺口 7）。
+ *
+ * 顺序是刻意的：**runtime.setAgents 先校验 + 持久化**（校验不过则零副作用，meta 不动），
+ * 成功后才重建 runtime——重建会让旧实例 dispose，若先重建再发现开关非法，旧实例已经没了，
+ * 调用侧拿着一个废 runtime 却不知道自己做错了什么。
+ *
+ * 为什么必须重建：subagent 选项在 createStoryRuntime 里固化（validateSubagentSwitches 构建期跑），
+ * 实例创建后改不了。这也是原先开关「只在启动时有效」的原因——现在由本函数把「改开关」这件事
+ * 收敛到一处，studio / CLI 都走它，不再各自记得「改完要重建」。
+ */
+export async function setAgents(opened: OpenedStory, agents: StoryAgents): Promise<OpenedStory> {
+	opened.runtime.setAgents(agents); // 校验 + 落盘（onAgentsChanged 已把 assembly.agents 同步好）
+	await rebuildRuntime(opened);
+	return opened;
+}
+
+export interface ForkInfo {	oldSessionId: string;
 	newSessionId: string;
 	/** 分叉点：用户形态的条目退回其父条目（「这条输入之后重来」），其余取自身。 */
 	truncateId: string;
@@ -301,6 +363,9 @@ async function buildRuntime(assembly: StoryAssembly): Promise<StoryRuntime> {
 	const stylize: StylizeRuntimeOptions | undefined = resolveStylizeEnabled(assembly)
 		? { enabled: true, ...(assembly.style !== undefined ? { styleHint: assembly.style } : {}) }
 		: undefined;
+	// 注意：onAgentsChanged 必须写**调用侧最终持有的那个对象**，而不是这里的 assembly 形参——
+	// openStory 返回的是 `{...assembly, runtime}` 浅拷贝，若闭包写形参，setAgents 改的是一份
+	// 调用侧看不见的副本，重建出来的 runtime 仍按旧开关构建（已由 persist-agents 测试抓出）。
 	const runtime = await createStoryRuntime({
 		cwd: assembly.cwd,
 		sessionManager: assembly.sessionManager,
@@ -315,6 +380,10 @@ async function buildRuntime(assembly: StoryAssembly): Promise<StoryRuntime> {
 		...(assembly.agents.story ? { story: { enabled: true } } : {}),
 		...(stylize !== undefined ? { stylize } : {}),
 		...(assembly.packs !== undefined ? { packs: assembly.packs } : {}),
+		// 缺口 7：runtime 只管校验 + 持久化，重建由装配层负责（此处把它接回装配态）。
+		onAgentsChanged: (agents) => {
+			assembly.agents = agents;
+		},
 	});
 	// 轮中交互 handler 是实例级的（broker 随 runtime 重建），此处统一重挂。
 	if (assembly.onInteraction !== undefined) {

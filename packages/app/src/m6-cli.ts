@@ -37,12 +37,12 @@ import {
 	forkFrom,
 	MODE_PRESETS,
 	openStory,
+	persistPinned,
 	readStoryMeta,
-	rebuildRuntime,
 	resolvePromptChain,
 	resolveStylizeEnabled,
+	setAgents,
 	setStoryPromptOverride,
-	validateSubagentSwitches,
 	type InteractionRequest,
 	type OpenedStory,
 	type PromptLayerDirs,
@@ -397,12 +397,25 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 				return undefined;
 			}
 			if (!ctx.opened.pinned.includes(arg)) ctx.opened.pinned.push(arg);
+			// 缺口 10：钉随 story.meta.json 持久化（原先只在内存，重启即丢）。
+			// 落盘失败（meta 读不懂）只告警不回滚内存——内存里那份仍然生效，别让一次写盘失败
+			// 把用户刚做的手动钉也吞掉。
+			try {
+				persistPinned(ctx.opened.storyState.storyDir, ctx.opened.pinned);
+			} catch (err) {
+				ui.warn(err instanceof Error ? err.message : String(err));
+			}
 			ui.line(ui.note(EN.pinnedList(ctx.opened.pinned.length > 0 ? ctx.opened.pinned.join(EN.listSep) : EN.none), "ok"));
 			return undefined;
 		}
 		case "unpin": {
 			const idx = ctx.opened.pinned.indexOf(arg);
 			if (idx >= 0) ctx.opened.pinned.splice(idx, 1);
+			try {
+				persistPinned(ctx.opened.storyState.storyDir, ctx.opened.pinned);
+			} catch (err) {
+				ui.warn(err instanceof Error ? err.message : String(err));
+			}
 			ui.line(ui.note(EN.pinnedList(ctx.opened.pinned.length > 0 ? ctx.opened.pinned.join(EN.listSep) : EN.none), "ok"));
 			return undefined;
 		}
@@ -503,8 +516,10 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			return undefined;
 		}
 		case "agents": {
-			// /agents 查看；/agents <story|npc|stylize> <on|off> 设置（会话级，不持久化）。
-			// 改开关必须重建 runtime——subagent 选项在创建时固化（重建走内核 rebuildRuntime）。
+			// /agents 查看；/agents <story|npc|stylize> <on|off> 设置。
+			// 缺口 7：开关随 story.meta.json 持久化——重启后不再回到全开。
+			// 改开关必须重建 runtime（subagent 选项在创建时固化）；校验 + 落盘 + 重建
+			// 现已收口到内核 setAgents，此处不再自己拼 validateSubagentSwitches + rebuildRuntime。
 			const onOff = (b: boolean): string => (b ? EN.agentsOn : EN.agentsOff);
 			if (arg === "") {
 				ui.lines([
@@ -527,20 +542,14 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 				return undefined;
 			}
 			const next: StoryAgents = { ...ctx.opened.agents, [name]: value === "on" };
-			const stylizeOn = name === "stylize" ? value === "on" : resolveStylizeEnabled(ctx.opened);
-			const problems = validateSubagentSwitches(runtime.mode, {
-				story: next.story,
-				npc: next.npc,
-				stylize: stylizeOn,
-			});
-			if (problems.length > 0) {
+			try {
+				// 内核负责：形态校验 → 模式预设组合校验 → 落盘 → 重建（任一步失败都零副作用）。
+				await setAgents(ctx.opened, next);
+			} catch (err) {
 				ui.line(ui.note(EN.agentsRejected, "warn"));
-				for (const p of problems) ui.line(ui.detail(p, "warn"));
+				ui.line(ui.detail(err instanceof Error ? err.message : String(err), "warn"));
 				return undefined;
 			}
-			ctx.opened.agents = next;
-			// 重建后 runtime 换实例（旧实例已 dispose）；返回新实例给主循环。
-			await rebuildRuntime(ctx.opened);
 			ui.line(
 				ui.note(
 					EN.agentsApplied(
