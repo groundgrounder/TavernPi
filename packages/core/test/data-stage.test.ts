@@ -395,10 +395,10 @@ test("runDataStage：timeSuggestion 非空 → userPrompt 含场景时间建议�
 	}
 });
 
-	test("runDataStage：eventLog 每次 attempt 有记录（成功 1 条 / 多轮失败逐条）", async () => {
+	test("runDataStage：eventLog 一个 stage = start+end（成功 / 多轮失败都只是 end 的 attempt 不同）", async () => {
 	const dir = makeTempDir();
 	try {
-		// 成功路径：1 条
+		// 成功路径：start + end，end 记 attempt=1
 		const story1 = openTempStory(dir);
 		const log1 = createPipelineEventLog();
 		const records1: PipelineEvent[] = [];
@@ -411,14 +411,17 @@ test("runDataStage：timeSuggestion 非空 → userPrompt 含场景时间建议�
 			executor: async () => result(validChangeset),
 		});
 		assert.equal(ok.ok, true);
-		assert.equal(records1.length, 1);
+		assert.equal(records1.length, 2, "一个 stage = start + end");
+		assert.equal(records1[0]?.phase, "start");
 		assert.equal(records1[0]?.role, "data");
-		assert.equal(records1[0]?.ok, true);
-		assert.equal(records1[0]?.attempt, 1);
-		assert.ok(records1[0]?.durationMs !== undefined);
+		const end1 = records1[1]!;
+		assert.equal(end1.phase, "end");
+		assert.equal(end1.ok, true);
+		assert.equal(end1.attempt, 1);
+		assert.ok(end1.durationMs !== undefined);
 		story1.close();
 
-		// 失败路径：3 条（每次 attempt 一条，attempt 编号 1..3）
+		// 失败路径：仍然只有 start+end；重试次数由 end.attempt = 3 体现（不再逐 attempt 落事件）
 		const story2 = openTempStory(dir);
 		const log2 = createPipelineEventLog();
 		const records2: PipelineEvent[] = [];
@@ -432,12 +435,10 @@ test("runDataStage：timeSuggestion 非空 → userPrompt 含场景时间建议�
 			executor: async () => result({ events: [{ summary: "x", location_name: "未知地点" }] }),
 		});
 		assert.equal(fail.ok, false);
-		assert.equal(records2.length, 3);
-		assert.deepEqual(
-			records2.map((r) => r.attempt),
-			[1, 2, 3],
-		);
-		assert.ok(records2.every((r) => r.ok === false && r.error !== undefined));
+		assert.equal(records2.length, 2, "粒度是阶段不是 attempt");
+		assert.equal(records2[1]!.ok, false);
+		assert.equal(records2[1]!.attempt, 3, "endFields 记下了重试到了第 3 次");
+		assert.ok(records2[1]!.error !== undefined, "失败原因必须留在 end 事件上");
 		story2.close();
 	} finally {
 		cleanupTempDir(dir);

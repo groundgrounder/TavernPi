@@ -159,9 +159,13 @@ test("runOnstageRehearsals：2 NPC 并行全成功（两个 rehearsal + eventLog
 		assert.deepEqual(resultIds, [ids.onstageId, second.id].sort((a, b) => a - b));
 
 		const onstageRecords = records.filter((r) => r.role === "npc_onstage");
-		assert.equal(onstageRecords.length, 2);
-		assert.ok(onstageRecords.every((r) => r.ok === true));
-		assert.ok(onstageRecords.every((r) => typeof r.attempt === "number"));
+		// 缺口 6：2 个 NPC × 各自一个 stage = 4 条（每个 2 条 start/end）。
+		assert.equal(onstageRecords.length, 4, "2 个 NPC，各自 start+end");
+		assert.equal(onstageRecords.filter((r) => r.phase === "start").length, 2);
+		const onstageEnds = onstageRecords.filter((r) => r.phase === "end");
+		assert.equal(onstageEnds.length, 2);
+		assert.ok(onstageEnds.every((r) => r.ok === true));
+		assert.ok(onstageEnds.every((r) => typeof r.attempt === "number"), "重试次数挂在 end 事件上");
 		story.close();
 	} finally {
 		cleanupTempDir(dir);
@@ -226,9 +230,10 @@ test("runOnstageRehearsals：恒垃圾 NPC 被丢弃，另一 NPC 正常返回�
 		assert.equal(result.length, 1, "垃圾 NPC 被丢弃");
 		assert.equal(result[0]?.npc_id, second.id, "正常 NPC 仍返回");
 		const onstageRecords = records.filter((r) => r.role === "npc_onstage");
-		assert.ok(onstageRecords.some((r) => r.ok === false), "eventLog 记 ok:false");
-		// 恒垃圾 NPC 默认 maxAttempts=2 → 2 条失败记录
-		assert.equal(onstageRecords.filter((r) => r.ok === false).length, 2);
+		// 缺口 6：每个 NPC 一个 stage。垃圾那个的 end 是 ok:false，正常那个是 ok:true。
+		const failedEnds = onstageRecords.filter((r) => r.phase === "end" && r.ok === false);
+		assert.equal(failedEnds.length, 1, "恒垃圾 NPC 的 stage 以 ok:false 收束（一次，不是逐 attempt）");
+		assert.equal(failedEnds[0]!.attempt, 2, "endFields 记下了它重试了 2 次");
 		story.close();
 	} finally {
 		cleanupTempDir(dir);
@@ -369,8 +374,13 @@ test("runOffscreenBatch：location_name 未登记 → 重试耗尽 → 返回 []
 		const deltas = await runOffscreenBatch([rod], 5, { storyDb: story, cwd: dir, executor, eventLog: log });
 		assert.deepEqual(deltas, []);
 		const offRecords = records.filter((r) => r.role === "npc_offscreen");
-		assert.ok(offRecords.every((r) => r.ok === false), "失败记录全部 ok:false");
-		assert.ok(offRecords.some((r) => (r.error ?? "").includes("未登记")));
+		// 缺口 6：一个 stage（重试循环整体），start + end 两条。
+		assert.equal(offRecords.length, 2, "一个 stage = start + end");
+		assert.equal(offRecords[0]!.phase, "start");
+		const offEnd = offRecords[1]!;
+		assert.equal(offEnd.ok, false, "丢弃本轮 deltas 必须显形");
+		assert.equal(offEnd.attempt, 2, "endFields 记下了两次重试");
+		assert.match(offEnd.error ?? "", /未登记/);
 		story.close();
 	} finally {
 		cleanupTempDir(dir);

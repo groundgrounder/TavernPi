@@ -185,12 +185,15 @@ export {
 	type SubagentUsage,
 } from "./subagent/runtime.ts";
 
-// pipeline 事件流（承诺面 M2 起）
+// pipeline 事件流（承诺面 M2 起；缺口 6 起带 start/end 阶段与消费侧归并）
 export {
 	createPipelineEventLog,
+	summarizePipeline,
 	type PipelineEvent,
 	type PipelineEventLog,
 	type PipelineEventListener,
+	type PipelineEventPhase,
+	type PipelineStageState,
 } from "./pipeline/events.ts";
 
 // 模型配置（读 fail-open / 写 fail-closed；thinking 等级的运行时判据与类型）

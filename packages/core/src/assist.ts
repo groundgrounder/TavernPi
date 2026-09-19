@@ -369,19 +369,21 @@ export function createAssistAdvisor(opts: AssistAdvisorOptions): AssistAdvisor {
 			if (sess.isStreaming) {
 				throw new Error("assist 会话正在处理中，请等待");
 			}
-			const promptStart = sess.state.messages.length;
-			await sess.prompt(message);
-			const reply = extractLastAssistantReply(sess.state.messages.slice(promptStart)) ?? "";
-			opts.eventLog?.record({
-				ts: new Date().toISOString(),
-				turnSeq: -1,
-				role: "assist_chat",
-				ok: true,
-				durationMs: 0,
-				inputChars: message.length,
-				outputChars: reply.length,
-			});
-			return reply;
+			// 缺口 6：assist_chat 也走 stage（带外角色，turnSeq 用 -1 哨兵）。
+			// 注意 stage 的 start 落在 prompt 之前——assist 是用户主动发起的问答，界面该在等这一刻就显示在跑。
+			// 会话创建（role=assist）不包 stage：它是 ensureSession 的副产物，且带自证「契约未违反」语义，
+			// 保持瞬时事件（durationMs: 0）比包装成阶段更诚实。
+			const run = opts.eventLog?.stage("assist_chat", -1, async () => {
+				const promptStart = sess.state.messages.length;
+				await sess.prompt(message);
+				return extractLastAssistantReply(sess.state.messages.slice(promptStart)) ?? "";
+			}, (reply) => ({ inputChars: message.length, outputChars: reply?.length ?? 0 }));
+			if (run === undefined) {
+				const promptStart = sess.state.messages.length;
+				await sess.prompt(message);
+				return extractLastAssistantReply(sess.state.messages.slice(promptStart)) ?? "";
+			}
+			return await run;
 		},
 		async rebuild(): Promise<void> {
 			if (session) {

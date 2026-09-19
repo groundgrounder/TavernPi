@@ -315,7 +315,13 @@ function buildOffscreenUserPrompt(storyDb: StoryDb, npcs: NpcRow[], turnSeq: num
 // 在场预演（×N 并行）
 // ---------------------------------------------------------------------------
 
-/** 单 NPC 预演（内部重试循环）。失败（重试耗尽）→ null（丢弃，不阻塞 pipeline）。 */
+/**
+ * 单 NPC 预演（内部重试循环）。失败（重试耗尽）→ null（丢弃，不阻塞 pipeline）。
+ *
+ * 缺口 6：重试循环整体包成一个 stage。role 保持 `npc_onstage`（N 个 NPC 并行预演会落 N 组
+ * start/end，消费者按 role 归并——`summarizePipeline` 只保留最后一个，故界面显示「在场预演在跑」，
+ * 这正是想要的粒度：不暴露「第 3 个 NPC 的第 2 次重试」这种实现细节）。
+ */
 async function runOneRehearsal(
 	npc: NpcRow,
 	turnSeq: number,
@@ -328,8 +334,14 @@ async function runOneRehearsal(
 	}).text;
 	let userPrompt = buildRehearsalUserPrompt(opts.storyDb, npc, turnSeq, userInput);
 
+	let lastAttempt = 0;
+	let lastUsage: SubagentUsage = ZERO_USAGE;
+	let lastOutputChars: number | undefined;
+	let lastError: string | undefined;
+
+	const loop = async (): Promise<NpcRehearsal | null> => {
 	for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
-		const attemptStartedAt = Date.now();
+		lastAttempt = attempt;
 		let usage: SubagentUsage = ZERO_USAGE;
 		let outputChars: number | undefined;
 		let error: string | undefined;
@@ -346,6 +358,8 @@ async function runOneRehearsal(
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;
+			lastUsage = usage;
+			lastOutputChars = outputChars;
 			const parsed = rehearsalZodSchema.safeParse(result.output);
 			if (!parsed.success) {
 				error = `第 ${attempt} 次提交未通过 schema 校验: ${parsed.error.issues
@@ -355,38 +369,31 @@ async function runOneRehearsal(
 				// 防串台：预演必须属于请求的 NPC
 				error = `第 ${attempt} 次提交 npc_id 串台: 请求 #${npc.id}，收到 #${parsed.data.npc_id}`;
 			} else {
-				eventLog?.record({
-					ts: new Date().toISOString(),
-					turnSeq,
-					role: "npc_onstage",
-					ok: true,
-					attempt,
-					durationMs: Date.now() - attemptStartedAt,
-					usage,
-					inputChars: userPrompt.length,
-					outputChars,
-				});
+				// 成功：终态事件由 stage() 收束（见函数尾）。
+				lastError = undefined;
 				return parsed.data;
 			}
 		} catch (err) {
 			error = `第 ${attempt} 次执行失败: ${err instanceof Error ? err.message : String(err)}`;
 		}
-		eventLog?.record({
-			ts: new Date().toISOString(),
-			turnSeq,
-			role: "npc_onstage",
-			ok: false,
-			attempt,
-			durationMs: Date.now() - attemptStartedAt,
-			usage,
-			inputChars: userPrompt.length,
-			outputChars,
-			error,
-		});
+		lastError = error;
 		// 校验反馈进下次 attempt（模型自纠通道）
 		userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
 	}
 	return null;
+	};
+
+	// 重试耗尽 → null 也走 stage 的正常出口（不抛）。ok 看有没有残留错误：
+	// lastError === undefined 表示某次 attempt 成功了。失败时 end 事件带 error，界面看得见这个 NPC 掉了。
+	const rehearse = eventLog?.stage("npc_onstage", turnSeq, loop, () => ({
+		ok: lastError === undefined,
+		attempt: lastAttempt,
+		usage: lastUsage,
+		inputChars: userPrompt.length,
+		outputChars: lastOutputChars,
+		...(lastError !== undefined ? { error: lastError } : {}),
+	}));
+	return rehearse === undefined ? loop() : await rehearse;
 }
 
 /**
@@ -435,6 +442,10 @@ function validateOffscreenDeltas(storyDb: StoryDb, npcs: NpcRow[], deltas: Offsc
 
 /**
  * 离线批量推演（单 session）。失败（重试耗尽）→ 返回 [] + warning 记录，不抛。
+ *
+ * 缺口 6：整个重试循环包成**一个** stage（role=npc_offscreen）。粒度为「阶段」而非「attempt」——
+ * attempt 是阶段内部的实现细节，界面该看到的是「离线段在跑」。故此处**不再**逐 attempt 落终态事件，
+ * 改由 stage() 统一收束；明细（第几次、用量、输出规模）走 endFields 挂在 end 事件上。
  */
 export async function runOffscreenBatch(npcs: NpcRow[], turnSeq: number, opts: NpcStageOptions): Promise<OffscreenDelta[]> {
 	const maxAttempts = opts.maxAttempts ?? 2;
@@ -443,76 +454,71 @@ export async function runOffscreenBatch(npcs: NpcRow[], turnSeq: number, opts: N
 	let userPrompt = buildOffscreenUserPrompt(opts.storyDb, npcs, turnSeq);
 
 	let lastError = "";
-	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-		const attemptStartedAt = Date.now();
-		let usage: SubagentUsage = ZERO_USAGE;
-		let outputChars: number | undefined;
-		let error: string | undefined;
-		try {
-			const result = await executor({
-				role: "npc_offscreen",
-				cwd: opts.cwd,
-				systemPrompt,
-				userPrompt,
-				outputTool: OFFSCREEN_TOOL,
-				model: opts.model,
-				modelRuntime: opts.modelRuntime,
-				onWarning: opts.onWarning,
-			});
-			usage = result.usage;
-			outputChars = JSON.stringify(result.output).length;
-			const parsed = offscreenZodSchema.safeParse(result.output);
-			if (!parsed.success) {
-				error = `第 ${attempt} 次提交未通过 schema 校验: ${parsed.error.issues
-					.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-					.join("; ")}`;
-			} else {
-				const problems = validateOffscreenDeltas(opts.storyDb, npcs, parsed.data.deltas);
-				if (problems.length > 0) {
-					error = `第 ${attempt} 次提交未通过语义校验: ${problems.join("; ")}`;
-				} else {
-					eventLogRecord(opts.eventLog, turnSeq, attempt, attemptStartedAt, userPrompt, outputChars, usage, true);
-					return parsed.data.deltas;
-				}
-			}
-		} catch (err) {
-			error = `第 ${attempt} 次执行失败: ${err instanceof Error ? err.message : String(err)}`;
-		}
-		lastError = error;
-		eventLogRecord(opts.eventLog, turnSeq, attempt, attemptStartedAt, userPrompt, outputChars, usage, false, error);
-		userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
-	}
-	emitWarning(
-		opts.onWarning,
-		`[npc_offscreen] 离线批量推演失败（${maxAttempts} 次重试耗尽，已丢弃本轮 deltas）: ${lastError}`,
-	);
-	return [];
-}
+	let lastAttempt = 0;
+	let lastUsage: SubagentUsage = ZERO_USAGE;
+	let lastOutputChars: number | undefined;
 
-/** eventLog 记录（role 由调用方场景决定，此处固定 npc_offscreen）。 */
-function eventLogRecord(
-	eventLog: PipelineEventLog | undefined,
-	turnSeq: number,
-	attempt: number,
-	attemptStartedAt: number,
-	userPrompt: string,
-	outputChars: number | undefined,
-	usage: SubagentUsage,
-	ok: boolean,
-	error?: string,
-): void {
-	eventLog?.record({
-		ts: new Date().toISOString(),
-		turnSeq,
-		role: "npc_offscreen",
-		ok,
-		attempt,
-		durationMs: Date.now() - attemptStartedAt,
-		usage,
+	const loop = async (): Promise<OffscreenDelta[]> => {
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			lastAttempt = attempt;
+			let usage: SubagentUsage = ZERO_USAGE;
+			let outputChars: number | undefined;
+			let error: string | undefined;
+			try {
+				const result = await executor({
+					role: "npc_offscreen",
+					cwd: opts.cwd,
+					systemPrompt,
+					userPrompt,
+					outputTool: OFFSCREEN_TOOL,
+					model: opts.model,
+					modelRuntime: opts.modelRuntime,
+					onWarning: opts.onWarning,
+				});
+				usage = result.usage;
+				outputChars = JSON.stringify(result.output).length;
+				lastUsage = usage;
+				lastOutputChars = outputChars;
+				const parsed = offscreenZodSchema.safeParse(result.output);
+				if (!parsed.success) {
+					error = `第 ${attempt} 次提交未通过 schema 校验: ${parsed.error.issues
+						.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+						.join("; ")}`;
+				} else {
+					const problems = validateOffscreenDeltas(opts.storyDb, npcs, parsed.data.deltas);
+					if (problems.length > 0) {
+						error = `第 ${attempt} 次提交未通过语义校验: ${problems.join("; ")}`;
+					} else {
+						// 成功：终态事件由 stage() 收束（见函数尾），此处只返回。
+						lastError = "";
+						return parsed.data.deltas;
+					}
+				}
+			} catch (err) {
+				error = `第 ${attempt} 次执行失败: ${err instanceof Error ? err.message : String(err)}`;
+			}
+			lastError = error;
+			// 校验反馈进下次 attempt（模型自纠通道）
+			userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
+		}
+		emitWarning(
+			opts.onWarning,
+			`[npc_offscreen] 离线批量推演失败（${maxAttempts} 次重试耗尽，已丢弃本轮 deltas）: ${lastError}`,
+		);
+		return [];
+	};
+
+	// 重试耗尽返回 [] 也算「阶段正常结束」——不抛错，故 ok 判定看有没有残留错误：
+	// lastError === "" 表示某次 attempt 成功返回了；否则这一段白跑了，界面该看得见（ok:false + error）。
+	const run = opts.eventLog?.stage("npc_offscreen", turnSeq, loop, () => ({
+		ok: lastError === "",
+		attempt: lastAttempt,
+		usage: lastUsage,
 		inputChars: userPrompt.length,
-		outputChars,
-		error,
-	});
+		outputChars: lastOutputChars,
+		...(lastError !== "" ? { error: lastError } : {}),
+	}));
+	return run === undefined ? loop() : await run;
 }
 
 // ---------------------------------------------------------------------------

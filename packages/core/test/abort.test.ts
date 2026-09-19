@@ -11,6 +11,7 @@ import { cleanupTempDir, makeTempDir } from "./helpers.ts";
 import { openSnapshotsDb, openStoryDb, snapshotsDbPath, storyDbPath } from "../src/index.ts";
 import { runWithAbort, TurnAbortedError } from "../src/abort.ts";
 import { computeNextTurnSeq, createStoryRuntime, type StoryState } from "../src/pipeline/runtime.ts";
+import { createPipelineEventLog, type PipelineEvent } from "../src/pipeline/events.ts";
 import type { SubagentResult, SubagentUsage } from "../src/subagent/runtime.ts";
 
 const ZERO: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, costTotal: 0 };
@@ -195,3 +196,81 @@ test("runTurn：已中止的 signal → TurnAbortedError，且 turn_log/快照/s
 // 刻意不再写「真跑一轮 runTurn」的用例：本机配了 auth.json，runTurn 会打真实模型（实测 9 秒 + 花钱），
 // 单测必须离线——真实一轮属 m6 acceptance 的职责。
 
+
+// ---------------------------------------------------------------------------
+// 缺口 6：轮级事件成对（runTurn 的 narrator start/end）
+// ---------------------------------------------------------------------------
+
+const ZERO_USAGE: SubagentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, costTotal: 0 };
+
+function emptyChangeset(): SubagentResult<unknown> {
+	return {
+		output: {
+			events: [],
+			time_advance: { to_time: "0000-01-01", span_note: "" },
+			new_locations: [],
+			location_moves: [],
+			new_npcs: [],
+			npc_updates: [],
+			world_state: [],
+		},
+		usage: ZERO_USAGE,
+		durationMs: 1,
+	};
+}
+
+/** 造一个最小的真实运行时（三阶段全关 / data 走桩），返回事件收集器。 */
+async function makeRuntimeWithEvents(root: string) {
+	const sessionManager = SessionManager.create(root, join(root, "sessions"));
+	const sessionId = sessionManager.getSessionId();
+	const dbPath = storyDbPath(root, sessionId);
+	const storyState: StoryState = {
+		storyDir: join(root, sessionId),
+		storyDb: openStoryDb(dbPath),
+		snapshotsDb: openSnapshotsDb(snapshotsDbPath(dbPath)),
+	};
+	const events: PipelineEvent[] = [];
+	const eventLog = createPipelineEventLog();
+	eventLog.on((e) => events.push(e));
+	const runtime = await createStoryRuntime({
+		cwd: root,
+		sessionManager,
+		storyState,
+		eventLog,
+		dataExecutor: async () => emptyChangeset(),
+	});
+	return { runtime, storyState, events };
+}
+
+test("runTurn：已中止的 signal → narrator end 照样落（ok:false），start 不悬挂", async () => {
+	const root = makeTempDir();
+	try {
+		const { runtime, storyState, events } = await makeRuntimeWithEvents(root);
+		try {
+			const controller = new AbortController();
+			controller.abort();
+			await assert.rejects(runtime.runTurn("我推门而入。", { signal: controller.signal }), TurnAbortedError);
+
+			const narrator = events.filter((e) => e.role === "narrator");
+			// 关键：中止既不是拒绝轮、也走不到正常轮末——两条显式 end 路径都到不了。
+			// 若没有 runtime 的 catch 兜底，就是「start 无 end = 一直在跑」，studio 永远显示「生成中」。
+			assert.equal(narrator.length, 2, "轮级 start/end 必须成对，中止也不例外");
+			assert.equal(narrator[0]!.phase, "start");
+			const end = narrator[1]!;
+			assert.equal(end.phase, "end");
+			assert.equal(end.ok, false, "中止不是成功");
+			assert.equal(end.turnSeq, narrator[0]!.turnSeq, "同轮次收束");
+			assert.ok(end.error !== undefined, "end 事件须带原因，否则界面只看到「失败」看不到为什么");
+
+			// 观测设施落事件，但故事库仍须零痕迹（口径与「拒绝轮零落库」一致）。
+			assert.equal(storyState.storyDb.reader.getTurnLog().length, 0, "中止轮未写 turn_log");
+			assert.equal(computeNextTurnSeq(storyState.storyDb), 1, "turn_seq 未消耗");
+		} finally {
+			runtime.dispose();
+			storyState.storyDb.close();
+			storyState.snapshotsDb.close();
+		}
+	} finally {
+		cleanupTempDir(root);
+	}
+});

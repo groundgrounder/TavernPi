@@ -117,8 +117,13 @@ export async function runStylize(
 
 	let lastError = "";
 	let lastDrift: string[] | undefined;
+	// 缺口 6：重试循环包成一个 stage（role=stylize），不再逐 attempt 落终态事件。
+	let lastAttempt = 0;
+	let lastUsage: SubagentUsage = ZERO_USAGE;
+	let lastOutputChars: number | undefined;
+	const loop = async (): Promise<{ text: string; applied: boolean; drift?: string[] }> => {
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-		const attemptStartedAt = Date.now();
+		lastAttempt = attempt;
 		let usage: SubagentUsage = ZERO_USAGE;
 		let outputChars: number | undefined;
 		let error: string | undefined;
@@ -135,6 +140,8 @@ export async function runStylize(
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;
+			lastUsage = usage;
+			lastOutputChars = outputChars;
 			const parsed = stylizeZodSchema.safeParse(result.output);
 			if (!parsed.success) {
 				error = `第 ${attempt} 次提交未通过 schema 校验: ${parsed.error.issues
@@ -143,17 +150,8 @@ export async function runStylize(
 			} else {
 				const fact = stylizeFactCheck(input.narrativeText, parsed.data.text, opts.storyDb);
 				if (fact.ok) {
-					opts.eventLog?.record({
-						ts: new Date().toISOString(),
-						turnSeq: input.turnSeq,
-						role: "stylize",
-						ok: true,
-						attempt,
-						durationMs: Date.now() - attemptStartedAt,
-						usage,
-						inputChars: userPrompt.length,
-						outputChars,
-					});
+					// 成功：终态事件由 stage() 收束（见函数尾）。
+					lastError = "";
 					return { text: parsed.data.text, applied: true };
 				}
 				lastDrift = fact.drift;
@@ -163,21 +161,21 @@ export async function runStylize(
 			error = `第 ${attempt} 次执行失败: ${err instanceof Error ? err.message : String(err)}`;
 		}
 		lastError = error;
-		opts.eventLog?.record({
-			ts: new Date().toISOString(),
-			turnSeq: input.turnSeq,
-			role: "stylize",
-			ok: false,
-			attempt,
-			durationMs: Date.now() - attemptStartedAt,
-			usage,
-			inputChars: userPrompt.length,
-			outputChars,
-			error,
-		});
 		// 事实漂移反馈进下次 attempt（模型自纠通道）
 		userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
 	}
 	emitWarning(opts.onWarning, `[stylize] 润色失败（${maxAttempts} 次重试耗尽），回退原文: ${lastError}`);
 	return { text: input.narrativeText, applied: false, drift: lastDrift };
+	};
+
+	// 回退原文也算阶段结束（不抛）。ok=false 时 end 事件带 error，界面看得见润色被跳过了。
+	const stylize = opts.eventLog?.stage("stylize", input.turnSeq, loop, () => ({
+		ok: lastError === "",
+		attempt: lastAttempt,
+		usage: lastUsage,
+		inputChars: userPrompt.length,
+		outputChars: lastOutputChars,
+		...(lastError !== "" ? { error: lastError } : {}),
+	}));
+	return stylize === undefined ? loop() : await stylize;
 }

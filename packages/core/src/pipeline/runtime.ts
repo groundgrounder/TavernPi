@@ -986,7 +986,15 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 		}
 		const turnSeq = computeNextTurnSeq(storyState.storyDb);
 		const startedAt = Date.now();
-
+		// 缺口 6：整轮开跑就落 start，studio 据此显示「生成中」而不必干等（单轮实测可达 200 秒）。
+		// 与末尾的 narrator end 配对。**拒绝轮没有 narrator end**——那一轮零落库、什么都没发生，
+		// 故它自己落一条 ok:false 的 end（见下方 InputRejectedError 处），让 start 有确定的收束，
+		// 不把悬挂的 start 留给消费者去猜。
+		eventLog?.record({ ts: new Date(startedAt).toISOString(), turnSeq, role: "narrator", phase: "start" });
+		// 配对收束的兜底（见下方 catch/finally）：正常路径由两处显式 end 收束——
+		// ① 拒绝轮（输入渠道校验不通过，零落库）② 正常轮末（line ~1350）。
+		// 其余任何抛出（subagent 炸、中止、磁盘满）都落到 catch，由它补一条 ok:false 的 end。
+		let narratorEndRecorded = false;
 		// 卡包检索注入输入：runTurn 置入，before_agent_start 经 renderNarratorPrompt 消费；
 		// 打回重写循环保持同一输入（注入扫描文本不变）。
 		pendingCollectionInput = input;
@@ -1026,6 +1034,19 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				pendingRevision = undefined;
 				// 内存记最近一次拒绝（供 /! 强制留痕兜底；仅内存，零痕迹语义不破）。
 				lastRejectedInput = { input, reason: validity.reason };
+				// 缺口 6：拒绝对应的 start 在此收束。这一轮没跑叙事，但**事件流必须成对**，
+				// 否则 studio 会一直显示「生成中」——它无从区分「还在跑」与「早被拒了」。
+				// 注意这只落事件流（观测设施），故事库仍然零痕迹，拒绝轮的零落库语义不受影响。
+				eventLog?.record({
+					ts: new Date().toISOString(),
+					turnSeq,
+					role: "narrator",
+					phase: "end",
+					ok: false,
+					durationMs: Date.now() - startedAt,
+					error: `输入被拒绝: ${validity.reason}`,
+				});
+				narratorEndRecorded = true;
 				throw new InputRejectedError(validity.reason, validity.suggestion);
 			}
 			// force=/! 前缀：放行继续 pipeline，留痕 warning（与 M4 超限放行 warning 并存时合并，见下方 setTurnLogWarnings）。
@@ -1332,11 +1353,14 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				ts: new Date().toISOString(),
 				turnSeq,
 				role: "narrator",
+				// 缺口 6：与轮首的 start 配对。
+				phase: "end",
 				// 空正文不算 ok：原先硬编码 true，导致空叙事的轮次在事件流里看起来一切正常。
 				ok: finalText.trim().length > 0,
 				durationMs: Date.now() - startedAt,
 				outputChars: finalText.length,
 			});
+			narratorEndRecorded = true;
 
 			return {
 				turnSeq,
@@ -1364,6 +1388,24 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 				oversee: overseeNote,
 				collection: pendingCollectionReport,
 			};
+		} catch (err) {
+			// 缺口 6：凡不是上面两处显式收束的抛出（subagent 炸、AbortError、磁盘/序列化错……），
+			// 都到这里补一条 end。**没有这条，轮首的 start 会永远悬挂**——studio 于是卡在
+			// 「生成中」，用户看到的现象是「界面死了」，而真相是那一轮早就抛了。
+			// 事件流是观测设施：这里的 record 绝不能再抛（record 本身已有写失败容错），
+			// 异常原样透传，绝不吞掉——取消/报错语义由调用侧判定。
+			if (eventLog !== undefined && !narratorEndRecorded) {
+				eventLog.record({
+					ts: new Date().toISOString(),
+					turnSeq,
+					role: "narrator",
+					phase: "end",
+					ok: false,
+					durationMs: Date.now() - startedAt,
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+			throw err;
 		} finally {
 			// turn 结束后复位：预演/场景卡/打回只属当轮，不泄漏到后续 prompt（下轮重新填充）。
 			// pendingOverseeNote 有跨轮语义（本轮统筹产物下一轮注入），不在 finally 复位。

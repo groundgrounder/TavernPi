@@ -163,7 +163,12 @@ test("runChapterSummary：executor 恒抛/恒垃圾 → 返回 undefined（回�
 			{ storyDb: story, cwd: dir, eventLog: log, executor: async () => stubResult({ bad: true }) },
 		);
 		assert.equal(res, undefined, "重试耗尽返回 undefined");
-		assert.ok(events.filter((e) => e.role === "chapter_summary").every((e) => e.ok === false));
+		const csRecords = events.filter((e) => e.role === "chapter_summary");
+		// 缺口 6：一个 stage = start + end；生成不出来由 end.ok=false 显形。
+		assert.equal(csRecords.length, 2);
+		assert.equal(csRecords[0]!.phase, "start");
+		assert.equal(csRecords[1]!.phase, "end");
+		assert.equal(csRecords[1]!.ok, false);
 		// 恒抛异常 → undefined
 		const res2 = await runChapterSummary(
 			{ branchEntries: [userMsg("u1", "x")], firstKeptEntryId: "k" },

@@ -109,7 +109,11 @@ function buildUserPrompt(storyDb: StoryDb, input: DataStageInput): string {
 	return parts.join("\n\n");
 }
 
-/** 跑一轮 data 阶段（重试循环）。不抛错：所有失败路径收敛为 ok:false 返回值。 */
+/** 跑一轮 data 阶段（重试循环）。不抛错：所有失败路径收敛为 ok:false 返回值。
+ *
+ * 缺口 6：重试循环包成一个 stage（role=data），不再逐 attempt 落终态事件；
+ * attempt / usage / 输出规模走 endFields 挂在 end 事件上。
+ */
 export async function runDataStage(opts: DataStageOptions): Promise<DataStageOutcome> {
 	const { storyDb, input, cwd, eventLog } = opts;
 	const maxAttempts = opts.maxAttempts ?? 3;
@@ -119,8 +123,12 @@ export async function runDataStage(opts: DataStageOptions): Promise<DataStageOut
 	let userPrompt = buildUserPrompt(storyDb, input);
 
 	let lastError = "";
+	let lastAttempt = 0;
+	let lastUsage: SubagentUsage = ZERO_USAGE;
+	let lastOutputChars: number | undefined;
+	const loop = async (): Promise<DataStageOutcome> => {
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-		const attemptStartedAt = Date.now();
+		lastAttempt = attempt;
 		let usage: SubagentUsage = ZERO_USAGE;
 		let outputChars: number | undefined;
 		let error: string | undefined;
@@ -137,6 +145,8 @@ export async function runDataStage(opts: DataStageOptions): Promise<DataStageOut
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;
+			lastUsage = usage;
+			lastOutputChars = outputChars;
 
 			const parsed = changesetZodSchema.safeParse(result.output);
 			if (!parsed.success) {
@@ -159,20 +169,7 @@ export async function runDataStage(opts: DataStageOptions): Promise<DataStageOut
 								turnSeq: input.turnSeq,
 								createdEntryId: input.createdEntryId,
 							});
-							eventLog?.record({
-								ts: new Date().toISOString(),
-								turnSeq: input.turnSeq,
-								role: "data",
-								ok: true,
-								attempt,
-								durationMs: Date.now() - attemptStartedAt,
-								usage,
-								inputChars: userPrompt.length,
-								outputChars,
-								error: `strictDrop 剔除 ${dropped.length} 项（超限放行轮）: ${dropped
-									.map((d) => `${d.item}: ${d.message}`)
-									.join("; ")}`,
-							});
+							// 终态事件由 stage() 收束（见函数尾）；strictDrop 剔除明细走返回值 + endFields。
 							return {
 								ok: true,
 								attempts: attempt,
@@ -196,17 +193,6 @@ export async function runDataStage(opts: DataStageOptions): Promise<DataStageOut
 							turnSeq: input.turnSeq,
 							createdEntryId: input.createdEntryId,
 						});
-						eventLog?.record({
-							ts: new Date().toISOString(),
-							turnSeq: input.turnSeq,
-							role: "data",
-							ok: true,
-							attempt,
-							durationMs: Date.now() - attemptStartedAt,
-							usage,
-							inputChars: userPrompt.length,
-							outputChars,
-						});
 						return { ok: true, attempts: attempt, applied, usage, durationMs: Date.now() - startedAt };
 					} catch (applyErr) {
 						error = `第 ${attempt} 次提交未通过语义校验/应用: ${applyErr instanceof Error ? applyErr.message : String(applyErr)}`;
@@ -217,20 +203,32 @@ export async function runDataStage(opts: DataStageOptions): Promise<DataStageOut
 			error = `第 ${attempt} 次执行失败: ${err instanceof Error ? err.message : String(err)}`;
 		}
 		lastError = error;
-		eventLog?.record({
-			ts: new Date().toISOString(),
-			turnSeq: input.turnSeq,
-			role: "data",
-			ok: false,
-			attempt,
-			durationMs: Date.now() - attemptStartedAt,
-			usage,
-			inputChars: userPrompt.length,
-			outputChars,
-			error,
-		});
 		// 校验反馈进下次 attempt 的 userPrompt（模型自纠通道，重试机制）
 		userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
 	}
 	return { ok: false, attempts: maxAttempts, error: lastError, durationMs: Date.now() - startedAt };
+	};
+
+	// 重试耗尽 → ok:false 返回值（不抛）也算阶段结束；ok 取结果的 ok 字段。
+	const run = eventLog?.stage("data", input.turnSeq, loop, (result) => {
+		// strictDrop 剔除明细挂在 end 事件上（原先写在成功事件的 error 字段里，语义是「有损但放行」）。
+		const droppedNote =
+			result !== undefined && result.ok && result.dropped !== undefined && result.dropped.length > 0
+				? `strictDrop 剔除 ${result.dropped.length} 项（超限放行轮）: ${result.dropped
+						.map((d) => `${d.item}: ${d.message}`)
+						.join("; ")}`
+				: undefined;
+		const failureNote = result === undefined || result.ok ? (lastError === "" ? undefined : lastError) : result.error;
+		const note = droppedNote ?? failureNote;
+		return {
+			ok: result?.ok ?? false,
+			attempt: result?.attempts ?? lastAttempt,
+			// DataStageOutcome 是联合：ok:false 分支没有 usage，故用 in 收窄。
+			usage: result !== undefined && result.ok ? result.usage : lastUsage,
+			inputChars: userPrompt.length,
+			outputChars: lastOutputChars,
+			...(note !== undefined ? { error: note } : {}),
+		};
+	});
+	return run === undefined ? loop() : await run;
 }

@@ -188,8 +188,14 @@ export async function runChapterSummary(
 	const systemPrompt = loadPrompt("chapter_summary", opts.prompts).content;
 	let userPrompt = buildChapterSummaryUserPrompt(opts.storyDb, input);
 
+	let lastError = "";
+	// 缺口 6：重试循环包成一个 stage（role=chapter_summary），不再逐 attempt 落终态事件。
+	let lastAttempt = 0;
+	let lastUsage: SubagentUsage = ZERO_USAGE;
+	let lastOutputChars: number | undefined;
+	const loop = async (): Promise<string | undefined> => {
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-		const attemptStartedAt = Date.now();
+		lastAttempt = attempt;
 		let usage: SubagentUsage = ZERO_USAGE;
 		let outputChars: number | undefined;
 		let error: string | undefined;
@@ -206,6 +212,8 @@ export async function runChapterSummary(
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;
+			lastUsage = usage;
+			lastOutputChars = outputChars;
 			const parsed = chapterSummaryZodSchema.safeParse(result.output);
 			if (!parsed.success) {
 				error = `第 ${attempt} 次提交未通过 schema 校验: ${parsed.error.issues
@@ -214,35 +222,27 @@ export async function runChapterSummary(
 			} else if (parsed.data.summary.trim() === "") {
 				error = `第 ${attempt} 次提交摘要为空`;
 			} else {
-				opts.eventLog?.record({
-					ts: new Date().toISOString(),
-					turnSeq: lastTurnSeq(opts.storyDb),
-					role: "chapter_summary",
-					ok: true,
-					attempt,
-					durationMs: Date.now() - attemptStartedAt,
-					usage,
-					inputChars: userPrompt.length,
-					outputChars,
-				});
+				// 成功：终态事件由 stage() 收束（见函数尾）。
+				lastError = "";
 				return parsed.data.summary;
 			}
 		} catch (err) {
 			error = `第 ${attempt} 次执行失败: ${err instanceof Error ? err.message : String(err)}`;
 		}
-		opts.eventLog?.record({
-			ts: new Date().toISOString(),
-			turnSeq: lastTurnSeq(opts.storyDb),
-			role: "chapter_summary",
-			ok: false,
-			attempt,
-			durationMs: Date.now() - attemptStartedAt,
-			usage,
-			inputChars: userPrompt.length,
-			outputChars,
-			error,
-		});
+		lastError = error;
 		userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
 	}
 	return undefined;
+	};
+
+	// 生成不出来（返回 undefined）也算阶段结束。ok=false 时 end 事件带 error。
+	const summary = opts.eventLog?.stage("chapter_summary", lastTurnSeq(opts.storyDb), loop, () => ({
+		ok: lastError === "",
+		attempt: lastAttempt,
+		usage: lastUsage,
+		inputChars: userPrompt.length,
+		outputChars: lastOutputChars,
+		...(lastError !== "" ? { error: lastError } : {}),
+	}));
+	return summary === undefined ? loop() : await summary;
 }

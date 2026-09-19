@@ -298,8 +298,13 @@ export async function runSceneAnalysis(
 	let userPrompt = buildSceneUserPrompt(opts.storyDb, input);
 
 	let lastError = "";
+	// 缺口 6：整个重试循环包成一个 stage（role=story_scene），不再逐 attempt 落终态事件。
+	let lastAttempt = 0;
+	let lastUsage: SubagentUsage = ZERO_USAGE;
+	let lastOutputChars: number | undefined;
+	const loop = async (): Promise<SceneAnalysisResult> => {
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-		const attemptStartedAt = Date.now();
+		lastAttempt = attempt;
 		let usage: SubagentUsage = ZERO_USAGE;
 		let outputChars: number | undefined;
 		let error: string | undefined;
@@ -316,6 +321,8 @@ export async function runSceneAnalysis(
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;
+			lastUsage = usage;
+			lastOutputChars = outputChars;
 			const parsed = sceneCardZodSchema.safeParse(result.output);
 			if (!parsed.success) {
 				error = `第 ${attempt} 次提交未通过 schema 校验: ${parsed.error.issues
@@ -326,17 +333,8 @@ export async function runSceneAnalysis(
 				if (problems.length > 0) {
 					error = `第 ${attempt} 次提交未通过语义校验: ${problems.join("; ")}`;
 				} else {
-					opts.eventLog?.record({
-						ts: new Date().toISOString(),
-						turnSeq: input.turnSeq,
-						role: "story_scene",
-						ok: true,
-						attempt,
-						durationMs: Date.now() - attemptStartedAt,
-						usage,
-						inputChars: userPrompt.length,
-						outputChars,
-					});
+					// 成功：终态事件由 stage() 收束（见函数尾）。
+					lastError = "";
 					return { card: parsed.data, fallback: false };
 				}
 			}
@@ -344,22 +342,22 @@ export async function runSceneAnalysis(
 			error = `第 ${attempt} 次执行失败: ${err instanceof Error ? err.message : String(err)}`;
 		}
 		lastError = error;
-		opts.eventLog?.record({
-			ts: new Date().toISOString(),
-			turnSeq: input.turnSeq,
-			role: "story_scene",
-			ok: false,
-			attempt,
-			durationMs: Date.now() - attemptStartedAt,
-			usage,
-			inputChars: userPrompt.length,
-			outputChars,
-			error,
-		});
 		userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
 	}
 	emitWarning(opts.onWarning, `[story_scene] 场景分析失败（${maxAttempts} 次重试耗尽），降级确定性兜底: ${lastError}`);
 	return { card: buildFallbackSceneCard(opts.storyDb), fallback: true };
+	};
+
+	// 降级兜底也算阶段结束（不抛）。ok 看有没有残留错误：lastError !== "" 即整段重试耗尽。
+	const analyze = opts.eventLog?.stage("story_scene", input.turnSeq, loop, () => ({
+		ok: lastError === "",
+		attempt: lastAttempt,
+		usage: lastUsage,
+		inputChars: userPrompt.length,
+		outputChars: lastOutputChars,
+		...(lastError !== "" ? { error: lastError } : {}),
+	}));
+	return analyze === undefined ? loop() : await analyze;
 }
 
 // ---------------------------------------------------------------------------
@@ -514,8 +512,13 @@ export async function runReview(
 	let userPrompt = buildReviewUserPrompt(opts.storyDb, input);
 
 	let lastError = "";
+	// 缺口 6：重试循环包成一个 stage（role=story_review），不再逐 attempt 落终态事件。
+	let lastAttempt = 0;
+	let lastUsage: SubagentUsage = ZERO_USAGE;
+	let lastOutputChars: number | undefined;
+	const loop = async (): Promise<ReviewFinding[]> => {
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-		const attemptStartedAt = Date.now();
+		lastAttempt = attempt;
 		let usage: SubagentUsage = ZERO_USAGE;
 		let outputChars: number | undefined;
 		let error: string | undefined;
@@ -532,45 +535,38 @@ export async function runReview(
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;
+			lastUsage = usage;
+			lastOutputChars = outputChars;
 			const parsed = reviewZodSchema.safeParse(result.output);
 			if (!parsed.success) {
 				error = `第 ${attempt} 次提交未通过 schema 校验: ${parsed.error.issues
 					.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
 					.join("; ")}`;
 			} else {
-				opts.eventLog?.record({
-					ts: new Date().toISOString(),
-					turnSeq: input.turnSeq,
-					role: "story_review",
-					ok: true,
-					attempt,
-					durationMs: Date.now() - attemptStartedAt,
-					usage,
-					inputChars: userPrompt.length,
-					outputChars,
-				});
+				// 成功：终态事件由 stage() 收束（见函数尾）。
+				lastError = "";
 				return parsed.data.findings;
 			}
 		} catch (err) {
 			error = `第 ${attempt} 次执行失败: ${err instanceof Error ? err.message : String(err)}`;
 		}
 		lastError = error;
-		opts.eventLog?.record({
-			ts: new Date().toISOString(),
-			turnSeq: input.turnSeq,
-			role: "story_review",
-			ok: false,
-			attempt,
-			durationMs: Date.now() - attemptStartedAt,
-			usage,
-			inputChars: userPrompt.length,
-			outputChars,
-			error,
-		});
 		userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
 	}
 	emitWarning(opts.onWarning, `[story_review] 审查失败（${maxAttempts} 次重试耗尽），放行: ${lastError}`);
 	return [];
+	};
+
+	// 审查失败放行（返回 []）也算阶段结束。ok=false 时 end 事件带 error，界面看得见这层降级了。
+	const review = opts.eventLog?.stage("story_review", input.turnSeq, loop, () => ({
+		ok: lastError === "",
+		attempt: lastAttempt,
+		usage: lastUsage,
+		inputChars: userPrompt.length,
+		outputChars: lastOutputChars,
+		...(lastError !== "" ? { error: lastError } : {}),
+	}));
+	return review === undefined ? loop() : await review;
 }
 
 // ---------------------------------------------------------------------------
@@ -621,8 +617,13 @@ export async function runOversee(
 	let userPrompt = buildOverseeUserPrompt(opts.storyDb, input);
 
 	let lastError = "";
+	// 缺口 6：重试循环包成一个 stage（role=story_oversee），不再逐 attempt 落终态事件。
+	let lastAttempt = 0;
+	let lastUsage: SubagentUsage = ZERO_USAGE;
+	let lastOutputChars: number | undefined;
+	const loop = async (): Promise<OverseeNote | null> => {
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-		const attemptStartedAt = Date.now();
+		lastAttempt = attempt;
 		let usage: SubagentUsage = ZERO_USAGE;
 		let outputChars: number | undefined;
 		let error: string | undefined;
@@ -639,45 +640,38 @@ export async function runOversee(
 			});
 			usage = result.usage;
 			outputChars = JSON.stringify(result.output).length;
+			lastUsage = usage;
+			lastOutputChars = outputChars;
 			const parsed = overseeZodSchema.safeParse(result.output);
 			if (!parsed.success) {
 				error = `第 ${attempt} 次提交未通过 schema 校验: ${parsed.error.issues
 					.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
 					.join("; ")}`;
 			} else {
-				opts.eventLog?.record({
-					ts: new Date().toISOString(),
-					turnSeq: input.turnSeq,
-					role: "story_oversee",
-					ok: true,
-					attempt,
-					durationMs: Date.now() - attemptStartedAt,
-					usage,
-					inputChars: userPrompt.length,
-					outputChars,
-				});
+				// 成功：终态事件由 stage() 收束（见函数尾）。
+				lastError = "";
 				return parsed.data;
 			}
 		} catch (err) {
 			error = `第 ${attempt} 次执行失败: ${err instanceof Error ? err.message : String(err)}`;
 		}
 		lastError = error;
-		opts.eventLog?.record({
-			ts: new Date().toISOString(),
-			turnSeq: input.turnSeq,
-			role: "story_oversee",
-			ok: false,
-			attempt,
-			durationMs: Date.now() - attemptStartedAt,
-			usage,
-			inputChars: userPrompt.length,
-			outputChars,
-			error,
-		});
 		userPrompt += `\n\n## 上次提交失败反馈（必须修正后重新提交）\n${error}`;
 	}
 	emitWarning(opts.onWarning, `[story_oversee] 全统筹失败（${maxAttempts} 次重试耗尽），跳过: ${lastError}`);
 	return null;
+	};
+
+	// 跳过统筹（返回 null）也算阶段结束。ok=false 时 end 事件带 error。
+	const oversee = opts.eventLog?.stage("story_oversee", input.turnSeq, loop, () => ({
+		ok: lastError === "",
+		attempt: lastAttempt,
+		usage: lastUsage,
+		inputChars: userPrompt.length,
+		outputChars: lastOutputChars,
+		...(lastError !== "" ? { error: lastError } : {}),
+	}));
+	return oversee === undefined ? loop() : await oversee;
 }
 
 // ---------------------------------------------------------------------------

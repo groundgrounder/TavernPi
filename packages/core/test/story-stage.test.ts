@@ -351,8 +351,14 @@ test("runSceneAnalysis：重试耗尽 → fallback=true 确定性兜底卡 + eve
 		assert.equal(result.card.current_story_time, "0000-01-01");
 		assert.equal(result.card.major_event, false);
 		const sceneRecords = records.filter((r) => r.role === "story_scene");
-		assert.equal(sceneRecords.length, 2, "maxAttempts 默认 2");
-		assert.ok(sceneRecords.every((r) => r.ok === false));
+		// 缺口 6：粒度从「每次 attempt」改成「整个阶段」——故是 start+end 两条，不是 2 条失败事件。
+		assert.equal(sceneRecords.length, 2, "一个 stage = start + end");
+		assert.equal(sceneRecords[0]!.phase, "start");
+		const end = sceneRecords[1]!;
+		assert.equal(end.phase, "end");
+		assert.equal(end.ok, false, "重试耗尽 → end 事件的 ok:false");
+		assert.equal(end.attempt, 2, "endFields 挂在结束事件上：重试了 2 次");
+		assert.match(end.error ?? "", /schema 校验/, "降级原因必须留在 end 事件上，否则界面只看到「失败」看不到为什么");
 		story.close();
 	} finally {
 		cleanupTempDir(dir);
@@ -551,7 +557,10 @@ test("runReview：重试耗尽 → 返回 []（审查失败放行）", async () 
 		);
 		assert.deepEqual(findings, []);
 		const reviewRecords = records.filter((r) => r.role === "story_review");
-		assert.ok(reviewRecords.every((r) => r.ok === false));
+		// 缺口 6：start + end，不是逐 attempt。
+		assert.equal(reviewRecords.length, 2, "一个 stage = start + end");
+		assert.equal(reviewRecords[0]!.phase, "start");
+		assert.equal(reviewRecords[1]!.ok, false, "放弃审查（返回 []）在事件流里必须显形");
 		story.close();
 	} finally {
 		cleanupTempDir(dir);

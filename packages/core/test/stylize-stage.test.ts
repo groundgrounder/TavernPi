@@ -219,8 +219,12 @@ test("runStylize：恒漂移重试耗尽 → 回退原文 applied=false + drift 
 		assert.equal(result.text, original, "回退原文");
 		assert.ok(result.drift?.some((d) => d.includes("数字集合不一致")));
 		const stylizeRecords = records.filter((r) => r.role === "stylize");
-		assert.equal(stylizeRecords.length, 2, "maxAttempts 默认 2");
-		assert.ok(stylizeRecords.every((r) => r.ok === false));
+		// 缺口 6：start + end（不是逐 attempt）；重试次数挂在 end 的 attempt 字段上。
+		assert.equal(stylizeRecords.length, 2, "一个 stage = start + end");
+		assert.equal(stylizeRecords[0]!.phase, "start");
+		assert.equal(stylizeRecords[1]!.phase, "end");
+		assert.equal(stylizeRecords[1]!.ok, false, "回退原文必须在事件流里显形");
+		assert.equal(stylizeRecords[1]!.attempt, 2, "endFields 记下了重试次数");
 		story.close();
 	} finally {
 		cleanupTempDir(dir);
