@@ -10,7 +10,7 @@
 //  - 去掉 setAgents 里的 assertAgentsShape → 「形态校验」断言变红。
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { cleanupTempDir, makeTempDir } from "./helpers.ts";
@@ -281,36 +281,62 @@ test("缺口 10：续写未在 meta 记钉 → 空列表（老故事兼容）", 
 	}
 });
 
-test("回归：无开场白的故事 getSessionFile 给出不存在的路径 → resume 会静默造新故事", async () => {
-	// 这条不是缺口 7/10 的正题，是写上面的测试时**撞出来的既有缺陷**，钉在这里防止它被无声掩盖。
+test("回归：resume 指向不存在的 session 文件 → 响亮拒绝，不静默造新故事", async () => {
+	// 这条不是缺口 7/10 的正题，是写上面的测试时**撞出来的既有缺陷**，现已修并钉住。
 	//
 	// 病根：pi 的 session 文件是懒写的，只有故事里存在消息时才落盘。无开场白的故事
 	// （无包的新故事就是这种）没有任何消息 → 文件从没写过。此时 getSessionFile() 照样返回
-	// 一个路径，listStories 也看不到（它按文件存在与否给 sessionFile），但调用侧若直接把它
-	// 喂给 openStory({resume})，pi 的 _setSessionFile 会走「文件不存在 → newSession()」分支，
-	// **生成一个全新 sessionId**，于是续写变成了「打开另一个新故事」，用户的库被撇在一边。
+	// 一个路径，调用侧若直接把它喂给 openStory({resume})，pi 的 _setSessionFile 会走
+	// 「文件不存在 → newSession()」分支，**生成一个全新 sessionId**——续写变成「打开另一个
+	// 新故事」，用户的库被撇在一边，且不报任何错。静默 + 看起来正常 = 最坏的一类失败。
 	//
-	// 当前行为（如实钉住，不做粉饰）：路径不存在 → resume 得到的是不同 sessionId 的新故事。
+	// 判据：抛错（不是「换了个 session 继续跑」），且**不留下新故事目录**。
 	const root = makeTempDir();
 	try {
 		const storiesRoot = join(root, "stories");
 		const first = await openStory({ cwd: root, storiesRoot }); // 无包 = 无开场白
 		const sessionFile = first.sessionManager.getSessionFile();
-		const firstSessionId = first.sessionManager.getSessionId();
 		assert.ok(sessionFile !== undefined, "pi 仍会给出一个路径");
 		assert.equal(existsSync(sessionFile!), false, "无消息 → session 文件从未落盘（本缺陷的判据）");
+		const dirsBefore = readdirSync(storiesRoot).sort();
 		cleanup(first);
 
-		const resumed = await openStory({ cwd: root, storiesRoot, resume: sessionFile });
-		try {
-			assert.notEqual(
-				resumed.sessionManager.getSessionId(),
-				firstSessionId,
-				"resume 指向不存在的文件 → pi 新建 session，续写走丢（待修：openStory 应显式拒绝不存在的 resume 路径）",
-			);
-		} finally {
-			cleanup(resumed);
-		}
+		await assert.rejects(
+			openStory({ cwd: root, storiesRoot, resume: sessionFile }),
+			/session 文件不存在/,
+			"不存在的 resume 路径必须响亮拒绝",
+		);
+		assert.deepEqual(
+			readdirSync(storiesRoot).sort(),
+			dirsBefore,
+			"被拒的 resume 不得留下任何新目录（既没建新故事，也没建空库）",
+		);
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("回归：session 文件的 sessionId 指向不存在的故事目录 → 拒绝，不新建空库", async () => {
+	// 第二道纵深防御：session 文件在、但对应故事目录被移走/删掉。
+	// 若无此闸，openStoryDb 会就地建一个新库（它有建目录语义），「续写」就成了「造一个空故事」。
+	const root = makeTempDir();
+	try {
+		const storiesRoot = join(root, "stories");
+		const first = await openStory({ cwd: root, storiesRoot, packDirs: [storyPack(root)] });
+		const sessionFile = first.sessionManager.getSessionFile()!;
+		const sessionId = first.sessionManager.getSessionId();
+		cleanup(first);
+
+		// 移走故事目录（模拟用户手动挪过/删过），保留 session 文件。
+		renameSync(join(storiesRoot, sessionId), join(root, "moved-away"));
+		const dirsBefore = readdirSync(storiesRoot).sort();
+
+		await assert.rejects(
+			openStory({ cwd: root, storiesRoot, resume: sessionFile }),
+			/故事目录不存在/,
+			"孤儿 session 必须响亮拒绝",
+		);
+		assert.deepEqual(readdirSync(storiesRoot).sort(), dirsBefore, "不得就地建出空故事目录");
 	} finally {
 		cleanupTempDir(root);
 	}

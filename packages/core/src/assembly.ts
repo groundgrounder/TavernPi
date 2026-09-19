@@ -10,6 +10,7 @@
 // 状态容器语义：OpenedStory 是**原地更新**的可变容器——rebuildRuntime / forkFrom 会替换其中的
 // runtime / storyState / eventLog / packs 字段，调用侧持有的引用始终有效（改开关后不必重取对象）。
 
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { createPipelineEventLog, type PipelineEventLog } from "./pipeline/events.ts";
@@ -148,9 +149,33 @@ export async function openStory(opts: OpenStoryOptions): Promise<OpenedStory> {
 
 	if (opts.resume !== undefined) {
 		// 续写：session 文件恢复；模式与卡包从 story.meta.json 恢复。
+		//
+		// **先拒绝对不存在的 resume 路径**（不交给 pi 兜底）。理由：pi 的 session 文件是懒写的，
+		// 只有故事里存在消息时才落盘；无开场白的故事（无包新故事就是这种）文件从未写过。
+		// SessionManager.open 遇到不存在的文件会走「newSession()」分支**生成全新 sessionId**——
+		// 于是「续写」悄悄变成「打开另一个新故事」：用户的库被撇在一边，且不报任何错。
+		// 这是最坏的一类失败（静默 + 看起来正常），故在此响亮拒绝。
+		//
+		// 注意判据是「文件是否存在」而非「是否像 session 文件」：后者交给 pi（它有版本校验与
+		// header 解析，坏文件在那里会抛错）。这里只堵住「压根没有这个文件」这一条。
+		if (!existsSync(opts.resume)) {
+			throw new Error(
+				`续写失败：session 文件不存在 ${opts.resume}。` +
+					"（无开场白的故事可能从未落盘——请改用故事枚举 listStories 取当下有效的 sessionFile。）",
+			);
+		}
 		sessionManager = SessionManager.open(opts.resume);
 		const sessionId = sessionManager.getSessionId();
 		const dbPath = storyDbPath(storiesRoot, sessionId);
+		// 纵深防御：即便 session 文件在，其 sessionId 也必须指向一个**已存在的故事目录**。
+		// 否则 openStoryDb 会就地建一个新库（openStoryDb 有建目录语义）——那等于把
+		// 「续写」变成「造一个空故事」，同样是静默失败。
+		if (!existsSync(join(storiesRoot, sessionId))) {
+			throw new Error(
+				`续写失败：session ${sessionId} 对应的故事目录不存在 ${join(storiesRoot, sessionId)}。` +
+					"（库被移动或删除？拒绝静默新建一个空故事。）",
+			);
+		}
 		storyState = {
 			storyDir: join(storiesRoot, sessionId),
 			storyDb: openStoryDb(dbPath),
