@@ -4,6 +4,8 @@
 // 本层不写库，只读；NpcComposite 内 traits/memories/relations 随 NPC 可见性整体过滤。
 // 净化规则见 resolveRelatedNpcSet；world_state 隐藏规则见 isSysBookkeepingKey。
 
+import { KERNEL_TABLE_WHITELIST } from "./kernel-tables.ts";
+import { paginateRows, type TableInfo, type TablePage, type TableQuery } from "./query.ts";
 import type { DbReader, NpcComposite } from "./reader.ts";
 import type { LocationPath } from "./location-path.ts";
 import type {
@@ -319,6 +321,122 @@ export class DbView {
 	listDataStatus(): DataStatusRow[] {
 		if (this.filter === "user-related") return [];
 		return this.reader.listDataStatus();
+	}
+
+	// ------------------------------------------------------------------
+	// 通用只读查询（DB 浏览器/包表查看用；形态约束见 query.ts，可见性在本类）
+	// ------------------------------------------------------------------
+
+	/**
+	 * 表清单。user-related 下**只列内核表**：包自定义表若不可读（见 queryTable），
+	 * 列出它们只会让 UI 出现一堆点了报错的项，且表名本身就可能带剧情（如 `xx_secrets`）。
+	 * 行数本身不含内容，故随清单给出。
+	 */
+	listTables(): TableInfo[] {
+		const infos = this.reader.listTableInfos();
+		if (this.filter === "none") return infos;
+		return infos.filter((info) => info.kernel);
+	}
+
+	/**
+	 * 通用只读查询（分页）。只生成 SELECT，表名/列名须命中真实 metadata（query.ts 的三道闸）。
+	 *
+	 * 可见性：
+	 * - filter="none"（作者视图）：全量透传。
+	 * - filter="user-related"（冒险视图）：内核表按**与本类既有方法同一套规则**逐表净化
+	 *   （rules 见 visibleRowPredicate；两者一致性由 view-query 测试比对钉住，防规则漂移）；
+	 *   **包自定义表一律拒绝**（抛 TableNotVisibleError）——内核无从判断包表的可见性语义
+	 *   （表里很可能存着玩家不该知道的事实），默认放行等于给冒险视图开一个后门。
+	 *
+	 * 过滤发生在分页**之前**（过滤规则是 JS 函数，下推 SQL 等于把规则抄第二遍），
+	 * 故 total 是「可见行数」而非表内行数；扫描上限见 query.ts 的 TABLE_QUERY_MAX_SCAN。
+	 */
+	queryTable(query: TableQuery): TablePage {
+		if (this.filter === "none") return this.reader.readTablePage(query);
+		if (!KERNEL_TABLE_WHITELIST.includes(query.table)) {
+			throw new TableNotVisibleError(query.table);
+		}
+		// 读全量（equals/orderBy 已在 SQL 层生效），再按可见性过滤，最后分页。
+		const read = this.reader.readTable({ table: query.table, ...(query.equals !== undefined ? { equals: query.equals } : {}), ...(query.orderBy !== undefined ? { orderBy: query.orderBy } : {}), ...(query.descending !== undefined ? { descending: query.descending } : {}) });
+		const visible = read.rows.filter((row) => this.isRowVisible(query.table, row));
+		const page = paginateRows(visible, query);
+		return {
+			table: query.table,
+			columns: read.columns,
+			rows: page.rows,
+			total: page.total,
+			limit: page.limit,
+			offset: page.offset,
+			truncated: read.truncated,
+		};
+	}
+
+	/** 冒险视图下某表内的可见事件 id 集（events 的可见性规则见 isRowVisible）。 */
+	private visibleEventIds(): Set<number> {
+		const ids = new Set<number>();
+		for (const row of this.reader.readTable({ table: "events" }).rows) {
+			if (this.isRowVisible("events", row)) ids.add(Number(row.id));
+		}
+		return ids;
+	}
+
+	/**
+	 * 行可见性谓词（user-related）。与 listNpcs / listEvents / listWorldState 等既有方法同规则：
+	 * - npcs 及其从属表（npc_traits / npc_memories / npc_relations / event_npcs）：按相关集合过滤；
+	 *   relations 与 event_npcs 要求**两端**都在集合内（与 getNpc 的 relations 过滤一致）。
+	 * - events：只给发生在 user 到过地点的事件；event_npcs 再按可见事件收窄。
+	 * - locations：只给到过的（含祖先链，由 resolveVisitedLocationIds 展开）。
+	 * - location_log：只给 player 自己的。
+	 * - world_state：隐藏 sys_ 前缀内核簿记键。
+	 * - phases / directives / data_status：叙事结构、作者意图、内核运维面 → 全不可见（空）。
+	 * - clock / time_log / turn_log / schema_migrations：时间与自己的经历、以及无内容的迁移簿记 → 全量。
+	 */
+	private isRowVisible(table: string, row: Record<string, unknown>): boolean {
+		switch (table) {
+			case "npcs":
+				return this.inSet(Number(row.id));
+			case "npc_traits":
+			case "npc_memories":
+				return this.inSet(Number(row.npc_id));
+			case "npc_relations":
+				return this.inSet(Number(row.npc_a)) && this.inSet(Number(row.npc_b));
+			case "events":
+				return row.location_id !== null && row.location_id !== undefined && this.visitedLocationIds.has(Number(row.location_id));
+			case "event_npcs":
+				return this.inSet(Number(row.npc_id)) && this.cachedVisibleEventIds().has(Number(row.event_id));
+			case "locations":
+				return this.visitedLocationIds.has(Number(row.id));
+			case "location_log":
+				return row.subject === "player";
+			case "world_state":
+				return !isSysBookkeepingKey(String(row.key));
+			case "phases":
+			case "directives":
+			case "data_status":
+				return false;
+			default:
+				return true; // clock / time_log / turn_log / schema_migrations
+		}
+	}
+
+	/** 可见事件 id 集按需算一次（一次查询内多行 event_npcs 共用，避免逐行重算）。 */
+	private eventIdCache: Set<number> | undefined;
+
+	private cachedVisibleEventIds(): Set<number> {
+		if (this.eventIdCache === undefined) this.eventIdCache = this.visibleEventIds();
+		return this.eventIdCache;
+	}
+}
+
+/** 冒险视图下读包自定义表被拒（内核无从判断其可见性语义，见 DbView.queryTable）。 */
+export class TableNotVisibleError extends Error {
+	constructor(table: string) {
+		super(
+			`包自定义表 ${JSON.stringify(table)} 在冒险视图（user-related）下不可读：` +
+				"内核无从判断包表的可见性语义（表里可能存着玩家不该知道的事实），默认拒绝。" +
+				"作者视图（filter=\"none\"）可读。",
+		);
+		this.name = "TableNotVisibleError";
 	}
 }
 

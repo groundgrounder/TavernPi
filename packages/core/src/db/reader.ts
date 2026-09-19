@@ -3,6 +3,15 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { buildLocationPath, type LocationPath } from "./location-path.ts";
+import {
+	listTableInfos,
+	readTablePage,
+	readTableRows,
+	type TableInfo,
+	type TablePage,
+	type TableQuery,
+	type TableRows,
+} from "./query.ts";
 import { parseTimeYear } from "./time-fuzzy.ts";
 import { PLAYER_LOCATION_KEY } from "./types.ts";
 import type {
@@ -316,6 +325,28 @@ export class DbReader {
 		return this.db
 			.prepare("SELECT turn_seq, status, attempts, error FROM data_status ORDER BY turn_seq")
 			.all() as unknown as DataStatusRow[];
+	}
+
+	// ------------------------------------------------------------------
+	// 通用只读查询（受限；安全面见 query.ts 文件头）
+	// ------------------------------------------------------------------
+
+	/** 表清单（表名 + 是否内核表 + 行数）。 */
+	listTableInfos(): TableInfo[] {
+		return listTableInfos(this.db);
+	}
+
+	/**
+	 * 读表（**未过滤**、未分页）：本层只回答「这张表里有什么」，可见性净化是 DbView 的职责。
+	 * 要带冒险视图语义请走 `DbView.queryTable`。
+	 */
+	readTable(query: Omit<TableQuery, "limit" | "offset">): TableRows {
+		return readTableRows(this.db, query);
+	}
+
+	/** 读表 + 分页（**未过滤**）。DbView 不用它——过滤必须在分页之前做，故那里走 readTable。 */
+	readTablePage(query: TableQuery): TablePage {
+		return readTablePage(this.db, query);
 	}
 }
 
