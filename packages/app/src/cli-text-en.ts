@@ -133,6 +133,9 @@ export const EN = {
 	packsReloaded: (list: string) => `reloaded ${list}`,
 	packsReloadEntry: (name: string, count: number) => `${name} (${count} entries)`,
 	reloadNone: "no world packs loaded",
+	packsBadArg: "usage: /packs [add|remove] <dir>… (no args lists loaded packs)",
+	packsRemoveMiss: (dirs: string) => `not loaded, nothing changed: ${dirs}`,
+	packsRejected: "pack switch failed (load validation failed; nothing changed):",
 	pinUsage: "usage: /pin <pack:type:id>",
 	pinnedList: (list: string) => `pinned ${list}`,
 

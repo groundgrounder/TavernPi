@@ -52,6 +52,7 @@ export const ZH: typeof EN = {
 			title: "世界",
 			items: [
 				["/packs", "已加载的世界包"],
+				["/packs add|remove <目录>", "装载/卸载世界包（改的是装载关系，不动磁盘文件）"],
 				["/pin <条目id>", "固定条目（每轮必注入）"],
 				["/unpin <条目id>", "取消固定"],
 				["/reload", "重载世界包"],
@@ -116,6 +117,9 @@ export const ZH: typeof EN = {
 	packsReloaded: (list) => `已重载 ${list}`,
 	packsReloadEntry: (name, count) => `${name}（${count} 个条目）`,
 	reloadNone: "没有加载任何世界包",
+	packsBadArg: "用法：/packs [add|remove] <目录>…（不给参数则列出已加载的包）",
+	packsRemoveMiss: (dirs) => `没有装载这些目录，未做改动：${dirs}`,
+	packsRejected: "换包失败（加载校验未过，未做任何改动）：",
 	pinUsage: "用法：/pin <包名:类型:id>",
 	pinnedList: (list) => `已固定 ${list}`,
 

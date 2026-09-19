@@ -42,6 +42,7 @@ import {
 	resolvePromptChain,
 	resolveStylizeEnabled,
 	setAgents,
+	setPacks,
 	setStoryPromptOverride,
 	type InteractionRequest,
 	type OpenedStory,
@@ -389,6 +390,40 @@ async function runCommand(line: string, runtime: StoryRuntime, ctx: CliCtx): Pro
 			return undefined;
 		}
 		case "packs": {
+			// /packs                       查看当前装载的包
+			// /packs add <目录>...         加包（可多目录，空格分隔）
+			// /packs remove <目录>...      减包（按目录精确匹配）
+			// 缺口 10 余项：增删包改的是「装载哪些包」，必须重建 runtime（packDirs 在两处被
+			// 冻结：提示词 pack 层解析、代码包 extension 挂载）。加载校验 + 落盘 + 重建已收口
+			// 到内核 setPacks，此处只管解析参数与呈现。**包内文本的热更新不走这里**（那个本来就热）。
+			if (arg !== "") {
+				const [sub, ...rest] = arg.split(/\s+/);
+				if ((sub !== "add" && sub !== "remove") || rest.length === 0) {
+					ui.line(ui.note(EN.packsBadArg, "warn"));
+					return undefined;
+				}
+				// 目录以 cwd 为基准解析——用户在会话里敲的是相对路径，落盘要绝对路径。
+				const targets = rest.map((r) => resolve(process.cwd(), r));
+				const next =
+					sub === "add"
+						? [...new Set([...ctx.opened.packDirs, ...targets])]
+						: ctx.opened.packDirs.filter((d) => !targets.includes(d));
+				if (sub === "remove" && next.length === ctx.opened.packDirs.length) {
+					ui.line(ui.note(EN.packsRemoveMiss(targets.join(EN.listSep)), "warn"));
+					return undefined;
+				}
+				try {
+					// 内核负责：全量加载校验 → 落盘 meta → 重建 runtime（任一步失败都零副作用）。
+					await setPacks(ctx.opened, next);
+				} catch (err) {
+					ui.line(ui.note(EN.packsRejected, "warn"));
+					ui.line(ui.detail(err instanceof Error ? err.message : String(err), "warn"));
+					return undefined;
+				}
+				const after = ctx.opened.packs === undefined ? [] : ctx.opened.packs.cache.getPacks().packs;
+				ui.lines(renderPacks(ui, after));
+				return ctx.opened.runtime;
+			}
 			if (ctx.opened.packs === undefined) {
 				ui.lines(renderPacks(ui, []));
 			} else {
