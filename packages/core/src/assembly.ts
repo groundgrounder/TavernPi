@@ -21,12 +21,13 @@ import {
 	type StoryState,
 	type StylizeRuntimeOptions,
 } from "./pipeline/runtime.ts";
-import { createStory, inheritStoryMeta, readStoryMeta, resolveAgentsFromMeta } from "./story.ts";
+import { createStory, inheritStoryMeta, persistPacks, readStoryMeta, resolveAgentsFromMeta } from "./story.ts";
 import { defaultStoriesRoot, openStoryDb, storyDbPath } from "./db/story-db.ts";
 import { openSnapshotsDb, snapshotsDbPath } from "./snapshot/snapshots-db.ts";
 import { buildAncestorChain } from "./snapshot/ancestors.ts";
 import { forkStoryDb } from "./snapshot/fork.ts";
 import { PackCache } from "./pack/cache.ts";
+import { loadPacks } from "./pack/loader.ts";
 import { packMigrations } from "./pack/seed.ts";
 import { defaultGlobalPromptsDir, type PromptLayerDirs } from "./prompts/loader.ts";
 import { loadSettings, type TavernSettings } from "./settings.ts";
@@ -184,7 +185,7 @@ export async function openStory(opts: OpenStoryOptions): Promise<OpenedStory> {
 		const meta = readStoryMeta(storyState.storyDir);
 		modeFromMeta = meta?.mode !== undefined;
 		if (packDirs.length === 0 && meta !== undefined) {
-			packDirs = meta.packs.map((p) => p.dir);
+			packDirs = (meta.packs ?? []).map((p) => p.dir);
 		}
 		// 缺口 7/10：开关与钉随 meta 复原。**只在调用侧未显式给时**才复原——
 		// 命令行 -agents/-pin 是更明确的意图，不该被上次会话的记忆盖掉。
@@ -293,6 +294,54 @@ export async function rebuildRuntime(opened: OpenedStory): Promise<OpenedStory> 
  */
 export async function setAgents(opened: OpenedStory, agents: StoryAgents): Promise<OpenedStory> {
 	opened.runtime.setAgents(agents); // 校验 + 落盘（onAgentsChanged 已把 assembly.agents 同步好）
+	await rebuildRuntime(opened);
+	return opened;
+}
+
+/**
+ * 改故事的卡包列表并让它生效（缺口 10 的余项：`setPacks`）。
+ *
+ * **为什么必须重建，而不能只换 cache**：卡包目录列表在两个地方被冻结成构建期常量——
+ * ① `runtimePromptDirs.packDirs`（提示词 pack 层解析）；② `collectCodePackEntryPaths`
+ * 读 `story.meta.json` 拿 `additionalExtensionPaths`（代码包 extension 注册进主叙事 session）。
+ * 这两者都只在 `createStoryRuntime` 里算一次，实例建好后改不了。故加/减包 = 重建 runtime。
+ *
+ * **热更新与换包是两回事，别混**：包内**文本**（集合条目 / story.yaml / 提示词）本来就是热的——
+ * `PackCache.getPacks()` 每次调用重扫 mtime，而 narrator 每轮调它，作者改文本下一轮就生效，
+ * 不需要本函数。本函数管的是**增删整个包**（改的是「装载哪些包」，不是「包里写了什么」）。
+ * 因此本函数**重建 PackCache**：新包的 mtime 指纹从未被记录过，沿用旧实例会让首次 getPacks
+ * 拿旧快照回退。
+ *
+ * **顺序同 setAgents，理由也同**：先加载 + 全量校验（`loadPacks` 会跑 zod strict / 引用完整性 /
+ * 前缀扫描 / id 冲突，任一不过则抛错、零副作用），再落盘 meta，**最后**才重建。
+ * 若先重建后校验，旧实例已 dispose，调用侧拿着废引用还不知道自己错在哪。
+ *
+ * **懒建 packs 注入**：`assembly.packs` 在 packDirs 为空时是 undefined（无注入形态）。
+ * 从「无包」换成「有包」时必须把它建出来，否则重建后 narrator 仍渲染「（无世界包注入）」；
+ * 反之从「有包」换成「无包」时必须删掉，否则残留的 cache 会继续注入已移除的包。
+ *
+ * 失败语义：本函数**不删任何磁盘文件**——移出一个包只是让故事不再装载它，包目录原样留着。
+ */
+export async function setPacks(opened: OpenedStory, packDirs: string[]): Promise<OpenedStory> {
+	// 归一化为绝对路径（与 openStory 的 packDirs 处理一致）——否则 meta 里存相对路径，
+	// 续写时按不同 cwd 解析会指向别处。
+	const dirs = packDirs.map((d) => resolve(d));
+	// 校验先行：loadPacks 收集**全部**问题一次性抛（不是遇到第一个就停），且此刻零副作用。
+	const packs = dirs.length > 0 ? loadPacks(dirs) : [];
+	// 落盘（读不懂的 meta 拒绝覆盖，persistPacks 抛错）；写成功后才动内存态。
+	persistPacks(opened.storyState.storyDir, packs);
+
+	opened.packDirs = dirs;
+	opened.prompts = {
+		globalDir: opened.prompts.globalDir,
+		...(dirs.length > 0 ? { packDirs: dirs } : {}),
+	};
+	if (dirs.length > 0) {
+		// 重建 cache：新包的 mtime 指纹从未记录，沿用旧实例会回退到旧快照。
+		opened.packs = { cache: new PackCache(dirs), pinned: () => opened.pinned };
+	} else {
+		delete opened.packs;
+	}
 	await rebuildRuntime(opened);
 	return opened;
 }

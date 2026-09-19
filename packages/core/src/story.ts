@@ -41,7 +41,12 @@ export interface CreateStoryOptions {
 /** story.meta.json 内容（--resume 恢复 packDirs / stylize defaultStyle / mode / extensionEntryPaths 的载体）。 */
 export interface StoryMetaFile {
 	title?: string;
-	packs: Array<{ name: string; dir: string; version?: string; extensionEntryPaths?: string[] }>;
+	/**
+	 * 装载的世界包。**可选**（与 pinned 同规）：无包故事落成字段缺失，而不是 `packs: []`——
+	 * 后者读起来像「这个故事装了个空集合」，与「没这个概念」混在一起会让人误判。
+	 * 消费侧一律 `meta.packs ?? []`（runtime 的 collectCodePackEntryPaths 本来就如此）。
+	 */
+	packs?: Array<{ name: string; dir: string; version?: string; extensionEntryPaths?: string[] }>;
 	defaultStyle?: string;
 	/** 内核级模式；adventure 由其派生 locked，随 meta 持久化并 fork/clone 继承。 */
 	mode?: StoryMode;
@@ -158,6 +163,46 @@ export function persistPinned(storyDir: string, pinned: string[]): void {
 	}
 	const { pinned: _drop, ...rest } = meta;
 	writeStoryMeta(storyDir, pinned.length > 0 ? { ...rest, pinned: [...pinned] } : rest);
+}
+
+/**
+ * 持久化卡包列表到 `story.meta.json`（缺口 10 的 `setPacks` 落盘侧）。**合并写**：保留其他字段
+ * （title / mode / defaultStyle / agents / pinned …），只覆盖 `packs`。
+ *
+ * 与 `persistAgents` / `persistPinned` 同一道纪律：读不懂的 meta 一律拒绝覆盖（报错而非静默丢失）。
+ * 这里尤其要紧——`packs` 决定续写时装载哪些世界包，写坏了会静默变成「无包故事」，那意味着
+ * 卡包的表与 seed 都不在，故事看着还在、事实全丢。
+ *
+ * 为什么入参是已加载的 `WorldPack[]` 而不是路径：meta 里每项要带 `name` / `version` /
+ * `extensionEntryPaths`，这些只有加载后才能知道。由调用侧（setPacks）先加载校验，再交进来落盘——
+ * **校验先行**，非法卡包不该写进 meta。
+ *
+ * 空列表落成字段缺失（与 persistPinned 同规）：`packs: []` 与「没有这个字段」同义，meta 保持干净。
+ * 注意这**不删任何磁盘文件**——只是故事不再装载它们。
+ */
+export function persistPacks(storyDir: string, packs: WorldPack[]): void {
+	const meta = readStoryMeta(storyDir);
+	if (meta === undefined) {
+		throw new Error(
+			`无法持久化卡包列表：读不懂 ${join(storyDir, "story.meta.json")}（文件缺失或不是合法 JSON）。` +
+				"拒绝覆盖——请先修好或删掉该文件。",
+		);
+	}
+	const { packs: _drop, ...rest } = meta;
+	const next: NonNullable<StoryMetaFile["packs"]> = packs.map((p) => ({
+		name: p.name,
+		dir: p.dir,
+		// 与 createStory 同源：version 从 package.json 现读（WorldPack 不带 version 字段）。
+		...readPackVersion(p.dir),
+		// 代码挂载（M6-P4a）：extensionEntryPaths 透传进 meta，--resume 可恢复。
+		...(p.extensionEntryPaths.length > 0 ? { extensionEntryPaths: p.extensionEntryPaths } : {}),
+	}));
+	writeStoryMeta(storyDir, next.length > 0 ? { ...rest, packs: next } : rest);
+}
+
+/** 从 `story.meta.json` 复原卡包目录列表（续写路径）；字段缺省 / 列表为空 → `[]`（无包故事）。 */
+export function resolvePackDirsFromMeta(storyDir: string): string[] {
+	return (readStoryMeta(storyDir)?.packs ?? []).map((p) => p.dir);
 }
 
 export interface CreateStoryResult {

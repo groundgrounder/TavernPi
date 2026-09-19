@@ -162,7 +162,7 @@ test("forkFrom：新 session / 新故事目录 / 继承 meta / 重放卡包迁�
 			// meta 继承：模式随 fork 继承（此处 creation）
 			const meta = readStoryMeta(opened.storyState.storyDir);
 			assert.equal(meta?.mode, "creation");
-			assert.deepEqual(meta?.packs.map((p) => p.name), ["shouling"]);
+			assert.deepEqual(meta?.packs?.map((p) => p.name), ["shouling"]);
 			// 卡包迁移重放：自建表存在且 seed 行在（否则 fork 产物的库只有内核表）
 			assert.equal(favorRows(opened), 1, "fork 必须重放卡包 schema+seed");
 			assert.ok(info.eventCount >= 0);

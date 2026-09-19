@@ -297,9 +297,11 @@ export {
 	inheritStoryMeta,
 	listStories,
 	persistAgents,
+	persistPacks,
 	persistPinned,
 	readStoryMeta,
 	resolveAgentsFromMeta,
+	resolvePackDirsFromMeta,
 	writeStoryMeta,
 	type CreateStoryOptions,
 	type CreateStoryResult,
@@ -316,6 +318,8 @@ export {
 	resolveStylizeEnabled,
 	// 缺口 7：改开关并生效（校验 + 落盘 + 重建，收敛到一处，调用侧不必自己记得要重建）
 	setAgents,
+	// 缺口 10 余项：改卡包列表并生效（同一条纪律：加载校验 + 落盘 + 重建）
+	setPacks,
 	type ForkInfo,
 	type OpenedStory,
 	type OpenStoryOptions,

@@ -115,10 +115,10 @@ test("createStory：story.meta.json 内容（title/packs/defaultStyle/createdAt�
 			) as StoryMetaFile;
 			assert.equal(meta.title, "守陵人");
 			assert.equal(meta.defaultStyle, "冷峻简练");
-			assert.equal(meta.packs.length, 1);
-			assert.equal(meta.packs[0]!.name, "shouling");
-			assert.equal(meta.packs[0]!.dir, packDir);
-			assert.equal(meta.packs[0]!.version, "0.0.0");
+			assert.equal(meta.packs?.length, 1);
+			assert.equal(meta.packs?.[0]!.name, "shouling");
+			assert.equal(meta.packs?.[0]!.dir, packDir);
+			assert.equal(meta.packs?.[0]!.version, "0.0.0");
 			assert.ok(typeof meta.createdAt === "string" && meta.createdAt.length > 0);
 		} finally {
 			created.storyState.storyDb.close();
