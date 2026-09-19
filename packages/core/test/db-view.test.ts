@@ -348,3 +348,174 @@ test("isNpcCardVisible：card_ref 对应行在集合内即可见，未 seed 或�
 		cleanupTempDir(dir);
 	}
 });
+
+// ---------------------------------------------------------------------------
+// 缺口 12：可见性集合惰性解析 + refresh()（原先「构造即冻结」）
+// ---------------------------------------------------------------------------
+
+test("缺口 12：同一实例跨世界变化——不 refresh 就还是旧可见性（这是惰性的**语义**，不是 bug）", () => {
+	const dir = makeTempDir();
+	try {
+		const { story, stranger } = setupAnchorStory(dir);
+		const view = createDbView(story.reader, "user-related");
+
+		// 初始：无关者在王城，玩家在庭院 → 不可见
+		assert.equal(view.getNpc(stranger.id), undefined, "初始应不可见");
+		assert.equal(view.listNpcs().some((n) => n.id === stranger.id), false);
+
+		// 世界变了：无关者搬到玩家所在地（庭院）
+		story.writer.moveSubject({ turnSeq: 9, subject: `npc:${stranger.id}`, toLocationId: view.getPlayerLocation()!.id });
+
+		// **已经解析过的集合不会自己变**——这正是「冻结」的语义；断言它，是为了让「必须 refresh」有据可依
+		assert.equal(view.getNpc(stranger.id), undefined, "未 refresh → 仍是旧集合（可见性不会自动跟随）");
+
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("缺口 12：refresh() 后可见性跟上世界变化（无需丢弃实例重建）", () => {
+	const dir = makeTempDir();
+	try {
+		const { story, stranger } = setupAnchorStory(dir);
+		const view = createDbView(story.reader, "user-related");
+
+		assert.equal(view.getNpc(stranger.id), undefined, "初始不可见");
+
+		const yardId = view.getPlayerLocation()!.id;
+		story.writer.moveSubject({ turnSeq: 9, subject: `npc:${stranger.id}`, toLocationId: yardId });
+
+		view.refresh();
+
+		assert.notEqual(view.getNpc(stranger.id), undefined, "refresh 后：搬到玩家所在地 → 可见");
+		assert.equal(view.listNpcs().some((n) => n.id === stranger.id), true, "listNpcs 一并跟上");
+		// 关系过滤也按新集合算
+		assert.deepEqual(view.relatedSet.npcIds.has(stranger.id), true);
+
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("缺口 12：refresh() 也刷新「到过地点」集（地点/事件过滤跟着变）", () => {
+	const dir = makeTempDir();
+	try {
+		const { story } = setupAnchorStory(dir);
+		const view = createDbView(story.reader, "user-related");
+
+		// 王城是庭院的父级，玩家长辈链已在集内；另建一个从未去过的地点
+		const faraway = story.writer.insertLocation({ name: "远郊" });
+		assert.equal(view.getLocation(faraway.id), undefined, "没去过 → 不可见");
+
+		// 玩家走过去
+		story.writer.moveSubject({ turnSeq: 10, subject: "player", toLocationId: faraway.id });
+
+		assert.equal(view.getLocation(faraway.id), undefined, "未 refresh → 地点集仍是旧的");
+		view.refresh();
+		assert.notEqual(view.getLocation(faraway.id), undefined, "refresh 后：到过 → 可见");
+		assert.equal(view.listLocations().some((l) => l.id === faraway.id), true);
+
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("缺口 12：filter=none 不解析任何可见性集合（惰性 → 全量透传零额外开销）", () => {
+	// 判据不是「跑得快」而是**行为**：none 下无论世界怎么变，透传结果永远= reader 的结果。
+	// 若实现里 none 也去解析集合，这些断言依旧会过——故本条真正钉的是「none 分支不依赖集合」
+	// （由下面的 stub reader 计数钉死：解析函数若被调用会去读 world_state/turn_log）。
+	const dir = makeTempDir();
+	try {
+		const { story, stranger } = setupAnchorStory(dir);
+		const view = createDbView(story.reader, "none");
+		// world_state 全量（含 sys_ 与 player_npc_id）
+		assert.ok(view.listWorldState().some((r) => r.key === PLAYER_NPC_ID_KEY));
+		// 无关 NPC 可见
+		assert.notEqual(view.getNpc(stranger.id), undefined);
+		// 作者面（phases / directives / data_status）可见 —— 这就是文档里说的「作者视图」
+		assert.deepEqual(view.listPhases(), story.reader.listPhases());
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("缺口 12：refresh() 也作废「可见事件 id」缓存——否则 queryTable(event_npcs) 用陈旧事件集判可见性", () => {
+	// event_npcs 的可见性规则是「NPC 在集合内 **且** 事件可见」。事件集是一次查询内按需算的
+	// 缓存（eventIdCache）。若 refresh() 漏掉它，玩家移动到新地点后新事件虽然进了 events 表，
+	// event_npcs 却仍按旧事件集判——**个别调用方根本看不到这个 bug**，因为只有 queryTable 走那条路。
+	const dir = makeTempDir();
+	try {
+		const { story, yard, player, ally } = setupAnchorStory(dir);
+		const view = createDbView(story.reader, "user-related");
+
+		// 在「远郊」（玩家没去过）放一个事件，名册含玩家与盟友。
+		const faraway = story.writer.insertLocation({ name: "远郊" });
+		const farEvent = story.writer.insertEvent({
+			turnSeq: 20,
+			summary: "远郊的集会",
+			locationId: faraway.id,
+			npcIds: [player.id, ally.id],
+		});
+
+		// 先查一次，把 eventIdCache 建起来（此刻远郊事件不可见）
+		assert.deepEqual(
+			view.queryTable({ table: "events", limit: 100 }).rows.map((r) => Number(r.id)),
+			[],
+			"玩家没去过远郊 → 那条事件不可见",
+		);
+		assert.deepEqual(view.queryTable({ table: "event_npcs", limit: 100 }).rows, [], "对应名册也不可见");
+
+		// 玩家走到远郊
+		story.writer.moveSubject({ turnSeq: 21, subject: "player", toLocationId: faraway.id });
+		view.refresh();
+
+		assert.deepEqual(
+			view.queryTable({ table: "events", limit: 100 }).rows.map((r) => Number(r.id)),
+			[farEvent.id],
+			"refresh 后事件可见",
+		);
+		// 名册是 (event_id, npc_id) 复合主键：一条事件带两个在场 NPC → 两行，event_id 都是 farEvent.id。
+		// 故判据取「事件列只含该事件」+「在场人是这两个」，而不是「行数=1」。
+		const roster = view.queryTable({ table: "event_npcs", limit: 100 }).rows;
+		assert.deepEqual(
+			[...new Set(roster.map((r) => Number(r.event_id)))],
+			[farEvent.id],
+			"refresh 必须一并作废事件 id 缓存，否则名册仍按旧事件集判 → 这里会是空",
+		);
+		assert.deepEqual(
+			roster.map((r) => Number(r.npc_id)).sort((a, b) => a - b),
+			[player.id, ally.id].sort((a, b) => a - b),
+			"在场名册两人都在集合内 → 两条都可见",
+		);
+		// yard 只为让「玩家原所在地」明确，不参与断言
+		assert.notEqual(yard.id, faraway.id);
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});
+
+test("缺口 12：惰性解析不改变判定结果——relatedSet 内容与直接调 resolveRelatedNpcSet 一致", () => {
+	const dir = makeTempDir();
+	try {
+		const { story, player, ally, local, stranger } = setupAnchorStory(dir);
+		const view = createDbView(story.reader, "user-related");
+		const direct = resolveRelatedNpcSet(story.reader);
+		const viaView = view.relatedSet;
+
+		assert.equal(viaView.playerNpcId, direct.playerNpcId);
+		assert.equal(viaView.degraded, direct.degraded);
+		assert.deepEqual([...viaView.npcIds].sort((a, b) => a - b), [...direct.npcIds].sort((a, b) => a - b));
+		// 同一实例重复取用返回同一对象（缓存生效，不是每次重算）
+		assert.equal(view.relatedSet, viaView, "缓存：重复取用应是同一个对象");
+		assert.ok(direct.npcIds.has(player.id) && direct.npcIds.has(ally.id) && direct.npcIds.has(local.id));
+		assert.equal(direct.npcIds.has(stranger.id), false, "无关者仍不在集合内（惰性化没放宽判定）");
+		story.close();
+	} finally {
+		cleanupTempDir(dir);
+	}
+});

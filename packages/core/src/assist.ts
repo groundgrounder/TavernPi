@@ -56,8 +56,10 @@ function formatNpcText(view: DbView, npcId: number): string {
 }
 
 /** 为一组只读 DbView 定义 assist 工具集（只读，无写工具；createAgentSession 白名单据此装配）。
- *  view 传给 getter（每次 execute 现建 createDbView+resolveRelatedNpcSet，开销小）——保证跨轮存续期间
- *  冒险可见性新鲜（离场 NPC 不可见、新同地点 NPC 可见），而不是每会话冻结一次 RelatedNpcSet。 */
+ *  view 传给 getter（每次 execute 现建 createDbView）——保证跨轮存续期间冒险可见性新鲜
+ *  （离场 NPC 不可见、新同地点 NPC 可见），而不是每会话冻结一次 RelatedNpcSet。
+ *  「每次现建」是等价做法之一：惰性解析让「建了但没查」不再付解析开销，因此这样写很便宜。
+ *  若调用方想留着一个实例复用，改调 `DbView.refresh()` 同样能拿到新鲜可见性（缺口 12）。 */
 export function createAssistTools(viewFactory: () => DbView, opts: AssistToolOptions): ToolDefinition[] {
 	const tools: ToolDefinition[] = [];
 

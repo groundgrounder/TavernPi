@@ -171,30 +171,55 @@ function resolveMentionedNpcIds(reader: DbReader): Set<number> {
  * - world_state 隐藏 sys_ 前缀内核簿记键（player_location / player_npc_id 保持可见）。
  * - clock / time_log / turn_log 全量：时间可感知，叙事与玩家输入本就是 user 自己的经历。
  *
- * 注意：相关集合与到访地点集都在**构造时**解析并冻结一次——可见性不会随移动/新叙事自动刷新。
- * 需要新鲜可见性的调用方（如 assist 工具的跨轮存续会话）应**每次查询重建**视图，而不是复用同一实例。
+ * 注意：相关集合与到访地点集都是**惰性解析 + 缓存**的（首次访问时算一次，之后复用）。
+ * 可见性不会随移动/新叙事自动刷新——需要新鲜可见性的调用方调 `refresh()`，
+ * 或（等价地）**每次查询新建视图**。旧版是构造时立即解析并冻结，两者对外行为一致，
+ * 但惰性版让「构造了但没查」零开销，也让 `refresh()` 有明确的语义落点。
  */
 export class DbView {
 	private readonly reader: DbReader;
 	private readonly filter: "none" | "user-related";
-	private readonly related: RelatedNpcSet;
+	/** 惰性缓存：undefined = 尚未解析（或已被 refresh 作废）。 */
+	private relatedCache: RelatedNpcSet | undefined;
 	/** 「user 经历过」的地点集合（user-related 下用于地点/事件过滤，见 resolveVisitedLocationIds）。 */
-	private readonly visitedLocationIds: Set<number>;
+	private visitedCache: Set<number> | undefined;
 
 	constructor(reader: DbReader, filter: "none" | "user-related") {
 		this.reader = reader;
 		this.filter = filter;
-		this.related = resolveRelatedNpcSet(reader);
-		this.visitedLocationIds = resolveVisitedLocationIds(reader);
 	}
 
-	/** 相关 NPC 集合（供 UI/assist 消费；"none" 模式下仅信息性）。 */
+	/**
+	 * 丢弃已解析的可见性集合，下次访问时重算（缺口 12）。
+	 *
+	 * 用途：同一个视图实例跨轮复用时（例如 UI 面板持有一个长期视图、或一次会话里连查多张表），
+	 * 世界已经变了（玩家移动、新 NPC 落库、新叙事提到新名字），可见性该跟着变。
+	 * 旧设计下唯一办法是丢掉整个实例另建一个——能用，但「什么时候该重建」这条规则
+	 * 只存在于调用方脑子里，迟早有人漏掉。有 refresh() 之后，规则是「查之前想要新鲜的，就刷一下」。
+	 *
+	 * 不需要它也能正确：**每次查询新建视图**是等价做法（既有调用方就是这么做的）。
+	 * refresh() 是给「想留着实例」的场景省掉重复构造。
+	 */
+	refresh(): void {
+		this.relatedCache = undefined;
+		this.visitedCache = undefined;
+		this.eventIdCache = undefined;
+	}
+
+	/** 相关 NPC 集合（供 UI/assist 消费；"none" 模式下仅信息性）。惰性解析，见类注释。 */
 	get relatedSet(): RelatedNpcSet {
-		return this.related;
+		if (this.relatedCache === undefined) this.relatedCache = resolveRelatedNpcSet(this.reader);
+		return this.relatedCache;
+	}
+
+	/** 「user 到过」的地点集合（惰性解析）。 */
+	private get visitedLocationIds(): Set<number> {
+		if (this.visitedCache === undefined) this.visitedCache = resolveVisitedLocationIds(this.reader);
+		return this.visitedCache;
 	}
 
 	private inSet(npcId: number): boolean {
-		return this.related.npcIds.has(npcId);
+		return this.relatedSet.npcIds.has(npcId);
 	}
 
 	// ------------------------------------------------------------------
