@@ -175,3 +175,52 @@ test("runtime.prompts：resolveChain / setStoryOverride / clearStoryOverride 绑
 		cleanupTempDir(root);
 	}
 });
+
+test("runtime.prompts：显式传 globalDir → setGlobalOverride 写进去、resolveChain 认它、clear 能删", async () => {
+	const root = makeTempDir();
+	try {
+		const sm = SessionManager.create(root, join(root, "sessions"));
+		const sessionId = sm.getSessionId();
+		const storyDir = join(root, sessionId);
+		const dbPath = storyDbPath(root, sessionId);
+		const storyState: StoryState = {
+			storyDir,
+			storyDb: openStoryDb(dbPath),
+			snapshotsDb: openSnapshotsDb(snapshotsDbPath(dbPath)),
+		};
+		writeStoryMeta(storyDir, { packs: [], mode: "creation", createdAt: new Date().toISOString() });
+		const globalDir = join(root, "global-prompts");
+
+		const runtime = await createStoryRuntime({
+			cwd: root,
+			sessionManager: sm,
+			storyState,
+			prompts: { globalDir },
+			dataExecutor: async () =>
+				stubResult({
+					events: [],
+					time_advance: { to_time: "0000-01-01", span_note: "" },
+					new_locations: [],
+					location_moves: [],
+					new_npcs: [],
+					npc_updates: [],
+					world_state: [],
+				}),
+		});
+		try {
+			assert.equal(runtime.prompts.resolveChain("narrator").effectiveLayer, "builtin", "初始只有 builtin");
+
+			const path = runtime.prompts.setGlobalOverride("narrator", "本机全局偏好");
+			assert.equal(path, join(globalDir, "narrator.md"), "写口须落在 runtime 自己的 globalDir，不是硬编码家目录");
+			assert.equal(runtime.prompts.resolveChain("narrator").effectiveLayer, "global", "resolveChain 应认它");
+			assert.equal(runtime.prompts.clearGlobalOverride("narrator"), true);
+			assert.equal(runtime.prompts.resolveChain("narrator").effectiveLayer, "builtin", "删掉后回退");
+		} finally {
+			runtime.dispose();
+			storyState.storyDb.close();
+			storyState.snapshotsDb.close();
+		}
+	} finally {
+		cleanupTempDir(root);
+	}
+});

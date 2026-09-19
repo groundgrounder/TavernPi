@@ -12,7 +12,7 @@
 // 占位符语法（M2 定案）：`{{标识符}}`，标识符 = [A-Za-z][A-Za-z0-9_]*，两侧允许空白。
 // 未在 values 中提供的占位符原样保留并记入 unknownPlaceholders（去重，保首现顺序）。
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -222,6 +222,43 @@ export function setStoryPromptOverride(storyDir: string, role: string, content: 
 export function clearStoryPromptOverride(storyDir: string, role: string): void {
 	assertValidRole(role);
 	rmSync(join(storyDir, "prompts", `${role}${PROMPT_EXT}`), { force: true });
+}
+
+/**
+ * 写/覆盖 global 层提示词：写 <globalDir>/<role>.md（缺口 5）。
+ *
+ * **为什么 global 层能写、pack 层不能**：global 是「本机作者的全局偏好」，作者对自己机器上的
+ * 文件有完全的处置权；pack 是**别人分发的产物**——在这里改写等于偷偷改了分发内容，下次更新
+ * 卡包就冲突，故 pack 层只读（想改请到包目录里改，见 loadPrompt 的回退链）。
+ *
+ * `globalDir` 缺省 `defaultGlobalPromptsDir()`（~/.tavernpi/prompts）。显式传入是为了让测试与
+ * 「多份全局配置」的场景可控（与 `loadPrompt` 的 `dirs.globalDir` 同一语义）。
+ *
+ * 目录不存在会建；父级是普通文件之类的失败**原样抛**——写提示词是作者主动行为，
+ * 静默失败会让作者以为改好了、实际下轮还是旧提示词。
+ */
+export function setGlobalPromptOverride(role: string, content: string, globalDir?: string): string {
+	assertValidRole(role);
+	const dir = globalDir ?? defaultGlobalPromptsDir();
+	mkdirSync(dir, { recursive: true });
+	const path = join(dir, `${role}${PROMPT_EXT}`);
+	writeFileSync(path, content);
+	return path;
+}
+
+/**
+ * 删 global 层提示词：删 <globalDir>/<role>.md；不存在则 no-op。
+ *
+ * 「删掉 → 回退到下一层」与 clearStoryPromptOverride 同规，但**后果更响**：
+ * global 通常直接盖住 builtin，删掉后角色行为会明显变化。返回值告诉调用侧
+ * 「到底删掉了没有」，因为它无法从 no-op 里区分「本来就没有」。
+ */
+export function clearGlobalPromptOverride(role: string, globalDir?: string): boolean {
+	assertValidRole(role);
+	const path = join(globalDir ?? defaultGlobalPromptsDir(), `${role}${PROMPT_EXT}`);
+	if (!existsSync(path)) return false;
+	rmSync(path, { force: true });
+	return true;
 }
 
 export interface PlaceholderRender {

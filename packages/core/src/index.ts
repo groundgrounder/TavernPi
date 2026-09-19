@@ -161,11 +161,13 @@ export type {
 export {
 	assertValidRole,
 	builtinPromptsDir,
+	clearGlobalPromptOverride,
 	clearStoryPromptOverride,
 	defaultGlobalPromptsDir,
 	loadPrompt,
 	renderPlaceholders,
 	resolvePromptChain,
+	setGlobalPromptOverride,
 	setStoryPromptOverride,
 	type LoadedPrompt,
 	type PlaceholderRender,

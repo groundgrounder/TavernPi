@@ -9,11 +9,13 @@ import { cleanupTempDir, makeTempDir } from "./helpers.ts";
 import {
 	assertValidRole,
 	builtinPromptsDir,
+	clearGlobalPromptOverride,
 	clearStoryPromptOverride,
 	defaultGlobalPromptsDir,
 	loadPrompt,
 	renderPlaceholders,
 	resolvePromptChain,
+	setGlobalPromptOverride,
 	setStoryPromptOverride,
 } from "../src/prompts/loader.ts";
 
@@ -242,5 +244,121 @@ test("setStoryPromptOverride / clearStoryPromptOverride：story 层覆盖命中�
 		assert.throws(() => assertValidRole("Narrator"), /非法提示词角色名/);
 	} finally {
 		cleanupTempDir(storyDir);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// 缺口 5：global 层提示词可写（pack 层刻意只读）
+// ---------------------------------------------------------------------------
+
+test("setGlobalPromptOverride：写入 <globalDir>/<role>.md，返回落盘路径，loadPrompt 立刻读到", () => {
+	const root = makeTempDir();
+	try {
+		const globalDir = join(root, "global-prompts");
+		const path = setGlobalPromptOverride("narrator", "全局版提示词", globalDir);
+
+		assert.equal(path, join(globalDir, "narrator.md"), "返回路径要与实际落盘位置一致");
+		const loaded = loadPrompt("narrator", { globalDir });
+		assert.equal(loaded.layer, "global", "global 层应生效");
+		assert.equal(loaded.content, "全局版提示词");
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("setGlobalPromptOverride：覆盖已存在的 global 提示词（改写是它的本分）", () => {
+	const root = makeTempDir();
+	try {
+		const globalDir = join(root, "g");
+		setGlobalPromptOverride("data", "第一版", globalDir);
+		setGlobalPromptOverride("data", "第二版", globalDir);
+
+		assert.equal(loadPrompt("data", { globalDir }).content, "第二版", "后写应覆盖先写");
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("setGlobalPromptOverride：目录不存在会建出来（首次使用 global 层不该要求手建目录）", () => {
+	const root = makeTempDir();
+	try {
+		const globalDir = join(root, "a", "b", "c");
+		assert.doesNotThrow(() => setGlobalPromptOverride("narrator", "深目录", globalDir));
+		assert.equal(loadPrompt("narrator", { globalDir }).content, "深目录");
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("setGlobalPromptOverride：role 非法 → 抛错（防路径穿越，与 story 层同一道闸）", () => {
+	const root = makeTempDir();
+	try {
+		assert.throws(() => setGlobalPromptOverride("../../etc/passwd", "x", join(root, "g")), /非法提示词角色名/);
+		assert.throws(() => setGlobalPromptOverride("Data", "x", join(root, "g")), /非法提示词角色名/);
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("clearGlobalPromptOverride：删掉后回退到下一层；返回值区分「真删了」与「本来就没有」", () => {
+	const root = makeTempDir();
+	try {
+		const globalDir = join(root, "g");
+		setGlobalPromptOverride("narrator", "全局版", globalDir);
+
+		assert.equal(clearGlobalPromptOverride("narrator", globalDir), true, "存在 → 真删掉了");
+		assert.equal(loadPrompt("narrator", { globalDir }).layer, "builtin", "删掉后应回退到 builtin");
+		assert.equal(clearGlobalPromptOverride("narrator", globalDir), false, "第二次 → 本来就没有");
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("global 层缺省目录是 ~/.tavernpi/prompts（显式传参只用于测试/多份配置）", () => {
+	assert.equal(defaultGlobalPromptsDir(), join(homedir(), ".tavernpi", "prompts"));
+});
+
+test("分层写：story 覆盖 global（高层压低层），两层各自独立", () => {
+	const root = makeTempDir();
+	try {
+		const globalDir = join(root, "g");
+		const storyDir = join(root, "s");
+		setGlobalPromptOverride("stylize", "全局版", globalDir);
+		setStoryPromptOverride(storyDir, "stylize", "故事版");
+
+		// 判据取「哪一层生效」，不是只看内容——否则分不清是覆盖生效还是回退读到别的层
+		const loaded = loadPrompt("stylize", { globalDir, storyDir });
+		assert.equal(loaded.layer, "story", "story 是最高层");
+		assert.equal(loaded.content, "故事版");
+
+		clearStoryPromptOverride(storyDir, "stylize");
+		const fallback = loadPrompt("stylize", { globalDir, storyDir });
+		assert.equal(fallback.layer, "global", "删掉 story 覆盖后应由 global 接管（不是直接掉到 builtin）");
+		assert.equal(fallback.content, "全局版");
+	} finally {
+		cleanupTempDir(root);
+	}
+});
+
+test("缺口 5 的边界：global 写口不碰 pack 层（改别人分发的包会与更新冲突）", () => {
+	const root = makeTempDir();
+	try {
+		const globalDir = join(root, "g");
+		const packDir = join(root, "pack");
+		writeLayerPrompt(packDir, "narrator", "卡包自带");
+
+		// 优先级是 story > pack > global > builtin：卡包**压过** global。
+		// 所以「改了全局提示词却没生效」在装了卡包的角色上是正常现象——排查时要看覆盖链，别猜。
+		setGlobalPromptOverride("narrator", "全局版", globalDir);
+		const loaded = loadPrompt("narrator", { globalDir, packDirs: [packDir] });
+		assert.equal(loaded.layer, "pack", "pack 层优先级更高，应压过 global");
+
+		// 本层写口**只**写 globalDir：卡包目录里的文件一个字节都不该被这条路径动过
+		assert.equal(loadPrompt("narrator", { packDirs: [packDir] }).content, "卡包自带", "pack 层内容未被改动");
+		// 不装卡包时 global 才接管
+		assert.equal(loadPrompt("narrator", { globalDir }).layer, "global");
+		assert.equal(loadPrompt("narrator", { globalDir }).content, "全局版");
+	} finally {
+		cleanupTempDir(root);
 	}
 });

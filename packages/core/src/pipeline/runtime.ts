@@ -100,8 +100,10 @@ import {
 import { InteractionBroker } from "../interaction/broker.ts";
 import { runStylize, type StylizeOptions } from "./stylize-stage.ts";
 import {
+	clearGlobalPromptOverride,
 	clearStoryPromptOverride,
 	resolvePromptChain,
+	setGlobalPromptOverride,
 	setStoryPromptOverride,
 	type PromptChainInfo,
 } from "../prompts/loader.ts";
@@ -532,6 +534,13 @@ export interface RuntimePrompts {
 	setStoryOverride(role: string, content: string): void;
 	/** 删 story 层提示词覆盖（不存在则 no-op）。 */
 	clearStoryOverride(role: string): void;
+	/**
+	 * 写/覆盖 global 层提示词（缺口 5）：<globalDir>/<role>.md。返回落盘路径。
+	 * global 层是「本机作者的全局偏好」——对所有故事生效，故改它要提醒用户影响面。
+	 */
+	setGlobalOverride(role: string, content: string): string;
+	/** 删 global 层提示词；返回**是否真的删掉了**（false = 本来就没有，调用侧无法从 no-op 区分）。 */
+	clearGlobalOverride(role: string): boolean;
 }
 
 export interface StoryRuntime {
@@ -1436,6 +1445,11 @@ export async function createStoryRuntime(opts: StoryRuntimeOptions): Promise<Sto
 			resolveChain: (role: string) => resolvePromptChain(runtimePromptDirs, role),
 			setStoryOverride: (role: string, content: string) => setStoryPromptOverride(storyState.storyDir, role, content),
 			clearStoryOverride: (role: string) => clearStoryPromptOverride(storyState.storyDir, role),
+			// 缺口 5：global 层可写（本机作者偏好）；pack 层**刻意只读**——改别人分发的包内容会与更新冲突，
+			// 且「我改了但重启就没了」的错觉比拒绝更糟。downstream 想改 pack 提示词，请到包目录里改（回退链会读到）。
+			setGlobalOverride: (role: string, content: string) =>
+				setGlobalPromptOverride(role, content, runtimePromptDirs.globalDir),
+			clearGlobalOverride: (role: string) => clearGlobalPromptOverride(role, runtimePromptDirs.globalDir),
 		},
 		get mode() {
 			return mode;
