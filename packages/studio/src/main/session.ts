@@ -271,8 +271,11 @@ export class StudioSession {
 				this.sink.push("event:pipeline", {
 					turnSeq: e.turnSeq,
 					role: e.role,
-					ok: e.ok,
-					durationMs: e.durationMs,
+					// 旧日志无 phase，按 end 处理（向后兼容）；start 事件不带 ok/durationMs，故此处条件展开。
+					phase: e.phase ?? "end",
+					...(e.ok !== undefined ? { ok: e.ok } : {}),
+					...(e.durationMs !== undefined ? { durationMs: e.durationMs } : {}),
+					...(e.error !== undefined ? { error: e.error } : {}),
 				});
 			}),
 		);

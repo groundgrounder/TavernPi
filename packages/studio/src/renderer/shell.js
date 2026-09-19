@@ -45,7 +45,10 @@
 		el("story").scrollTop = el("story").scrollHeight;
 	});
 	transport.subscribe("event:pipeline", (p) => {
-		el("phase").textContent = `阶段 ${p.role} · ${p.durationMs}ms`;
+		// 缺口 6：start 事件没有 durationMs（那时还不知道），不能照旧拼 `undefinedms`。
+		// 有耗时显示耗时，没有就显示「进行中」——这正是缺口 6 要解决的那个「界面只能干等」。
+		el("phase").textContent =
+			p.phase === "start" ? `阶段 ${p.role} · 进行中` : `阶段 ${p.role} · ${p.durationMs ?? 0}ms${p.ok === false ? "（失败）" : ""}`;
 	});
 	transport.subscribe("turn:done", (p) => {
 		accept.doneEvents++;

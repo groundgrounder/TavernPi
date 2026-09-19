@@ -53,8 +53,19 @@ export interface PushMap {
 	/** 当轮流式增量。**只作「生成中」临时展示**：轮末必须用 turn:done 的终稿覆写
 	 *  （stylize 会润色、story 可能打回重写，草稿与终稿可以不同）。 */
 	"turn:delta": { turnId: string; text: string };
-	/** pipeline 阶段事件（阶段词与耗时）。 */
-	"event:pipeline": { turnSeq: number; role: string; ok: boolean; durationMs: number };
+	/**
+	 * pipeline 阶段事件（缺口 6）。
+	 * `phase:"start"` 只有 turnSeq/role（那时还不知道成败与耗时）；`phase:"end"` 才带 ok/durationMs。
+	 * 渲染进程据此把「阶段进度」显示为进行中/已结束，不必干等整轮结束。
+	 */
+	"event:pipeline": {
+		turnSeq: number;
+		role: string;
+		phase: "start" | "end";
+		ok?: boolean;
+		durationMs?: number;
+		error?: string;
+	};
 	/** 轮次收束：带终稿与阶段耗时。 */
 	"turn:done": { turnId: string; narrativeText: string; ok: boolean };
 	/** 内核告警（onWarning 出口）。 */

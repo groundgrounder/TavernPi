@@ -249,9 +249,16 @@ async function runWithFeedback(
 	};
 	const offEvents = eventLog.on((e) => {
 		const bucket = STAGE_BUCKET[e.role];
-		if (bucket !== undefined) stageMs[bucket] = (stageMs[bucket] ?? 0) + e.durationMs;
-		const next = activityPhase(e.role);
-		if (next !== undefined) setPhase(next);
+		// 只累计结束事件（缺口 6）：start 没有 durationMs，也不代表阶段干完了。旧日志无 phase，按 end 处理。
+		if (bucket !== undefined) {
+			if ((e.phase ?? "end") === "end") stageMs[bucket] = (stageMs[bucket] ?? 0) + (e.durationMs ?? 0);
+			// 阶段词只在「开始」时切换：事件是**有序**的（start 先于 end），若 start/end 都推进阶段词，
+			// 同一阶段会白写两次（setPhase 有去重，但语义上「结束」不该把阶段词从下一段拉回来）。
+			if (e.phase === "start") {
+				const next = activityPhase(e.role);
+				if (next !== undefined) setPhase(next);
+			}
+		}
 	});
 	// 只订主叙事 session：story/npc/stylize/data 各跑各的 session，增量不混进来。
 	const offStream = runtime.session.subscribe((event) => {

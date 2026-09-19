@@ -88,14 +88,16 @@ function printLatencySummary(): void {
 	console.log("\n===== 端到端延迟实测（观测，非断言） =====");
 	const narratorByTurn = new Map<number, { count: number; totalMs: number }>();
 	const stageMs: Record<string, number> = {};
-	for (const e of ALL_EVENTS) {
+	// 只统计结束事件（缺口 6）：start 事件没有 durationMs，混进来会把轮数/耗时算重。旧日志无 phase，按 end。
+	const END_EVENTS = ALL_EVENTS.filter((e) => (e.phase ?? "end") === "end");
+	for (const e of END_EVENTS) {
 		if (e.role === "narrator") {
 			const cur = narratorByTurn.get(e.turnSeq) ?? { count: 0, totalMs: 0 };
 			cur.count++;
-			cur.totalMs += e.durationMs;
+			cur.totalMs += e.durationMs ?? 0;
 			narratorByTurn.set(e.turnSeq, cur);
 		}
-		stageMs[e.role] = (stageMs[e.role] ?? 0) + e.durationMs;
+		stageMs[e.role] = (stageMs[e.role] ?? 0) + (e.durationMs ?? 0);
 	}
 	if (narratorByTurn.size === 0) {
 		console.log("（无 narrator 事件，跳过）");
