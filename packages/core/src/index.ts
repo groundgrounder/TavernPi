@@ -40,7 +40,7 @@ export { DbWriter } from "./db/writer.ts";
 // db 工具集（pi ToolDefinition）
 export { createDbTools, type DbToolsOptions } from "./db/tools.ts";
 
-// DB 视图过滤（冒险模式「与 user 相关」v0 规则）
+// DB 视图过滤（冒险模式「与 user 相关」v0 规则）+ 通用只读查询的视图语义
 export {
 	buildNpcCardRefIndex,
 	createDbView,
@@ -48,20 +48,42 @@ export {
 	isNpcCardVisible,
 	PLAYER_NPC_ID_KEY,
 	resolveRelatedNpcSet,
+	TableNotVisibleError,
 	type RelatedNpcSet,
 } from "./db/view.ts";
+
+// 通用只读查询（受限：表清单 + 分页读。只生成 SELECT；表名/列名过真实 metadata 校验）
+export {
+	listTableInfos,
+	readTablePage,
+	tableColumns,
+	TABLE_QUERY_DEFAULT_LIMIT,
+	TABLE_QUERY_MAX_LIMIT,
+	TABLE_QUERY_MAX_SCAN,
+	type TableInfo,
+	type TablePage,
+	type TableQuery,
+	type TableRows,
+} from "./db/query.ts";
+
+// 内核保留表清单（单一事实源：表由 db 层建，故清单住在 db 层；pack 层转发同名导出）
+export { KERNEL_TABLE_WHITELIST } from "./db/kernel-tables.ts";
 
 // 位置路径（位置读取侧的统一表示与渲染；CLI / studio 的位置展示复用）
 export {
 	buildLocationPath,
 	describeSpatialRelation,
 	locationPointOf,
+	renderLocationLevels,
 	renderLocationNode,
+	renderLocationOverview,
 	renderLocationPath,
 	renderLocationPoint,
+	renderLocationSlice,
 	type LocationPath,
 	type LocationPathNode,
 	type LocationPoint,
+	type LocationSliceOptions,
 	type SpatialRelation,
 } from "./db/location-path.ts";
 
@@ -237,7 +259,8 @@ export {
 } from "./pipeline/runtime.ts";
 
 // 卡包系统（世界包：加载 / 匹配注入 / seed / mtime 缓存热更新；M5 定稿）
-export { loadPack, loadPacks, KERNEL_TABLE_WHITELIST } from "./pack/loader.ts";
+// KERNEL_TABLE_WHITELIST 的事实源在 db 层，故从 ./db/kernel-tables.ts 导出（见下）。
+export { loadPack, loadPacks } from "./pack/loader.ts";
 export { PackCache } from "./pack/cache.ts";
 export {
 	buildCollectionInjection,
