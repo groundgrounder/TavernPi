@@ -7,6 +7,10 @@
   "bin": {
     "tavernpi-pack": "./src/cli.ts"
   },
+  "exports": {
+    ".": "./src/cli.ts",
+    "./templates": "./src/templates.ts"
+  },
   "dependencies": {
     "@tavernpi/core": "0.0.0"
   }

@@ -51,7 +51,8 @@ interface PackTableSmoke {
 	rows: number;
 }
 
-interface CheckReport {
+/** 卡包校验报告（缺口 9 起是承诺面：卡包管理器直接消费，不必解析 CLI 输出）。 */
+export interface CheckReport {
 	ok: boolean;
 	command: "check";
 	errors: Array<{ file?: string; message: string }>;
@@ -111,13 +112,20 @@ function parseArgs(argv: readonly string[]): CliOptions {
 // check：加载 → 迁移试跑 → 只读冒烟
 // ---------------------------------------------------------------------------
 
-async function runCheck(packDirs: string[], json: boolean): Promise<number> {
+/**
+ * 卡包校验的**纯计算**部分（缺口 9）：不打印、不碰进程退出码，只返回结构化报告。
+ *
+ * 承诺面给卡包管理器用（「校验」按钮拿到 `CheckReport` 自行渲染）；CLI 的 `runCheck`
+ * 是它的薄包装（打印 + 映射退出码）。拆开的理由：让 UI 复用校验逻辑时不必吞掉 stdout，
+ * 也不必假装自己是个命令行进程。
+ */
+export async function checkPacks(packDirs: string[]): Promise<CheckReport> {
 	const report: CheckReport = { ok: false, command: "check", errors: [] };
 	const dirs = packDirs.map((d) => resolve(d));
 
 	if (dirs.length === 0) {
 		report.errors.push({ message: "缺少卡包目录参数：tavernpi-pack check <packDir...>" });
-		return finishCheck(report, json);
+		return report;
 	}
 
 	// 目录存在性预检（错误信息指到具体路径，先于人肉逐个读报错）
@@ -129,7 +137,7 @@ async function runCheck(packDirs: string[], json: boolean): Promise<number> {
 		}
 	}
 	if (report.errors.length > 0) {
-		return finishCheck(report, json);
+		return report;
 	}
 
 	// 1) 加载 + 全量校验（zod strict / 引用完整性含跨包 / 前缀静态扫描 / id 冲突）
@@ -145,7 +153,7 @@ async function runCheck(packDirs: string[], json: boolean): Promise<number> {
 				message: error instanceof Error ? error.message : String(error),
 			});
 		}
-		return finishCheck(report, json);
+		return report;
 	}
 
 	// 2) 干净内存库试跑迁移（core + 卡包命名迁移，schema.sql/seed.sql 可执行且幂等）
@@ -154,7 +162,7 @@ async function runCheck(packDirs: string[], json: boolean): Promise<number> {
 		migrations = packMigrations(packs);
 	} catch (error) {
 		report.errors.push({ message: error instanceof Error ? error.message : String(error) });
-		return finishCheck(report, json);
+		return report;
 	}
 
 	let migrationsResult: { applied: string[]; rerunApplied: string[] };
@@ -172,7 +180,7 @@ async function runCheck(packDirs: string[], json: boolean): Promise<number> {
 				report.errors.push({ message: error instanceof Error ? error.message : String(error) });
 			}
 			db.close();
-			return finishCheck(report, json);
+			return report;
 		}
 		db.close();
 	}
@@ -188,7 +196,12 @@ async function runCheck(packDirs: string[], json: boolean): Promise<number> {
 	}));
 	report.seed = { npcs: smoke.npcs, locations: smoke.locations };
 	report.migrations = migrationsResult;
-	return finishCheck(report, json);
+	return report;
+}
+
+/** CLI 包装：打印报告并映射退出码（缺口 9：校验逻辑本身在 checkPacks）。 */
+async function runCheck(packDirs: string[], json: boolean): Promise<number> {
+	return finishCheck(await checkPacks(packDirs), json);
 }
 
 /**
@@ -367,31 +380,32 @@ async function runTemplates(args: string[], json: boolean): Promise<number> {
 // init：生成最小可过检的骨架包
 // ---------------------------------------------------------------------------
 
-async function runInit(args: string[], json: boolean): Promise<number> {
-	const dirArg = args[0];
-	if (dirArg === undefined) {
-		const message = "init 需要目录参数：tavernpi-pack init <dir>";
-		if (json) {
-			printJson({ ok: false, command: "init", errors: [{ message }] });
-		} else {
-			console.error(`✖ ${message}`);
-		}
-		return 1;
-	}
+/** 骨架包生成结果（缺口 9 承诺面：卡包管理器的「新建」按钮据此显示产出）。 */
+export interface InitResult {
+	ok: boolean;
+	command: "init";
+	errors: Array<{ message: string }>;
+	dir?: string;
+	packName?: string;
+	prefix?: string;
+	files?: string[];
+}
 
-	const dir = resolve(dirArg);
-	const packName = sanitizePackName(basename(dir)) ?? "demo_world";
+/**
+ * 生成最小可过检的骨架包（缺口 9：纯计算部分）。
+ *
+ * `dir` 是**绝对路径**（调用侧自己 resolve；CLI 的 `runInit` 负责把参数转过来）。
+ * 失败不抛，收进 `errors` —— 与 `checkPacks` 同一口径，UI 拿报告渲染即可。
+ */
+export function initPack(dir: string): InitResult {
+	const fail = (message: string): InitResult => ({ ok: false, command: "init", errors: [{ message }] });
 
 	// 拒绝覆盖已有卡包（防手滑清空既有作品）
 	if (existsSync(dir) && (existsSync(join(dir, "package.json")) || existsSync(join(dir, "story.yaml")))) {
-		const message = `目录已存在卡包文件（package.json 或 story.yaml），拒绝覆盖: ${dir}`;
-		if (json) {
-			printJson({ ok: false, command: "init", errors: [{ message }] });
-		} else {
-			console.error(`✖ ${message}`);
-		}
-		return 1;
+		return fail(`目录已存在卡包文件（package.json 或 story.yaml），拒绝覆盖: ${dir}`);
 	}
+
+	const packName = sanitizePackName(basename(dir)) ?? "demo_world";
 
 	const files = [
 		["package.json", skeletonPackageJson(packName)],
@@ -407,24 +421,51 @@ async function runInit(args: string[], json: boolean): Promise<number> {
 		writeFileSync(join(dir, rel), content);
 	}
 
+	return {
+		ok: true,
+		command: "init",
+		errors: [],
+		dir,
+		packName,
+		prefix: `${packName}_`,
+		files: files.map(([rel]) => rel),
+	};
+}
+
+/** CLI 包装：解析参数、打印、映射退出码（缺口 9：生成逻辑本身在 initPack）。 */
+async function runInit(args: string[], json: boolean): Promise<number> {
+	const dirArg = args[0];
+	if (dirArg === undefined) {
+		const message = "init 需要目录参数：tavernpi-pack init <dir>";
+		if (json) {
+			printJson({ ok: false, command: "init", errors: [{ message }] });
+		} else {
+			console.error(`✖ ${message}`);
+		}
+		return 1;
+	}
+
+	const report = initPack(resolve(dirArg));
+	if (!report.ok) {
+		if (json) {
+			printJson(report);
+		} else {
+			console.error(`✖ ${report.errors[0]?.message ?? "init 失败"}`);
+		}
+		return 1;
+	}
+
 	if (json) {
-		printJson({
-			ok: true,
-			command: "init",
-			dir,
-			packName,
-			prefix: `${packName}_`,
-			files: files.map(([rel]) => rel),
-		});
+		printJson(report);
 	} else {
-		console.log(`✔ 已生成骨架卡包: ${dir}`);
-		console.log(`  包名: ${packName}（SQL 表前缀: ${packName}_）`);
+		console.log(`✔ 已生成骨架卡包: ${report.dir}`);
+		console.log(`  包名: ${report.packName}（SQL 表前缀: ${report.prefix}）`);
 		console.log("  文件:");
-		for (const [rel] of files) {
+		for (const rel of report.files ?? []) {
 			console.log(`    ${rel}`);
 		}
 		console.log("");
-		console.log(`  下一步: tavernpi-pack check ${dir}`);
+		console.log(`  下一步: tavernpi-pack check ${report.dir}`);
 	}
 	return 0;
 }
