@@ -16,7 +16,9 @@
 // 判据：新增导出前先看它是否服务于 studio 一类的外部消费者；「内部自用」不是理由。
 // 收窄是单向便宜的——加回来不影响兼容，删掉才要版本化，所以宁可窄。
 
-export const CORE_VERSION = "0.6.0";
+// 版本号与 git tag 对齐：本值即 v0.1.0 发布点内核 API 承诺面的版本。
+// （M0–M6 是内部里程碑编号，不对外；对外版本以 tag 为准。）
+export const CORE_VERSION = "0.1.0";
 
 // 中止桥（缺口 1：runTurn 的 AbortSignal → pi session.abort；中止 = 未完成轮、零落库）
 export { runWithAbort, TurnAbortedError, type AbortBridge } from "./abort.ts";

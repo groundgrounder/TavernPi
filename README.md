@@ -2,8 +2,8 @@
 
 故事引擎 harness——把 pi coding agent 的「编码 agent harness」范式平移到互动叙事领域。基于 pi SDK（`@earendil-works/pi-coding-agent`，npm 依赖不 fork）二次创作：一个主叙事 session 执笔，story/npc/data/stylize 四类 subagent 流水线协作，一切长期记忆落 SQLite（**对话历史是草稿，数据库才是事实**）。
 
-- **当前状态**：M0–M6 全部验收通过（故事 DB / data / npc / story+stylize / 卡包系统 / 模式与体验）
-- **内核对外 API**：`@tavernpi/core`（CORE_VERSION 0.6.0）
+- **当前状态**：**v0.1.0**（M0–M6 全部验收通过：故事 DB / data / npc / story+stylize / 卡包系统 / 模式与体验）
+- **内核对外 API**：`@tavernpi/core`（CORE_VERSION 0.1.0）
 
 ## 快速开始
 
