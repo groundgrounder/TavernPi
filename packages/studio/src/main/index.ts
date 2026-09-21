@@ -11,6 +11,7 @@
 // 环境提醒：本机默认导出 ELECTRON_RUN_AS_NODE=1，会让 Electron 退化成纯 Node（窗口起不来、
 // --version 打印 Node 版本）。npm 脚本已带 `env -u`，手工敲命令时记得去掉该变量。
 
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { BrowserWindow, app, ipcMain } from "electron";
 import { createIpcHost, type IpcHost } from "./transport-ipc.ts";
@@ -18,6 +19,7 @@ import type { IpcLike } from "../contract/index.ts";
 import { buildHostHandlers } from "./handlers.ts";
 import { StudioSession } from "./session.ts";
 import { parseS0Args, runS0Acceptance } from "./s0-acceptance.ts";
+import { parseS1Args, runS1Acceptance } from "./s1-acceptance.ts";
 
 /** Electron 的 ipcMain/webContents 投影成 IpcLike（契约只依赖这个窄接口，故可脱 electron 单测）。 */
 function electronIpc(): IpcLike {
@@ -51,6 +53,10 @@ function createWindow(preloadPath: string, show: boolean): BrowserWindow {
 
 /** 验收模式参数（模块级：异常兜底也要知道该不该给出结构化失败并退出）。 */
 const s0 = parseS0Args(process.argv);
+const s1 = parseS1Args(process.argv);
+/** 任一验收模式都要隐藏窗口且用自己的临时故事根。 */
+const acceptance = s0 !== undefined || s1 !== undefined;
+const storiesRoot = s0?.storiesRoot ?? s1?.storiesRoot;
 
 async function main(): Promise<void> {
 	await app.whenReady();
@@ -71,13 +77,28 @@ async function main(): Promise<void> {
 		app.quit();
 	});
 
-	const win = createWindow(join(import.meta.dirname, "../preload.cjs"), s0 === undefined);
-	await win.loadFile(join(import.meta.dirname, "../renderer/index.html"), {
-		query: s0 !== undefined ? { s0: "1", storiesRoot: s0.storiesRoot } : {},
+	const win = createWindow(join(import.meta.dirname, "../preload.cjs"), !acceptance);
+	// S1：渲染层是 Vite 产物（src/renderer/dist）。构建一次即可反复启动——
+	// main 进程直跑 .ts 源码，但渲染进程不能（file:// 下无 TS 编译），故必须有产物。
+	// 产物缺失是「忘了构建」而非「运行错误」，故先明确提示怎么建，别让它变成一个难懂的加载失败。
+	const rendererPath = join(import.meta.dirname, "../renderer/dist/index.html");
+	if (!existsSync(rendererPath)) {
+		throw new Error(
+			`渲染层产物不存在：${rendererPath}\n先构建：npm --workspace @tavernpi/studio run build:renderer`,
+		);
+	}
+	await win.loadFile(rendererPath, {
+		query: acceptance ? { s0: s0 !== undefined ? "1" : "", storiesRoot: storiesRoot ?? "" } : {},
 	});
 
 	if (s0 !== undefined) {
 		const code = await runS0Acceptance({ win, session, storiesRoot: s0.storiesRoot });
+		session.dispose();
+		app.exit(code);
+		return;
+	}
+	if (s1 !== undefined) {
+		const code = await runS1Acceptance({ win, session, storiesRoot: s1.storiesRoot });
 		session.dispose();
 		app.exit(code);
 		return;
@@ -90,6 +111,11 @@ void main().catch((err: unknown) => {
 	const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
 	if (s0 !== undefined) {
 		console.log(`S0_SHELL_RESULT ${JSON.stringify({ ok: false, error: message }, null, 2)}`);
+		app.exit(1);
+		return;
+	}
+	if (s1 !== undefined) {
+		console.log(`S1_READ_RESULT ${JSON.stringify({ ok: false, error: message }, null, 2)}`);
 		app.exit(1);
 		return;
 	}

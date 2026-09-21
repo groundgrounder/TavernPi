@@ -2,167 +2,17 @@
 <html lang="zh-CN">
 	<head>
 		<meta charset="utf-8" />
-		<!-- CSP：不给外部资源留口子（渲染进程只与 main 说话，不该有网络面）。 -->
+		<!-- CSP：不给外部资源留口子（渲染进程只与 main 说话，不该有网络面）。
+		     script-src 'self' 需要 Vite 产物是**外链脚本**而非内联——rollup 默认即如此；
+		     若哪天引入需要内联 script 的插件，这条会立刻红，届时再评估是否放宽。 -->
 		<meta
 			http-equiv="Content-Security-Policy"
-			content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:"
+			content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
 		/>
 		<title>tavern studio</title>
-		<style>
-			:root {
-				--bg: #1c1c1a;
-				--panel: #2c2c2a;
-				--line: #444441;
-				--text: #f1efe8;
-				--muted: #b4b2a9;
-				--ok: #97c459;
-				--warn: #ef9f27;
-				--err: #f09595;
-			}
-			body {
-				margin: 0;
-				height: 100vh;
-				display: grid;
-				grid-template-columns: 280px 1fr;
-				grid-template-rows: auto 1fr auto;
-				gap: 1px;
-				background: var(--line);
-				color: var(--text);
-				font:
-					14px/1.6 system-ui,
-					sans-serif;
-			}
-			header,
-			aside,
-			main,
-			footer {
-				background: var(--bg);
-				padding: 12px;
-				overflow: auto;
-			}
-			header {
-				grid-column: 1 / -1;
-				display: flex;
-				align-items: center;
-				gap: 16px;
-			}
-			aside {
-				background: var(--panel);
-			}
-			footer {
-				grid-column: 1 / -1;
-				display: flex;
-				gap: 8px;
-			}
-			h1 {
-				font-size: 15px;
-				font-weight: 500;
-				margin: 0;
-			}
-			button {
-				background: #2c2c2a;
-				color: var(--text);
-				border: 1px solid var(--line);
-				border-radius: 8px;
-				padding: 6px 10px;
-				font: inherit;
-				cursor: pointer;
-			}
-			button:disabled {
-				opacity: 0.45;
-				cursor: default;
-			}
-			#stories {
-				display: flex;
-				flex-direction: column;
-				gap: 6px;
-				margin: 8px 0;
-			}
-			#stories button {
-				text-align: left;
-			}
-			#story {
-				display: flex;
-				flex-direction: column;
-				gap: 10px;
-			}
-			.turn {
-				border-left: 2px solid var(--line);
-				padding-left: 10px;
-				white-space: pre-wrap;
-			}
-			.turn.user {
-				color: var(--muted);
-			}
-			.turn.streaming {
-				border-left-color: var(--warn);
-				color: var(--muted);
-			}
-			#line,
-			#log .line {
-				font-family: ui-monospace, monospace;
-				font-size: 12px;
-				white-space: pre-wrap;
-			}
-			#log {
-				max-height: 180px;
-				overflow: auto;
-				border-top: 1px solid var(--line);
-				margin-top: 12px;
-				padding-top: 8px;
-			}
-			.ok {
-				color: var(--ok);
-			}
-			.warn {
-				color: var(--warn);
-			}
-			.err {
-				color: var(--err);
-			}
-			.muted {
-				color: var(--muted);
-			}
-			input[type="text"] {
-				flex: 1;
-				background: var(--panel);
-				color: var(--text);
-				border: 1px solid var(--line);
-				border-radius: 8px;
-				padding: 8px 10px;
-				font: inherit;
-			}
-			#phase {
-				color: var(--muted);
-				font-size: 12px;
-			}
-		</style>
 	</head>
 	<body>
-		<header>
-			<h1>tavern studio</h1>
-			<span class="muted">S0 壳（内核同进程 · 不走 RPC）</span>
-			<span class="muted">session</span>
-			<span id="session" class="muted">—</span>
-			<span id="phase"></span>
-		</header>
-		<aside>
-			<div>
-				故事（<span id="count">0</span>）
-				<button id="create">新建故事</button>
-			</div>
-			<div id="stories"></div>
-		</aside>
-		<main>
-			<div id="story"></div>
-			<div id="log"></div>
-		</main>
-		<footer>
-			<input id="input" type="text" placeholder="输入行动或对话，Ctrl/⌘+Enter 发送" />
-			<button id="send">发送</button>
-			<button id="abort" disabled>中止</button>
-		</footer>
-		<script src="transport.js"></script>
-		<script src="shell.js"></script>
+		<div id="root"></div>
+		<script type="module" src="/main.tsx"></script>
 	</body>
 </html>

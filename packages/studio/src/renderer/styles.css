@@ -1,0 +1,226 @@
+/* studio 界面样式（暗色，与 S0 壳同一套色变量）。
+   从 index.html 的内联 <style> 搬出来：Vite 构建时并入产物，CSP 的 style-src 保持 'unsafe-inline'
+   （React 内联样式与样式表注入都需要它）。 */
+
+:root {
+	--bg: #1c1c1a;
+	--panel: #2c2c2a;
+	--line: #444441;
+	--text: #f1efe8;
+	--muted: #b4b2a9;
+	--ok: #97c459;
+	--warn: #ef9f27;
+	--err: #f09595;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	height: 100vh;
+	background: var(--line);
+	color: var(--text);
+	font:
+		14px/1.6 system-ui,
+		sans-serif;
+}
+
+#root {
+	height: 100vh;
+}
+
+.studio {
+	height: 100vh;
+	display: grid;
+	grid-template-columns: 280px 1fr;
+	grid-template-rows: auto 1fr auto;
+	gap: 1px;
+	background: var(--line);
+}
+
+header,
+aside,
+main,
+footer {
+	background: var(--bg);
+	padding: 12px;
+	overflow: auto;
+}
+
+header {
+	grid-column: 1 / -1;
+	display: flex;
+	align-items: center;
+	gap: 16px;
+	overflow: visible;
+}
+
+aside {
+	background: var(--panel);
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+footer {
+	grid-column: 1 / -1;
+	display: flex;
+	gap: 8px;
+	overflow: visible;
+}
+
+main {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+h1 {
+	font-size: 15px;
+	font-weight: 500;
+	margin: 0;
+}
+
+button {
+	background: var(--panel);
+	color: var(--text);
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	padding: 6px 10px;
+	font: inherit;
+	cursor: pointer;
+}
+
+button:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+button.danger:not(:disabled) {
+	border-color: var(--err);
+	color: var(--err);
+}
+
+.muted {
+	color: var(--muted);
+}
+
+.small {
+	font-size: 12px;
+}
+
+.mono {
+	font-family: ui-monospace, monospace;
+	font-size: 12px;
+}
+
+.pad {
+	padding: 8px;
+}
+
+.aside-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.stories {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	overflow: auto;
+}
+
+.story {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	text-align: left;
+	padding: 8px 10px;
+}
+
+.story.active {
+	border-color: var(--ok);
+}
+
+.story-title {
+	font-weight: 500;
+}
+
+.turns {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.turn {
+	border-left: 2px solid var(--line);
+	padding-left: 10px;
+}
+
+.turn-input {
+	font-size: 13px;
+	margin-bottom: 4px;
+	white-space: pre-wrap;
+}
+
+.turn-body {
+	white-space: pre-wrap;
+}
+
+.turn.streaming {
+	border-left-color: var(--warn);
+	color: var(--muted);
+}
+
+.turn-meta {
+	margin-top: 4px;
+}
+
+.more {
+	align-self: flex-start;
+}
+
+.log {
+	max-height: 180px;
+	overflow: auto;
+	border-top: 1px solid var(--line);
+	padding-top: 8px;
+	margin-top: auto;
+}
+
+.line {
+	font-family: ui-monospace, monospace;
+	font-size: 12px;
+	white-space: pre-wrap;
+}
+
+.line.ok {
+	color: var(--ok);
+}
+
+.line.warn {
+	color: var(--warn);
+}
+
+.line.err {
+	color: var(--err);
+}
+
+input[type="text"] {
+	flex: 1;
+	background: var(--panel);
+	color: var(--text);
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	padding: 8px 10px;
+	font: inherit;
+}
+
+.phase {
+	color: var(--muted);
+	font-size: 12px;
+}

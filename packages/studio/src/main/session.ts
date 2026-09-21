@@ -10,6 +10,7 @@
 // 现在过早引入多实例只会让「哪个 case 指向哪个 runtime」变成 bug 来源。
 
 import {
+	createDbView,
 	defaultGlobalPromptsDir,
 	forkFrom,
 	listStories,
@@ -18,11 +19,16 @@ import {
 	rebuildRuntime,
 	resolvePromptChain,
 	saveSettings,
+	TABLE_QUERY_DEFAULT_LIMIT,
+	TABLE_QUERY_MAX_LIMIT,
 	type OpenedStory,
 	type PromptLayerDirs,
 	type StoryMode,
 	type StorySummary,
+	type TableInfo,
+	type TablePage,
 	type TavernSettings,
+	type TurnLogRow,
 	type TurnResult,
 } from "@tavernpi/core";
 import type { PushChannelName, PushPayload } from "../contract/index.ts";
@@ -234,6 +240,75 @@ export class StudioSession {
 		return resolvePromptChain(this.promptDirs(), role);
 	}
 
+	/**
+	 * 阅读流：从**当前已打开故事**的 turn_log 分页取轮次。
+	 *
+	 * 为什么事实源是 turn_log 而不是 pi session 转录：stylize 会润色、story 阶段可能打回重写，
+	 * 转录里留着被弃的草稿，而 turn_log 只存最终落库的那版。两者不一致时以 turn_log 为准。
+	 *
+	 * 倒序（默认）从最新一轮往回读——打开故事先看结尾是阅读习惯，也让虚拟滚动首屏就有内容。
+	 * 未打开故事时回空页而不抛错：那是 UI 的空态，不是错误。
+	 */
+	turns(req: { limit?: number; offset?: number; order?: "asc" | "desc" }): {
+		turns: TurnLogRow[];
+		total: number;
+		limit: number;
+		offset: number;
+	} {
+		const limit = clampLimit(req.limit);
+		const offset = Math.max(Math.trunc(req.offset ?? 0), 0);
+		const opened = this.opened;
+		if (opened === undefined) return { turns: [], total: 0, limit, offset };
+
+		// 内核的 getTurnLog 只有「全表 / 单轮」两种读法，排序与切片在这里做。
+		// 故事轮次规模下（千级）整表读开销可接受；真到需要下推时再改内核，别在 studio 抄一份 SQL。
+		const all = opened.storyState.storyDb.reader.getTurnLog();
+		const ordered = req.order === "asc" ? all : [...all].reverse();
+		return { turns: ordered.slice(offset, offset + limit), total: ordered.length, limit, offset };
+	}
+
+	/**
+	 * 通用只读表查询（内核缺口 3）。不传 table → 回表清单，传了 → 回该表一页。
+	 *
+	 * `filter` 决定视图语义，与内核 MODE_PRESETS.dbViewFilter 同一套：
+	 *   · "none"（作者视图）：全量透传，含 sys_ 簿记键与包自定义表；
+	 *   · "user"（冒险视图）：内核表按 related 集合净化，包自定义表一律拒绝（TableNotVisibleError）。
+	 * 注意 filter 是**调用方显式指定**，不自动跟故事模式走——模式决定的是「游玩时的默认视图」，
+	 * 而 DB 浏览器是个作者工具，要看哪一面该由点开它的人决定。
+	 *
+	 * 每次查询新建 DbView 并 refresh：视图持有可见性缓存，跨轮复用会给出陈旧结果（缺口 12 的反面）。
+	 */
+	dbQuery(req: {
+		table?: string;
+		limit?: number;
+		offset?: number;
+		orderBy?: string;
+		descending?: boolean;
+		equals?: Record<string, string | number | null>;
+		filter?: "none" | "user";
+	}): { tables?: TableInfo[]; page?: TablePage } {
+		const opened = this.opened;
+		if (opened === undefined) return { tables: [] };
+
+		const filter = req.filter === "user" ? "user-related" : "none";
+		const view = createDbView(opened.storyState.storyDb.reader, filter);
+		view.refresh();
+		if (req.table === undefined) {
+			// listTables 已按视图自身规则过滤（user-related 只列内核表），无需再分叉。
+			return { tables: view.listTables() };
+		}
+		return {
+			page: view.queryTable({
+				table: req.table,
+				limit: clampLimit(req.limit),
+				offset: Math.max(Math.trunc(req.offset ?? 0), 0),
+				...(req.orderBy !== undefined ? { orderBy: req.orderBy } : {}),
+				...(req.descending !== undefined ? { descending: req.descending } : {}),
+				...(req.equals !== undefined ? { equals: req.equals } : {}),
+			}),
+		};
+	}
+
 	/** 关掉当前故事：解绑推送、dispose runtime、关两个库。可反复调用。 */
 	closeCurrent(): void {
 		const opened = this.opened;
@@ -325,4 +400,14 @@ export class StudioSession {
 		if (opened === undefined) return { globalDir: defaultGlobalPromptsDir() };
 		return { ...opened.prompts, storyDir: opened.storyState.storyDir };
 	}
+}
+
+/**
+ * 页大小夹取：缺省取内核默认值，上下限对齐内核（TABLE_QUERY_MAX_LIMIT）——
+ * 两边各写一套常数必然漂移，故直接引用内核常量。
+ * 注意这是**边界形状**夹取，不是业务判断：超限静默夹住比让内核抛错更适合分页控件。
+ */
+function clampLimit(limit: number | undefined): number {
+	if (limit === undefined) return TABLE_QUERY_DEFAULT_LIMIT;
+	return Math.min(Math.max(Math.trunc(limit), 1), TABLE_QUERY_MAX_LIMIT);
 }

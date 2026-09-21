@@ -36,6 +36,8 @@ export const CHANNEL_NAMES: readonly ChannelName[] = Object.keys({
 	"story:list": 0,
 	"story:create": 0,
 	"story:open": 0,
+	"story:turns": 0,
+	"db:query": 0,
 	"turn:run": 0,
 	"turn:abort": 0,
 	"turn:swipe": 0,

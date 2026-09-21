@@ -4,8 +4,9 @@
 // 渲染进程只要能值导入内核，就等于把内核信任边界搬到了页面上——写在文档里的架构边界，
 // 第一次赶进度就会被绕过。
 //
-// 覆盖范围含 **.js/.cjs**：S0 的壳是经典脚本（file:// 下 Chromium 不支持 ESM，故暂不引构建），
-// 纪律不能因为文件扩展名换了就失效。允许的形态是 `import type { ... } from "@tavernpi/core"`
+// 覆盖范围含 **.js/.cjs/.tsx**：S0 的壳曾是经典脚本（file:// 下 Chromium 不支持 ESM，故当时不引构建），
+// S1 起渲染层是 React + Vite 的 .tsx。纪律不能因为文件扩展名换了就失效。
+// 允许的形态是 `import type { ... } from "@tavernpi/core"`
 // （类型剥离后不留运行时代码，且类型必须共用一份，否则两侧自己抄必然漂移）。
 
 import assert from "node:assert/strict";
@@ -46,7 +47,7 @@ export function findValueImports(source: string): string[] {
 	return violations;
 }
 
-const SOURCE_EXT = [".ts", ".mts", ".js", ".mjs", ".cjs"];
+const SOURCE_EXT = [".ts", ".tsx", ".mts", ".js", ".mjs", ".cjs"];
 
 /** 递归收集目录下的源码文件（跳过 .d.ts）。 */
 function collectSources(dir: string): string[] {
@@ -105,9 +106,12 @@ test("renderer / dev / preload 里不存在对内核的值导入", () => {
 	assert.deepEqual(offenders, [], `这些位置不得值导入 @tavernpi/core:\n${offenders.join("\n")}`);
 });
 
-test("判据覆盖到 S0 壳的实际文件（.js / .cjs 也在扫，别只有 TS 达标）", () => {
+test("判据覆盖到渲染层的实际文件（.ts/.tsx 也在扫，别只有 .js 达标）", () => {
 	const scanned = guardedFiles().map((f) => f.slice(STUDIO_ROOT.length + 1));
-	assert.ok(scanned.includes("src/renderer/shell.js"), `必须扫到 shell.js：${scanned.join(", ")}`);
-	assert.ok(scanned.includes("src/renderer/transport.js"));
+	assert.ok(scanned.includes("src/renderer/transport.ts"), `必须扫到 transport.ts：${scanned.join(", ")}`);
+	assert.ok(scanned.includes("src/renderer/main.tsx"), `必须扫到 main.tsx：${scanned.join(", ")}`);
+	assert.ok(scanned.includes("src/renderer/useStudio.ts"));
 	assert.ok(scanned.includes("src/preload.cjs"));
+	// S1 换栈后旧壳应已消失——留着它等于留着一份没人维护的并行实现。
+	assert.ok(!scanned.includes("src/renderer/shell.js"), "S0 壳已被 React 渲染层取代，不该还在盘上");
 });

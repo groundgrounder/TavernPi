@@ -7,19 +7,47 @@
 //   2. renderer **不得值导入** @tavernpi/core：模式过滤（DbView）、唯一写路径（trustedWrite）、
 //      快照恢复全在 main 侧的内核实例里。绕过它等于绕开内核信任边界。
 //      test/boundary.test.ts 扫源码钉住这条，别只写在文档里。
-//   3. 只登记「内核已有 API 支撑」的 channel。内核还缺的能力（如通用只读表查询，见技术考察 §3.2 缺口 3）
-//      不在这里预先设计——接口等实现，不等想象。
+//   3. 只登记「内核已有 API 支撑」的 channel。内核还缺的能力不在这里预先设计——接口等实现，不等想象。
+//      缺口 1–12 已全部补齐，故 `story:turns`（turn_log 阅读流）与 `db:query`（缺口 3 的通用只读查询）
+//      现在可以登记了；`interaction:respond` 仍刻意留在 ChannelMap 之外，理由见文件末尾。
 
-import type { StoryMode, StorySummary, TurnResult } from "@tavernpi/core";
+import type { StoryMode, StorySummary, TableInfo, TablePage, TurnLogRow, TurnResult } from "@tavernpi/core";
 
 /** 请求-响应（renderer → main）。 */
 export interface ChannelMap {
 	/** 故事枚举（内核 listStories：只扫盘、不打开库）。 */
 	"story:list": { req: { storiesRoot?: string }; res: StorySummary[] };
-	/** 新建故事（内核 openStory）。返回选中故事的 sessionId。 */
+	/**
+	 * 阅读流：从**当前已打开故事**的 `story.db.turn_log` 分页取正文。
+	 * 正文的事实源是 turn_log，不是 pi session 转录——两者在 stylize 润色/打回重写后可以不同。
+	 * 从末尾倒序读：`offset:0` = 最新一轮，正好对上「打开故事先看结尾」的阅读习惯。
+	 */
+	"story:turns": {
+		req: { limit?: number; offset?: number; order?: "asc" | "desc" };
+		res: { turns: TurnLogRow[]; total: number; limit: number; offset: number };
+	};
+	/**
+	 * 通用只读表查询（内核缺口 3：listTableInfos / DbView.queryTable）。
+	 * `filter:"user"` 走冒险视图过滤（非内核表按 related 集合净化），`filter:"none"` 全量透传。
+	 * 未打开故事时**不抛错**，回一个空页 —— 浏览器的空态由 UI 表达，不该走错误通道。
+	 */
+	"db:query": {
+		req: {
+			/** 不传则回表清单（内核 listTableInfos），传了则回该表一页。 */
+			table?: string;
+			limit?: number;
+			offset?: number;
+			orderBy?: string;
+			descending?: boolean;
+			equals?: Record<string, string | number | null>;
+			filter?: "none" | "user";
+		};
+		res: { tables?: TableInfo[]; page?: TablePage };
+	};
+	/** 新建故事（内核 openStory）。返回选中故事的 sessionId 与生效模式。 */
 	"story:create": {
 		req: { storiesRoot?: string; packDirs?: string[]; mode?: StoryMode; title?: string };
-		res: { sessionId: string };
+		res: { sessionId: string; mode: StoryMode };
 	};
 	/** 续写：打开已有 session 文件（内核 openStory 的 resume 路径）。 */
 	"story:open": {
