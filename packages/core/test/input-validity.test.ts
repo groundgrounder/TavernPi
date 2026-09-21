@@ -1,7 +1,7 @@
 // 输入渠道校验（「输入渠道校验判定」）单测。
 // 覆盖：computeInputValidityAction 纯判定（reject/force/creation-ignore/缺席），
 // runTurn 拒绝轮零痕迹（stub scene 卡 invalid → InputRejectedError、DB/session 零痕迹，拒绝发生在主叙事前）。
-// 说明：force 放行叙事与 creation-ignore 全流程属 m6 acceptance（真实 LLM 叙事）非本单元（需模型出正文）。
+// 说明：force 放行叙事与 creation-ignore 全流程属 acceptance 脚本（真实 LLM 叙事）非本单元（需模型出正文）。
 
 import assert from "node:assert/strict";
 import { join } from "node:path";

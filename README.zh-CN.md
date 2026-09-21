@@ -86,13 +86,13 @@ tavernpi 的应对方式：
 
 ```bash
 # 开一个新故事
-npm run m6:cli
+npm run cli
 
 # 带世界设定（卡包）+ 生存模式
-npm run m6:cli -- --pack ./my_world --mode survival
+npm run cli -- --pack ./my_world --mode survival
 
 # 续写（每次退出时 CLI 会把这行命令打印出来）
-npm run m6:cli -- --resume <session 文件路径>
+npm run cli -- --resume <session 文件路径>
 ```
 
 命令行参数：`--pack <目录>`（可重复）· `--mode creation|survival|adventure` · `--style <文风>` · `--root <目录>`（故事数据目录，默认 `~/.tavernpi`）。
@@ -176,7 +176,7 @@ packages/
 ├── core/     @tavernpi/core —— 引擎内核
 │             轮次流水线 · 数据库层 · 快照 · subagent 体系 · 提示词分层
 │             卡包加载 · 模式预设 · 视图过滤 · 会话装配
-├── app/      CLI（npm run m6:cli）· 验收脚本 · 探索性验证工件
+├── app/      CLI（npm run cli）· 验收脚本 · 探索性验证工件
 ├── tools/    @tavernpi/tools —— 卡包校验 / 骨架 / 模板 CLI
 └── studio/   @tavernpi/studio —— GUI 外壳（Electron，同进程嵌入内核）
               S0 骨架已跑通；S1 起做界面
@@ -193,7 +193,7 @@ packages/
 ```bash
 npm test              # 全仓单测（node --test）
 npm run typecheck     # 类型检查（core / app / tools / studio）
-npm run m6:accept     # 端到端验收（真实 LLM，需 auth.json）
+npm run accept     # 端到端验收（真实 LLM，需 auth.json）
 ```
 
 studio 相关的开发、环境注意事项与验收证据见 `packages/studio/README.md` 及其 `docs/`。

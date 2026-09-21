@@ -14,10 +14,10 @@
 //    ⑧ 同输入 /! 强制 → 正常出叙事 + turn_log.warnings 含「强制提交」；
 //    ⑨ 正常角色行动输入 → 不误拒（valid:true 放行，出叙事）；
 //    ⑩ 创造模式同⑦输入 → 不校验正常进行；
-//    ⑪ /plot 在创造写 directives 且下轮场景分析输入含该指令；生存模式 /plot 报错（m6-cli 冒烟）。
+//    ⑪ /plot 在创造写 directives 且下轮场景分析输入含该指令；生存模式 /plot 报错（cli 冒烟）。
 //
-// 成本控制：A 区零 LLM；B 区真实 LLM ≈ 3 轮叙事 + 1 次场景分析冒烟 + 1 次 m6-cli 冒烟。
-// 需要 auth.json（M0 已配）。结束时清理临时目录。运行：npm run m6:accept。
+// 成本控制：A 区零 LLM；B 区真实 LLM ≈ 3 轮叙事 + 1 次场景分析冒烟 + 1 次 cli 冒烟。
+// 需要 auth.json（M0 已配）。结束时清理临时目录。运行：npm run accept。
 
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -316,7 +316,7 @@ function disposeBundle(b: M6Bundle): void {
 	b.storyState.snapshotsDb.close();
 }
 
-/** 子进程跑 m6-cli（stdin 喂输入，超时保护）。 */
+/** 子进程跑 cli（stdin 喂输入，超时保护）。 */
 function runCli(script: string, args: string[], opts: { stdin?: string; timeoutMs?: number } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
 	return new Promise((done) => {
 		const child = spawn(process.execPath, [script, ...args], { cwd: repoRoot });
@@ -324,7 +324,7 @@ function runCli(script: string, args: string[], opts: { stdin?: string; timeoutM
 		let stderr = "";
 		const timer = setTimeout(() => {
 			child.kill();
-			done({ code: -1, stdout, stderr: `${stderr}\n[timeout] m6-cli 冒烟超时被杀` });
+			done({ code: -1, stdout, stderr: `${stderr}\n[timeout] cli 冒烟超时被杀` });
 		}, opts.timeoutMs ?? 120_000);
 		child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
 		child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
@@ -346,7 +346,7 @@ function runCli(script: string, args: string[], opts: { stdin?: string; timeoutM
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-	const root = mkdtempSync(join(tmpdir(), "tavernpi-m6-accept-"));
+	const root = mkdtempSync(join(tmpdir(), "tavernpi-accept-"));
 	const checks: Check[] = [];
 	let settings: Parameters<typeof createStoryRuntime>[0]["settings"];
 	let modelRuntime: Parameters<typeof createStoryRuntime>[0]["modelRuntime"];
@@ -678,17 +678,17 @@ async function main(): Promise<void> {
 			}
 		}
 
-		// B11b. 生存模式 /plot 报错（m6-cli 冒烟，无叙事）
+		// B11b. 生存模式 /plot 报错（cli 冒烟，无叙事）
 		{
 			const cliRoot = join(root, "cli-b11b");
 			mkdirSync(cliRoot, { recursive: true });
-			const r = await runCli(join(repoRoot, "packages/app/src/m6-cli.ts"), ["--root", cliRoot, "--mode", "survival"], {
+			const r = await runCli(join(repoRoot, "packages/app/src/cli.ts"), ["--root", cliRoot, "--mode", "survival"], {
 				stdin: "/plot 主角必须活下来\n\n",
 				timeoutMs: 60_000,
 			});
 			console.log(`[obs] B11b: exit=${r.code} /plot 输出含「该模式不可用」=${r.stdout.includes("该模式不可用")}`);
 			if (r.code !== 0) console.log(`[obs] B11b stderr: ${r.stderr.slice(0, 200)}`);
-			checks.push(check("B11b: m6-cli 生存模式 /plot 报错「该模式不可用」", r.code === 0 && r.stdout.includes("该模式不可用")));
+			checks.push(check("B11b: cli 生存模式 /plot 报错「该模式不可用」", r.code === 0 && r.stdout.includes("该模式不可用")));
 		}
 
 		// ================= C. 章节摘要 compaction + /swipe（真实 LLM） =================

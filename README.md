@@ -86,13 +86,13 @@ Prerequisites: Node.js ≥ 24, `npm install`, and a model key configured in pi's
 
 ```bash
 # Start a new story
-npm run m6:cli
+npm run cli
 
 # With a world pack and survival mode
-npm run m6:cli -- --pack ./my_world --mode survival
+npm run cli -- --pack ./my_world --mode survival
 
 # Continue an existing story (the CLI prints this command on exit)
-npm run m6:cli -- --resume <session file path>
+npm run cli -- --resume <session file path>
 ```
 
 CLI flags: `--pack <dir>` (repeatable) · `--mode creation|survival|adventure` · `--style <style>` · `--root <dir>` (story data directory, default `~/.tavernpi`).
@@ -176,7 +176,7 @@ packages/
 ├── core/     @tavernpi/core — the engine kernel
 │             turn pipeline · database layer · snapshots · subagent system · prompt layering
 │             pack loading · mode presets · view filtering · session assembly
-├── app/      CLI (npm run m6:cli) · acceptance scripts · exploratory verification artifacts
+├── app/      CLI (npm run cli) · acceptance scripts · exploratory verification artifacts
 ├── tools/    @tavernpi/tools — pack validation / skeleton / template CLI
 └── studio/   @tavernpi/studio — GUI shell (Electron, embedding the kernel in-process)
               S0 skeleton works; UI starts at S1
@@ -193,7 +193,7 @@ The kernel can be embedded in-process as a library: `@tavernpi/core` (CORE_VERSI
 ```bash
 npm test              # full-repo unit tests (node --test)
 npm run typecheck     # type checking (core / app / tools / studio)
-npm run m6:accept     # end-to-end acceptance (real LLM, requires auth.json)
+npm run accept     # end-to-end acceptance (real LLM, requires auth.json)
 ```
 
 For studio development, environment caveats, and acceptance evidence, see `packages/studio/README.md` and its `docs/`.

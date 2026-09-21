@@ -1,7 +1,7 @@
 // 中止桥单测（缺口 1：runTurn 的 AbortSignal）。
 // 层 1（纯 JVM，无需模型）：runWithAbort 四条语义逐条钉住 + 监听器生命周期。
 // 层 1.5（真实运行时，无模型）：runTurn 接已中止信号 → TurnAbortedError + DB/session 零痕迹。
-// 「中止发生在模型在飞期间」的端到端叙事收敛属 m6 acceptance（需真实 LLM），不在本文件。
+// 「中止发生在模型在飞期间」的端到端叙事收敛属 acceptance 脚本（需真实 LLM），不在本文件。
 
 import assert from "node:assert/strict";
 import { join } from "node:path";
@@ -194,7 +194,7 @@ test("runTurn：已中止的 signal → TurnAbortedError，且 turn_log/快照/s
 
 // 「不传 signal 时行为不变」由上面第一条 runWithAbort 用例覆盖（无 signal → 不挂监听器、不抛中止错）。
 // 刻意不再写「真跑一轮 runTurn」的用例：本机配了 auth.json，runTurn 会打真实模型（实测 9 秒 + 花钱），
-// 单测必须离线——真实一轮属 m6 acceptance 的职责。
+// 单测必须离线——真实一轮属 acceptance 脚本的职责。
 
 
 // ---------------------------------------------------------------------------

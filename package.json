@@ -22,9 +22,11 @@
     "spike:07": "node packages/app/spike/07-compaction.ts",
     "typecheck": "tsc -p packages/core/tsconfig.json && tsc -p packages/app/tsconfig.json && tsc -p packages/tools/tsconfig.json && tsc -p packages/studio/tsconfig.main.json && tsc -p packages/studio/tsconfig.renderer.json",
     "test": "node --test \"packages/core/test/**/*.test.ts\" \"packages/app/test/**/*.test.ts\" \"packages/tools/test/**/*.test.ts\" \"packages/studio/test/**/*.test.ts\"",
-    "m6:cli": "node packages/app/src/m6-cli.ts",
+    "cli": "node packages/app/src/cli.ts",
     "pack:check": "node packages/tools/src/cli.ts check",
-    "m6:accept": "node packages/app/acceptance/m6.ts"
+    "accept": "node packages/app/acceptance/accept.ts",
+    "m6:cli": "node packages/app/src/cli.ts",
+    "m6:accept": "node packages/app/acceptance/accept.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

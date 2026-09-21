@@ -908,7 +908,7 @@ export async function main(argv: readonly string[]): Promise<void> {
 		const sessionFile = ctx.opened.sessionManager.getSessionFile();
 		if (sessionFile !== undefined && existsSync(sessionFile)) {
 			ui.line(
-				ui.note(EN.resumeHint(`node packages/app/src/m6-cli.ts --resume ${sessionFile}`), "info"),
+				ui.note(EN.resumeHint(`node packages/app/src/cli.ts --resume ${sessionFile}`), "info"),
 			);
 		}
 	}
