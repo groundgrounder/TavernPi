@@ -1,99 +1,216 @@
+<div align="center">
+
+**English** · [中文](README.zh-CN.md)
+
+</div>
+
 # tavernpi
 
-故事引擎 harness——把 pi coding agent 的「编码 agent harness」范式平移到互动叙事领域。基于 pi SDK（`@earendil-works/pi-coding-agent`，npm 依赖不 fork）二次创作：一个主叙事 session 执笔，story/npc/data/stylize 四类 subagent 流水线协作，一切长期记忆落 SQLite（**对话历史是草稿，数据库才是事实**）。
+**A story engine whose memory is a database.**
 
-- **当前状态**：**v0.1.0**（M0–M6 全部验收通过：故事 DB / data / npc / story+stylize / 卡包系统 / 模式与体验）
-- **内核对外 API**：`@tavernpi/core`（CORE_VERSION 0.1.0）
+A writer inputs a character's actions and dialogue; tavernpi writes the following narrative and records everything that happened: who was present, who said what, how much time passed, where the character went, and which relationships changed.
 
-## 快速开始
+Most LLM writing tools keep their memory in the chat log. tavernpi extracts facts from the narrative text after every turn and writes them into SQLite. **The chat log is a draft; the database is the truth.** Any node can therefore be rewound, replayed, or branched from, and a wrong turn does not force a restart.
 
-前置：Node.js ≥ 24；`npm install`；pi 的 `auth.json` 配好模型 key（验收用 deepseek-v4-flash）。
+Current version: **v0.1.0**.
+
+---
+
+## What tavernpi solves
+
+Writing long-form stories with an LLM usually runs into three problems:
+
+1. **Amnesia**: by turn 50 the model has forgotten where the protagonist lives or who they fell out with. The context window cannot hold it all, and cramming more in dilutes what is already there.
+2. **Drift**: a setting the model invents on the spot ("your sister actually died long ago") has no mechanism to stop it, and the world gradually departs from what was established.
+3. **No way back**: once a turning point is written badly, the chat log offers no undo. The only options are deleting and starting over, or living with it.
+
+How tavernpi responds:
+
+| Problem | Response |
+|---|---|
+| Amnesia | Long-term memory lives in SQLite. Each turn recalls only the relevant facts into context; the full history need not be carried |
+| Drift | A dedicated subagent **extracts** facts from the narrative text and writes them to the database; the narrative model cannot change settings directly, and what it writes becomes fact only after validation |
+| No way back | A database snapshot is taken at the end of every turn. Rewind, reroll, and branch all restore from snapshots, so world state moves with them |
+
+---
+
+## How a turn happens
+
+A single line of input triggers a pipeline rather than a single model call:
+
+```
+input
+  ↓
+① Scene analysis    read what happened this turn and which settings to recall
+  ↓
+② World injection   pull relevant people, places, and events from the database, alongside pack settings
+  ↓
+③ NPC rehearsal     characters present each project their reaction (in parallel); absent ones simulate what they are doing elsewhere
+  ↓
+④ Narration         write this turn's prose
+  ↓
+⑤ Stylize (optional)  change style only; touch no facts
+  ↓
+⑥ Fact extraction   pull state changes out of the prose and write them to the database ← the only place that can write
+  ↓
+⑦ Snapshot          archive the database state at the end of the turn
+```
+
+A few key design points:
+
+- **The narrative model has no database write access.** Its tool list is empty, so the only way to change the world is through prose, and that prose becomes durable only after the independent extraction in step ⑥.
+- **Step ⑥ is the sole writer.** A failed extraction skips the snapshot and the unrecorded content is reconciled on the next turn, so there is no silent inconsistency where prose was written but the world did not record it.
+- **Snapshots are bound to the end of the turn**, so rewinding to turn N restores exactly the state at the end of turn N, and redoing that turn does not record its events twice.
+
+---
+
+## Three play modes
+
+One engine, three stances. Modes are **enforced at the kernel level**, not by UI toggles, so bypassing the interface grants no extra access.
+
+| | **Creation** | **Survival** | **Adventure** |
+|---|---|---|---|
+| Stance | Novel writing assistance | Immersive roleplay | Immersive roleplay + fog of information |
+| Input | Character actions + **plot outline directives** | Character actions/dialogue only | As survival, and stricter |
+| World visibility | Fully transparent | Fully transparent | **Limited to what the character has experienced** |
+| Engine | story/npc/stylize can be disabled | Only stylize can be disabled | All forced on |
+| Mode switch | ↔ Survival, anytime | ↔ Creation, anytime | **Chosen at creation, then locked** |
+
+Adventure mode's database query layer filters by relevance to the character: unrelated events never enter the context, and characters never encountered do not appear in query results. This fog of information is implemented in the query layer, so it does not rely on prompts to constrain model output.
+
+---
+
+## Getting started
+
+Prerequisites: Node.js ≥ 24, `npm install`, and a model key configured in pi's `auth.json`.
 
 ```bash
-# 开新故事（无卡包、默认创造模式）
+# Start a new story
 npm run m6:cli
 
-# 带卡包 + 生存模式
+# With a world pack and survival mode
 npm run m6:cli -- --pack ./my_world --mode survival
 
-# 续写（每次退出时 CLI 会打印这行命令）
-npm run m6:cli -- --resume <session 文件路径>
+# Continue an existing story (the CLI prints this command on exit)
+npm run m6:cli -- --resume <session file path>
 ```
 
-CLI 参数：`--pack <目录>`（可重复）· `--mode creation|survival|adventure`（仅创建时有效，冒险选定后锁定）· `--style <文风>`（开 stylize 润色）· `--root <目录>`（故事数据目录，默认 `~/.tavernpi`）。
+CLI flags: `--pack <dir>` (repeatable) · `--mode creation|survival|adventure` · `--style <style>` · `--root <dir>` (story data directory, default `~/.tavernpi`).
 
-玩法：直接输入角色行动/对话回车即一轮叙事。命令一览（`/help` 有完整版）：
+Once inside, **enter a character's action or dialogue and press Return to produce a turn**. An empty line exits.
 
-| 命令 | 作用 |
+### Commands
+
+| Command | Purpose |
 |---|---|
-| `/tree` `/tree <序号>` | 故事树浏览 / 跳节点回溯（DB 与时钟随快照恢复） |
-| `/swipe` | 重骰最后一轮（旧稿留树） |
-| `/fork <序号>` | 从节点分叉新故事（模式与锁定继承） |
-| `/status` | 状态面板（时间/位置/NPC 卡） |
-| `/mode <模式>` | 切换模式（创造↔生存；冒险锁定） |
-| `/plot <大纲>` | 剧情大纲指令（仅创造模式） |
-| `/! <输入>` | 强制提交被拦的输入（生存/冒险，留痕 warning） |
-| `/assist <问题>` | 带外顾问（不进叙事流；冒险模式只知玩家该知道的） |
-| `/compact` | 手动章节摘要（保留伏笔/在场 NPC/阶段目标） |
+| `/tree` `/tree <n>` | View the story tree / jump to entry n (world state is restored with it) |
+| `/fork <n>` | Branch a new storyline from entry n |
+| `/swipe` | Reroll the last turn (the old draft stays on the tree) |
+| `/status` | Status panel: time, location, mode, characters present |
+| `/mode [mode]` | View / switch mode |
+| `/plot <outline>` | Write a plot outline to steer later turns (creation mode only) |
+| `/compact` | Generate a chapter summary and compress the session |
+| `/assist <question>` | Side-channel advisor: ask a question without affecting the story |
+| `/packs` `/packs add\|remove` | View / mount and unmount world packs |
+| `/pin` `/unpin` `/reload` | Pin an entry (injected every turn) / unpin / reload packs |
+| `/agents` `/models` `/prompt` | Subagent toggles / per-role models / prompt layers |
+| `/write <file>` | Write to the database directly via a changeset file |
+| `/! <input>` | Force-submit an input that was rejected (recorded) |
+| `/help` | Full help |
 
-## 三个内置模式
+> In survival and adventure modes, input must be something the character can do. Inputs that force the plot forward (such as "I order the guard to open the gate") are rejected; the `/!` prefix force-submits them and the engine records the override.
 
-| | 创造 | 生存 | 冒险 |
-|---|---|---|---|
-| 定位 | 小说创作辅助 | 高代入 RP（世界透明） | 高代入 RP（信息迷雾） |
-| 输入 | 行动/对话 + 剧情大纲指令 | 仅 user 角色行动/对话 | 同生存，且 DB 查看仅「与 user 相关」 |
-| subagent | story/npc/stylize 可关 | 仅 stylize 可关 | 全部强制开 |
-| 切换 | ↔ 生存随时互切 | ↔ 创造 | 创建时选定后锁定 |
+---
 
-## 创建卡包（世界包）
+## World packs
 
-一个世界包 = 一部作品的完整设定（设定集 YAML + SQL + 可选代码），纯内容包零代码：
+**A world pack is the complete setting for one work.** It is an ordinary directory, pure content, zero code:
+
+```
+my_world/
+├── package.json        # package name doubles as the namespace prefix
+├── story.yaml          # title, calendar, opening, default style
+├── collection/         # setting entries: one file per entry, filename is the entry id
+│   ├── characters/     #   characters (protagonists and NPCs share one shape)
+│   ├── locations/      #   places (optional hierarchy and coordinates, used for maps and distance reasoning)
+│   ├── objects/        #   key items
+│   ├── factions/       #   factions and organizations
+│   └── plot/           #   plotlines
+├── prompts/            # optional: override any subagent's prompt
+└── db/
+    ├── schema.sql      # custom tables
+    └── seed.sql        # seed data
+```
+
+**SQL is a first-class authoring interface.** A table for "affinity" can be created directly, with no need to wait for engine support:
+
+```sql
+CREATE TABLE IF NOT EXISTS my_world_char_status (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  npc_ref TEXT NOT NULL,
+  favor INTEGER NOT NULL DEFAULT 0,  -- favor: -100~100, typically 0 on first meeting
+  turn_seq INTEGER NOT NULL
+);
+```
+
+Field comments serve as the extraction stage's instructions. State changes produced by each subsequent turn are written into this table automatically.
+
+Toolchain:
 
 ```bash
-node packages/tools/src/cli.ts init ./my_world     # 生成骨架
-node packages/tools/src/cli.ts check ./my_world    # 全量校验 + 内存库试跑 SQL
-node packages/tools/src/cli.ts templates           # SQL 表模板库（可抄改）
+node packages/tools/src/cli.ts init ./my_world     # generate a skeleton
+node packages/tools/src/cli.ts check ./my_world    # full validation + SQL trial run on an in-memory database
+node packages/tools/src/cli.ts templates           # built-in SQL templates (character status / inventory / quest progress)
 ```
 
-卡作者文档：`packages/tools/README.md`；活例子：`packages/app/acceptance/fixtures/shouling/`。
+`check` executes the schema and data against a clean in-memory database and verifies idempotency, catching SQL errors, broken references, and missing table prefixes **before the story begins**. A single typo in a pack does not ruin a long story.
 
-## 仓库结构
+Pack author documentation: `packages/tools/README.md`. Complete example: `packages/app/acceptance/fixtures/shouling/`.
+
+---
+
+## Repository layout
 
 ```
 packages/
-├── core/   # @tavernpi/core：turn pipeline 编排 + DB 层 + 快照 + subagent 体系
-│           # + 提示词分层 + 卡包加载 + 模式预设/视图过滤 + assist + 会话装配（openStory/forkFrom）
-│           # + 中止桥 + 对外 API
-├── app/    # CLI（m6:cli）+ 验收脚本（acceptance/m6.ts）+ spike 工件
-├── tools/  # @tavernpi/tools：卡包校验/骨架/模板 CLI
-└── studio/ # @tavernpi/studio：GUI 外壳（Electron 同进程嵌入内核）——当前是骨架，未接 UI
-            # 契约层 + IPC 通道 + 边界判据；规划与考察见其 docs/
+├── core/     @tavernpi/core — the engine kernel
+│             turn pipeline · database layer · snapshots · subagent system · prompt layering
+│             pack loading · mode presets · view filtering · session assembly
+├── app/      CLI (npm run m6:cli) · acceptance scripts · exploratory verification artifacts
+├── tools/    @tavernpi/tools — pack validation / skeleton / template CLI
+└── studio/   @tavernpi/studio — GUI shell (Electron, embedding the kernel in-process)
+              S0 skeleton works; UI starts at S1
 ```
 
-## 开发
+**The kernel/shell boundary is a hard constraint**: all story engine logic (pipeline, subagents, snapshots, validation, modes) lives in `core/`. The interface layer only presents; it implements no engine logic. Bypassing modes from the UI is architecturally impossible because filtering and validation sit in the query layer. This boundary is pinned down by automated tests that scan the source, making it a machine-checked criterion.
+
+The kernel can be embedded in-process as a library: `@tavernpi/core` (CORE_VERSION 0.1.0). The narrowing principle for the public API is documented in the header comment of `packages/core/src/index.ts`.
+
+---
+
+## Development
 
 ```bash
-npm test              # core / app / studio 单测（node --test）
-npm run typecheck     # core + app + tools + studio（main / renderer 两份配置）
-npm run m6:accept     # 故事驱动验收（真实 LLM，需 auth.json）
+npm test              # full-repo unit tests (node --test)
+npm run typecheck     # type checking (core / app / tools / studio)
+npm run m6:accept     # end-to-end acceptance (real LLM, requires auth.json)
 ```
 
-内核对外 API 的分组与收窄原则见 `packages/core/src/index.ts` 头部注释；studio 对内核的依赖契约
-（channel 面、渲染边界、装配 API）见 `packages/studio/README.md` 与其 `docs/`。
+For studio development, environment caveats, and acceptance evidence, see `packages/studio/README.md` and its `docs/`.
 
-里程碑交付状态与验收证据见 `packages/app/acceptance/m6.ts`（自断言脚本，需真实 LLM）。
+---
 
-## 许可证
+## License
 
-**GPL-3.0-or-later**（GNU General Public License v3.0 或更高版本），全文见 `LICENSE`；各包 `package.json` 的 `license` 字段同此。
+**GPL-3.0-or-later** — full text in [`LICENSE`](LICENSE).
 
 ```
 Copyright (C) 2026 groundgrounder
-本程序是自由软件：你可以依据自由软件基金会发布的 GNU 通用公共许可证（第 3 版或任意更高版本）条款
-重新发布和/或修改它。本程序不提供任何担保，亦不承诺适用于特定用途——详见 `LICENSE`。
+This program is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, either version 3 of
+the License, or (at your option) any later version. This program is distributed in the hope that
+it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. See `LICENSE` for details.
 ```
 
-- **为何是 v3 而非 v2**：依赖树与本许可证兼容——pi SDK 全系 MIT，其余为 MIT / Apache-2.0 / BSD-3-Clause / ISC / 0BSD / BlueOak-1.0.0；其中 **Apache-2.0 与 GPLv2 不兼容**，故取 GPLv3。
-- **历史**：更早的版本曾以 MIT 发布。已发出的授权不可撤回——那些版本对已获得副本者仍永久适用 MIT；GPL 自本变更起适用于其后的版本。
-- **分发布局注意**：`@tavernpi/core` 是可供同进程嵌入的库（如 tavern studio）。按 GPLv3 第 5 条，分发基于本项目的作品（例如把内核嵌进某个 GUI 外壳并分发二进制）时，整个作品须以 GPLv3 兼容条款发布并提供对应源码。相关约束已记入 `packages/studio/docs/创作规划.md`。
-
+Note: `@tavernpi/core` is meant for in-process embedding. Distributing a work that embeds it (e.g. a GUI shell shipped as a binary) requires that work to be GPLv3-compatible.
